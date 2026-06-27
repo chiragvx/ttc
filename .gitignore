@@ -21,8 +21,10 @@ dist/
 *.frd
 *.inp
 
-# node (future frontend)
+# node / frontend
 node_modules/
+dist/
+*.tsbuildinfo
 
 # OS
 .DS_Store
