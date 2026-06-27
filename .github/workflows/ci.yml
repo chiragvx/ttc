@@ -31,7 +31,7 @@ jobs:
       - name: Toolchain fingerprint (host)
         run: python scripts/toolchain_fingerprint.py --json
       - name: Pure-Python tests (no kernel)
-        run: pytest -q -ra -m "not needs_kernel"
+        run: pytest -q -ra -m "not needs_kernel and not live"
 
   kernel:
     name: Kernel + solver (determinism gate, Spike 4 smoke)
@@ -55,3 +55,22 @@ jobs:
           docker run --rm gtc-dev sh -c '\
             ccx 2>&1 | head -1; \
             python -c "import gmsh; print(\"gmsh\", gmsh.__version__)"'
+
+  live-smoke:
+    name: Live LLM smoke (OpenRouter)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Live delta-emitter smoke (skips if the secret is unset)
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        # Add the repo secret OPENROUTER_API_KEY to actually exercise the live model;
+        # without it the test skips and this job stays green.
+        run: pytest -q -ra -m live

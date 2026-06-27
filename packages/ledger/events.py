@@ -29,11 +29,13 @@ class EventKind(str, Enum):
     PARAMETER_MUTATION = "PARAMETER_MUTATION"
     REVIEW_SIGNOFF = "REVIEW_SIGNOFF"
     NL_INTENT = "NL_INTENT"
+    USAGE = "USAGE"            # cost/token/compute accounting (recorded, no state change)
     DERIVATION = "DERIVATION"
 
 
 FACT_KINDS = {
-    EventKind.GENESIS, EventKind.PARAMETER_MUTATION, EventKind.REVIEW_SIGNOFF, EventKind.NL_INTENT,
+    EventKind.GENESIS, EventKind.PARAMETER_MUTATION, EventKind.REVIEW_SIGNOFF,
+    EventKind.NL_INTENT, EventKind.USAGE,
 }
 
 GENESIS_PREV = "0" * 64
@@ -124,6 +126,9 @@ class BaseEventLog(ABC):
     def append_nl_intent(self, text: str, actor: str, ts: str) -> Event:
         return self._append(EventKind.NL_INTENT, {"text": text}, actor, ts)
 
+    def append_usage(self, usage: dict, actor: str, ts: str) -> Event:
+        return self._append(EventKind.USAGE, usage, actor, ts)
+
     def append_derivation(self, artifact_kind: str, content: bytes, fingerprint: str, actor: str, ts: str) -> Event:
         sha = hashlib.sha256(content).hexdigest()
         self._put_artifact(sha, content)
@@ -177,3 +182,10 @@ class EventLog(BaseEventLog):
 
     def _get_artifact(self, sha256: str) -> bytes | None:
         return self._artifacts.get(sha256)
+
+    def clone(self) -> "EventLog":
+        """Copy-on-write fork: shares prior history, then diverges independently."""
+        c = EventLog()
+        c._events = list(self._events)
+        c._artifacts = dict(self._artifacts)
+        return c

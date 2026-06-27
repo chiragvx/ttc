@@ -36,6 +36,7 @@ testpaths = ["tests"]
 markers = [
     "needs_kernel: requires build123d + OCCT (Linux dev container) — skipped on the Windows dev box",
     "needs_solver: requires CalculiX (ccx) + gmsh — Linux container only",
+    "live: hits a real external API (OpenRouter) — skipped unless OPENROUTER_API_KEY is set",
 ]
 filterwarnings = [
     # build123d emits DeprecationWarnings for some deprecated objects at import time — not ours.
