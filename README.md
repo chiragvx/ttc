@@ -20,9 +20,16 @@ An AI-guided, conversational CAD platform that turns natural-language design int
 
 ```bash
 python -m pip install -e ".[dev]"   # pure-Python backbone deps
-python -m pytest -q                  # 58 passed, 9 skipped (kernel/solver tests skip without the image)
-docker run --rm gtc-dev python -m pytest -q   # 67 passed (full: + determinism, FS, sandbox, robustness)
+python -m pytest -q                  # backbone tests (kernel/solver tests skip without the image)
+docker run --rm gtc-dev python -m pytest -q   # full suite (+ determinism, FS, sandbox, robustness)
+
+# try the runtime CLI (uses the mock provider; set OPENROUTER_API_KEY for the real DeepSeek emitter)
+python -m packages.cli propose "make the skin 3 mm"
+python -m packages.cli status
 ```
+
+The runtime LLM is **OpenRouter** (default model `deepseek/deepseek-chat`) — copy `.env.example` to
+`.env` and set `OPENROUTER_API_KEY`. Without a key the offline mock provider is used.
 
 Target runtime is Python 3.12; the local floor is 3.10. The kernel/solver/sandbox stack
 (build123d, OCCT, Gmsh, CalculiX, Firecracker/gVisor) is **Linux-only** and lives behind the Truth
