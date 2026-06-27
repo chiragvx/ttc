@@ -1,0 +1,21 @@
+{
+  "name": "grounded-text-to-cad (linux kernel+solver)",
+  "build": {
+    "dockerfile": "../docker/Dockerfile.dev",
+    "context": ".."
+  },
+  "runArgs": ["--init"],
+  "containerEnv": {
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python", "charliermarsh.ruff"],
+      "settings": {
+        "python.testing.pytestEnabled": true
+      }
+    }
+  },
+  "postCreateCommand": "python -m pytest -q -ra || true"
+}

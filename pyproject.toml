@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grounded-text-to-cad"
+version = "0.0.0"
+description = "Grounded two-plane conversational CAD — Phase 0 skeleton"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.7",
+    "jinja2>=3.1",
+    "fastapi>=0.110",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.4",
+    "httpx>=0.27",
+]
+# build123d / gmsh / CalculiX are NOT pip deps here — they live only in the Linux kernel image
+# (constraints/kernel-linux.txt). The pure-Python backbone must import without them.
+
+# Note: target runtime is 3.12 (see CLAUDE.md); 3.10 floor keeps the local Windows dev box runnable.
+# The kernel/solver/sandbox stack (build123d, OCCT, Gmsh, CalculiX, Firecracker/gVisor) is Linux-only
+# and lives behind the Truth Plane — see build-plan/PHASE_0.md §3c for the Linux dev container.
+
+[tool.setuptools.packages.find]
+# Only the application packages (avoids flat-layout auto-discovery choking on tests/scripts/docker).
+include = ["packages*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+    "needs_kernel: requires build123d + OCCT (Linux dev container) — skipped on the Windows dev box",
+    "needs_solver: requires CalculiX (ccx) + gmsh — Linux container only",
+]
+filterwarnings = [
+    # build123d emits DeprecationWarnings for some deprecated objects at import time — not ours.
+    "ignore::DeprecationWarning:build123d",
+    # starlette TestClient nudging httpx2 — third-party, not actionable here.
+    "ignore::UserWarning:starlette.testclient",
+    "ignore:.*httpx.*starlette.testclient.*:Warning",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100

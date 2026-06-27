@@ -1,0 +1,45 @@
+# Canonical Linux dev / CI image — the determinism-fingerprint reference environment.
+#
+# Purpose (Phase 0 §3c): give us (1) a reproducible toolchain so golden geometry hashes mean
+# something, and (2) the Linux substrate that build123d/OCCT, Gmsh, CalculiX, and the
+# Firecracker/gVisor sandbox all require but the Windows dev box cannot provide.
+#
+# Target runtime is Python 3.12 (see /CLAUDE.md). Kernel libs are pinned to match the Windows box so
+# the first cross-platform determinism comparison isolates OS/arch — see docker/README.md.
+
+FROM python:3.12-slim-bookworm
+
+# --- system libraries OCCT/Gmsh need even headless, plus the CalculiX FEA solver (binary: ccx) ---
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        calculix-ccx \
+        ca-certificates \
+        libgomp1 \
+        libgl1 libglu1-mesa libfontconfig1 \
+        libx11-6 libxext6 libxrender1 libxfixes3 libxcursor1 libxinerama1 \
+        libxft2 libxrandr2 libxi6 libxmu6 libsm6 libice6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- determinism: pin BLAS/OMP to single thread so tessellation/solve hashes are reproducible ---
+#     (the determinism-vs-latency tension, risk R6: single-thread here is for the GATE, not prod.)
+ENV OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    PYTHONHASHSEED=0 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# Pinned toolchain first (better layer caching; changes here are deliberate rebaseline events).
+COPY constraints/kernel-linux.txt constraints/kernel-linux.txt
+RUN pip install --upgrade pip && pip install -r constraints/kernel-linux.txt
+
+# Project sources + editable install with dev extras (pydantic/jinja2/fastapi + pytest/ruff/httpx).
+COPY . .
+RUN pip install -e ".[dev]"
+
+# Sanity: prove the solver + kernel are actually present at build time (fail the build if not).
+RUN ccx -v 2>/dev/null | head -1 || ccx 2>&1 | head -1 ; \
+    python -c "import build123d, gmsh; print('build123d', build123d.__version__, '| gmsh', gmsh.__version__)"
+
+CMD ["python", "-m", "pytest", "-q", "-ra"]

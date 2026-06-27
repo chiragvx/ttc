@@ -1,0 +1,99 @@
+{
+  "overlooked": [
+    {
+      "title": "The keystone identity spike runs in days 0-30, but the OCCT specialist who must own it is the longest-lead hire and will not be on staff yet",
+      "detail": "Rec 'Spike #1 FIRST' is pure OCAF/TNaming + OCP/build123d identity work — explicitly the #1 'Claude struggle zone' the plan says to wall off behind a specialist. Yet the hiring rec concedes the OCCT engineer is 'the longest-lead, rarest hire on the board' and says only to OPEN the search now. So the single STOP-the-company spike is scheduled to run before the only person qualified to judge its kill-criteria exists. In practice either generalists+Claude run the keystone spike in exactly the zone where Claude ships confident code against phantom OCP APIs, or the spike slips months until the hire lands — and the whole 'decide Python-vs-C++ on day 5' premise collapses. No rec resolves this dependency."
+    },
+    {
+      "title": "The identity kill-criteria assume a re-binding oracle that is itself the unsolved problem",
+      "detail": "Spike #1's gate ('>5% of bindings silently re-bind to the WRONG sub-shape = Python path DEAD') requires knowing, for each of 80-120 adversarial regens, which face is the geometrically-CORRECT binding after a topology change. If you had a reliable oracle for correct re-binding you would use it AS the naming layer. Absent that, scoring the spike requires manual human annotation of every face-split/edge-merge case — which the same rec lists as a FAILURE condition ('cannot be disambiguated without manual annotation'). The spike may be unable to score itself without doing the manual work that constitutes its own kill signal. Nobody owns building the ground-truth oracle."
+    },
+    {
+      "title": "Review throughput, not code generation, is the binding constraint — and it lands on the two scarcest humans",
+      "detail": "The plan fans out subagent fleets (one agent per solver, one per ~8 missing subsystems, /workflows sweeps, template libraries) generating large volumes of geometry and FEA code. But every line on the safety path must be reviewed by the ONE OCCT engineer and the ONE (fractional) FEA engineer, because those are precisely the zones where AI code is 'plausible but wrong' and passes visual inspection. Reviewing AI-authored numerical/kernel code you did not write is often slower and more error-prone than writing it. The '5-6 people vs 12-15' velocity claim silently assumes review is free; it instead concentrates a serial review bottleneck on the two least-replaceable people, who are also writing the golden cases and doing the physical calibration."
+    },
+    {
+      "title": "OCP-introspection MCP gives signatures, not OCAF semantics — the actual hard part",
+      "detail": "Rec proposes an MCP that introspects the installed OCP module so Claude grounds against real symbols. But the difficulty of OCAF/TNaming is not 'does TNaming_Builder.Generated exist' — it is the correct sequencing of Generated/Modified/Delete calls, label/attribute lifecycle, and selection/recompute semantics, which is deep tribal knowledge poorly documented even for human C++ experts. Introspection cannot supply that. Worse: the plan also states OCP's pybind11 surface for OCAF is INCOMPLETE, so the MCP will mostly reveal that the needed symbols are absent — confirming the escalation to C++/Rust FFI, the zone Claude is worst at, making the MCP investment largely wasted on the path being abandoned."
+    },
+    {
+      "title": "Integration heisenbugs live at seams no Pydantic contract or single context window can see",
+      "detail": "The architecture spans Python monolith, C++ OCCT, Firecracker microVM (Linux/KVM), five vendored solver binaries, Postgres event store, Redis, MessagePack/Draco-glTF transport, and r3f. Typed seams catch shape mismatches, not the bugs that actually bite: a CalculiX non-convergence that returns a plausible number, a BRepMesh thread race appearing only under load, microVM snapshot-restore corrupting OCCT memory state, float-precision drift across MessagePack/glTF, BLAS-thread nondeterminism. These are cross-process and span exactly Claude's three struggle zones at once; no subagent's context window or test fixture observes the whole failure. The plan assigns specialists to single domains but names no owner for cross-seam debugging — the most expensive work in a polyglot system."
+    },
+    {
+      "title": "Conversation-eval golden data is circular and unbootstrapped — no real corpus exists",
+      "detail": "The golden-conversation evals (NL intent -> expected propose_parameter_delta, plus expected request_clarification on '6S'/'2 inch'/'make it stronger') require authoring the EXPECTED deltas by hand. There is no existing corpus of aerospace/hardware design-intent -> parameter-delta pairs. The solver-driver rec correctly forbids Claude from setting its own physics golden values, but the conversation-eval recs let Claude both generate the golden conversations AND grade them via LLM-as-judge — the same circularity, unflagged. Who validates that 'thin the low-stress ribs 0.3mm' SHOULD map to that exact delta on that exact tag? A domain expert — the same bottleneck, now also gating every prompt/model bump and the air-gapped port acceptance."
+    },
+    {
+      "title": "Determinism pin (OMP_NUM_THREADS=1) trades reproducibility for wall-clock that the latency tiers can't afford",
+      "detail": "The golden-artifact and replay-purity recs force single-threaded execution (BLAS thread count pinned, OMP_NUM_THREADS=1) to get byte-identical B-rep/mesh hashes. But Gmsh meshing and CalculiX solves of large parts single-threaded can be wall-clock prohibitive, and the Tier-1 'regen in 1-5s on a warm worker' budget assumes parallel kernel work. The plan never reconciles 'pinned single-thread for determinism' with 'fast enough to feel interactive' — these are in direct tension and the determinism rec and the latency rec were written as if independent."
+    },
+    {
+      "title": "Dev environment is Windows; the entire sandbox/determinism/solver substrate is Linux-only",
+      "detail": "The operator's environment is win32. Firecracker requires Linux+KVM; gVisor is Linux; the hermetic solver container, the 'run it locally in a gVisor sandbox' first-steps, and the CI determinism image are all Linux. Several spike 'concrete_first_step' instructions ('render+execute in a gVisor sandbox locally') are not runnable as written on the team's actual machines without a Linux VM/WSL2 layer that itself perturbs the determinism fingerprint. No rec addresses the dev/CI/prod-OS substrate or its effect on the toolchain fingerprint."
+    },
+    {
+      "title": "Spikes are presented as parallel but share parts and people and have hidden ordering",
+      "detail": "Spike #1 (identity on the knuckle) and Spike #4 (FS round-trip on the knuckle) both need a working build123d generator for the SAME part, and #4 meshes the geometry #1 produces — they are coupled, not parallel. With two specialist roles unfilled, 'five parallel spikes in 30 days' is really ~3 generalists context-switching across five hard spikes plus authoring five kill-criteria docs, the schema, the repo scaffold, and the CLAUDE.md fleet. The 30-day gate review at day ~25 has almost no slack for the re-runs that real spikes require."
+    },
+    {
+      "title": "Hard research problems rarely return a clean PASS/STOP — the binary-gate governance has no path for the likely outcome",
+      "detail": "The whole spike-governance rec assumes each gate resolves to PASS / FALLBACK / STOP at day ~25. The realistic outcome of an identity or meshing spike is 'works on 88% of cases, fails ambiguously on the rest, unclear if fixable with more effort' — neither a clean kill nor a clean pass. The rec provides no decision procedure for the ambiguous middle, which is where these spikes actually land, and 'rationalize the limping result forward' (the exact failure the written gates were meant to prevent) is most tempting precisely there."
+    },
+    {
+      "title": "The AI-orchestration process itself needs human babysitting that consumes the scarce engineers",
+      "detail": "The plan leans on subagent fleets, /workflows fan-outs, EnterWorktree isolation, multiple MCP servers, hooks, and plan-mode at a scale unproven for a multi-month safety-critical build. Orchestrating dozens of subagents has its own failure modes — context loss, half-finished scaffolds, divergent edits to the SHARED ParameterDef/ledger schema (the one contract every parallel agent touches, which is exactly where 'no merge conflicts because typed seams' breaks down), and silent drift. Reconciling and integrating N independently-scaffolded subsystems is serial human work. This meta-overhead is unbudgeted and falls on the same 2-3 generalists."
+    },
+    {
+      "title": "FDM physical-calibration correlation is a stochastic-process problem the linear-static stack can't tightly predict",
+      "detail": "The 'PASSES-A-REAL-LOAD-TEST' moat depends on correlating linear-static CalculiX FS to physical FDM-printed failure within a few percent. FDM strength is dominated by layer-adhesion, void content, print-orientation, moisture, and inter-machine variance; measured-vs-predicted scatter on printed parts is routinely 20-40%, not 3%, even with anisotropy knockdowns. A single fixed knockdown factor cannot capture per-print stochasticity. The proof-point ladder treats this as a wiring exercise; it is a metrology and process-control research problem, and the chosen hero artifact (a load-bearing bracket) is one of the harder FDM cases to predict."
+    }
+  ],
+  "overoptimistic": [
+    {
+      "claim": "A Claude-augmented generalist team builds the full vertical thin-slice in ~8-10 weeks (and a credible solver-backed MVP in 12-16 weeks), vs a quarter-plus traditionally",
+      "reality": "Even the plan's own judge scorecard penalized exactly this: it calls a 12-16 week MVP that includes Gmsh+CalculiX FS/buckling/modal, flutter, segmented-joint FEA, surrogate training, and NSGA-II 'not credible' and 'the one place [the plan] papers over risk,' while the other approaches honestly say 9-12 months. Claude accelerates the Python/FastAPI/React/Jinja bulk — but the critical path is the OCAF identity bet and FEA correctness, the two things Claude explicitly does NOT accelerate. By Amdahl's law, speeding the non-bottleneck (already maybe 40-50% of effort) barely moves the date; the schedule is gated by the slow, human-reviewed, specialist-owned 50%."
+    },
+    {
+      "claim": "Forced tool_choice + strict tool use + a red-team eval corpus PROVES the delta schema cannot be coerced into emitting free code",
+      "detail not used": "",
+      "reality": "Forced/strict tool use is a strong STRUCTURAL guarantee that output validates against the schema — but it does not prove the system is uncoercible. A finite red-team corpus cannot prove a negative; it can only fail to find an exploit. Prompt-injection via poisoned airfoil .dat strings, the rules-router's own clamp logic, the retrieval/grounding path, and the manual tool-loop glue all remain attackable surfaces the schema constraint never touches. 'Run it as a repeatable eval, not a one-off' is good practice; 'PROVE it cannot be coerced' overstates what evals deliver."
+    },
+    {
+      "claim": "Warm Firecracker snapshot-restore keeps interactive regen under ~250ms, and that is why regen stays in seconds not tens of seconds",
+      "reality": "Firecracker boots ~125ms bare, but restoring a snapshot carrying a large Python+OCCT memory footprint plus re-attaching geometry kernel state, then running an OCCT boolean the plan itself bounds at '100ms-seconds,' cannot reliably fit 250ms. The plan's own Tier-1 text concedes multi-feature/global edits are 1-5s and only an 'isolated local feature branch' approaches 150ms. The 250ms warm-restore budget and the 'booleans are slow' admission are internally inconsistent; the sandbox-containment kill-criterion (warm-restore >250ms = nothing ships) may itself trip on realistic model state."
+    },
+    {
+      "claim": "Cost-per-design is a token-economics story — 'a $200 fixture design costs cents of LLM tokens plus minutes of solver compute' — solved by prompt caching and model tiering",
+      "reality": "The plan's own human-in-the-loop FSM REQUIRES a licensed-engineer sign-off (engineer_reviewed event) before any geometry commit or export. That PE review labor — not tokens — is the dominant and non-scaling per-design cost, and it does not get cheaper with cache_read at 0.1x. Framing unit economics as cents-of-tokens omits the load-bearing human cost the safety architecture mandates, making the seed-deck per-design number misleading exactly where investors will probe."
+    },
+    {
+      "claim": "The ITAR air-gapped SKU is a 'contained, measured port': same contract, swap to vLLM open weights with xgrammar guided decoding, 're-run the same evals to quantify the gap'",
+      "reality": "Guided decoding reproduces schema SHAPE, not judgment. The hard, safety-relevant behavior is the ambiguity/clarification call ('6S'/'2 inch'/'make it stronger' -> request_clarification vs a wrong HARD_LOCK), which open 70B models routinely regress on. If Qwen/Llama fails the ambiguity evals, you don't have a measured gap to close — you have a research project, on your highest-value, highest-scrutiny customers. The provider seam is genuinely cheap; the model-quality risk is not, and 'quantify the gap' quietly assumes the gap is closeable."
+    },
+    {
+      "claim": "The bracket/fixture wedge proves all 6 core technical claims while DEFERRING the hard identity problem, because generator-baked tags handle the common case",
+      "reality": "The wedge's own hero parts — a motor-mount bracket with a bolt pattern and a slip-fit boss, fastener pockets, slip-fit cutouts — are built by booleaning operations INTO template-authored faces, which is precisely the face-split/edge-merge case the identity rec flags as where generator tags go ambiguous and the geometric-signature backstop is only heuristic. So the wedge does NOT defer the keystone risk; it exercises it on day one. Claiming the tractable wedge sidesteps topological naming is partly false."
+    },
+    {
+      "claim": "Three existential risks 'collapse into one root cause: there was never a load-bearing contract,' so writing the hardened Pydantic schema first converts 'is this correct?' from judgment into a CI result",
+      "reality": "additionalProperties:false and a reusable ParameterDef prevent SHAPE drift, but they do not make geometry CORRECT. A sequence of individually schema-valid, in-bounds deltas can still produce a non-manifold solid, a self-intersecting assembly, or a physically nonsensical structure. The plan conflates 'schema-valid' with 'correct'; the property tests and round-trip verifier catch a subset, but 'correctness becomes a CI result' overstates how much a typed contract buys for a geometry/physics product."
+    },
+    {
+      "claim": "Subagent fan-out across the ~8 missing subsystems is 'textbook /workflows' work with 'no merge conflicts because the only thing crossing a boundary is a Pydantic model'",
+      "reality": "All 8 subsystems share the SAME ParameterDef and ledger schema — concurrent agent edits to that one shared contract is exactly where collisions occur, and the 'typed seam' is the contended resource, not an isolator. Integrating 8 independently-scaffolded subsystems, each carrying physics assumptions a human must vet before promotion, is serial review work. The 'structural sameness makes it a textbook sweep' framing understates that the sameness is in the boilerplate, while the differences (each subsystem's physics) are where the irreplaceable human time goes."
+    },
+    {
+      "claim": "An MCP wrapping the solver CLIs lets Claude 'run-observe-iterate the pipeline autonomously' to wire up FEA",
+      "reality": "The same plan elsewhere states Claude writes FEA drivers that 'run and return a plausible-but-wrong number' (yield vs buckling, unconverged mesh). Letting Claude autonomously iterate a mesh/solve loop against a convergence check invites it to tune refinement until the number merely looks converged — reward-hacking the very gate that is supposed to certify FS. Autonomous iteration in the one zone the plan says Claude is dangerous is partly self-contradictory; the loop needs a human-pinned convergence oracle, not autonomous iteration."
+    },
+    {
+      "claim": "Spike code is 'throwaway by contract,' then foundation rebuilds the production generator+tag layer 'clean from the spike's lessons'",
+      "reality": "This doubles the work on the hardest, scarcest-specialist component (the identity/generator layer) under timeline pressure, and the 12-16 week and 8-10 week schedules budget it once. In practice teams promote spike code precisely because rebuilding the hard part twice is unaffordable — which is how the unproven naming assumptions become load-bearing, the exact trap the rec warns against. The discipline is correct; the schedule that's supposed to honor it does not account for the rebuild cost, making the timeline more optimistic than stated."
+    },
+    {
+      "claim": "Hooks + a determinism fingerprint make 'never a fabricated green light' a property of the dev process, and make the AS9100 replay guarantee 'real rather than aspirational'",
+      "reality": "OCCT is documented (in the plan's own risk list) as not bit/topology-stable across kernel versions and subject to BRepMesh thread races; STEP carries timestamps. Pinning a fingerprint and forcing single-thread can yield byte-identical hashes on the canonical image, but the determinism holds only as long as no solver/OCCT bump occurs — and the plan also wants those bumps (auto-rebaseline PRs). The replay guarantee is real only inside a frozen toolchain; every upstream version bump re-opens it and forces human re-baselining of the entire golden corpus. 'Real rather than aspirational' is true only for a snapshot in time, not as an ongoing property."
+    }
+  ]
+}

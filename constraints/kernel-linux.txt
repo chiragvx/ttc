@@ -1,0 +1,15 @@
+# Pinned kernel + solver toolchain for the canonical Linux dev/CI image.
+# Versions match the Windows dev box (build123d 0.10.0 / OCCT 7.8.1.1) so the cross-platform
+# determinism comparison isolates OS/arch as the variable, not library drift.
+# Any change here CHANGES THE TOOLCHAIN FINGERPRINT and must trigger a golden-hash rebaseline review.
+
+build123d==0.10.0
+cadquery-ocp==7.8.1.1.post1
+numpy==2.2.1
+gmsh==4.13.1          # meshing for the FEA tier (Spike 4)
+
+# dev tooling
+pytest==8.3.4
+ruff==0.8.4
+
+# NOTE: CalculiX (ccx) is installed from apt (calculix-ccx), not pip — see docker/Dockerfile.dev.

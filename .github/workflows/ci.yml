@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-checks:
+    name: Host checks (pure-Python + gates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Ruff lint
+        run: ruff check .
+      - name: LLMProvider seam lint
+        run: python scripts/check_llm_provider_imports.py
+      - name: Copyleft / slicer-isolation gate
+        run: python scripts/check_copyleft.py
+      - name: Toolchain fingerprint (host)
+        run: python scripts/toolchain_fingerprint.py --json
+      - name: Pure-Python tests (no kernel)
+        run: pytest -q -ra -m "not needs_kernel"
+
+  kernel:
+    name: Kernel + solver (determinism gate, Spike 4 smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Linux image
+        run: docker build -f docker/Dockerfile.dev -t gtc-dev .
+      - name: Full test suite (incl. cross-process determinism gate)
+        run: docker run --rm gtc-dev python -m pytest -q -ra
+      - name: Linux determinism hashes
+        # Logged so they can be diffed against the Windows values
+        # (mesh 22320eeb… / brep 4eb40ae2…). If they differ, determinism is platform-scoped — see
+        # docker/README.md and risk #3. Note: hosted runners vary in CPU, which itself probes this.
+        run: |
+          docker run --rm gtc-dev sh -c '\
+            python scripts/toolchain_fingerprint.py --portable && \
+            python -m packages.truth_plane.regen.probe 4.5'
+      - name: Spike 4 smoke (ccx + gmsh present)
+        run: |
+          docker run --rm gtc-dev sh -c '\
+            ccx 2>&1 | head -1; \
+            python -c "import gmsh; print(\"gmsh\", gmsh.__version__)"'
