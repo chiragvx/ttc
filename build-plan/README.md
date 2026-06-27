@@ -4,11 +4,16 @@ Master index for turning the `prd-27-8.14` vision into a real product, engineere
 (dev-time) and powered by Claude (runtime).
 
 **Last updated:** 2026-06-28
-**Current phase:** Phases 0–3 *backbone* implemented & green (**67 tests in-container**, 58 + 9-skip
-on Windows). Spike 4 fully PASSES (deflection-validated FS + 19/19 auto-mesh); hero-bracket runs
-end-to-end; SQL persistence, real Anthropic provider, and sandbox kill-primitives built. Production
-hardening (frontend, microVM isolation, live PG/keys, scale-infra) and the specialist-gated spikes
-(identity, FEA methodology, legal) remain.
+**Current phase:** Phases 0–3 implemented & green (**77 backend tests pass on Windows**, more in the
+container). Spike 4 fully PASSES (deflection-validated FS + 19/19 auto-mesh). Built across the phases:
+ledger + rules validator + event store/replay (in-mem + SQL), hero-bracket end-to-end, sandbox
+kill-primitives, **strategic macro agent**, **OpenRouter/DeepSeek delta-emitter** + runtime **CLI**,
+**3-variant sweep**, **project/branch service**, **neutral STEP/STL export**, **cost accounting**, and a
+**React + react-three-fiber frontend** (builds clean). Gated/remaining: live keys, microVM isolation,
+live PG/RLS, scale-infra, and the specialist spikes (identity, FEA methodology, legal).
+
+> ⚠️ Host note: the dev machine's **C: drive is full** — point Python/npm temp at D:
+> (`TEMP=D:/pytmp`) or tests that write temp files will hit `OSError: No space left on device`.
 
 ---
 

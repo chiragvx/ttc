@@ -15,13 +15,19 @@
 | **Real Anthropic delta-emitter** (forced tool-use, strict schema, refusal-handling; SDK imported lazily, tested via injected fake client) | `packages/agents/anthropic_provider.py` | `tests/backend/test_anthropic_provider.py` |
 | **Two-plane WebSocket** + Tier-0 telemetry + the **NACK** the PRD lacked | `packages/transport/{protocol,app}.py` | `tests/backend/test_app.py` |
 | Print/material **estimator** + supportless-overhang check | `packages/truth_plane/solvers/slicer_estimate.py` | `tests/backend/test_slicer_estimate.py` |
+| **Strategic agent (macro layer)** — mission goal → verification requirements matrix | `packages/agents/strategic.py` | `tests/backend/test_strategic.py` |
+| **3D viewport** — Vite + React + react-three-fiber, three-zone layout, bounded sliders + HARD_LOCK, telemetry HUD + NACK surface; **builds clean** (tsc + vite) | `packages/frontend/` | `npm run build` |
+| Runtime **CLI** + per-design **cost/token accounting** (USAGE events) | `packages/cli.py`, `packages/ledger/cost.py` | `tests/backend/test_cli.py`, `tests/ledger/test_cost.py` |
 
 ## Remains (gated)
 
-- **3D viewport** (React + r3f, read-only, morph preview, anchored HUD) — frontend build; not started.
-- **Real LLM provider** — the Sonnet delta-emitter is built & wired (`anthropic_provider.py`, forced
-  tool-use); it just needs an **API key** to run live (and the Opus strategic agent + prompt-caching
-  layer on top). The tool-use parsing is already tested via an injected fake client.
+- **3D viewport** — built & compiles (`packages/frontend/`). Remaining: wire the real glTF mesh from
+  kernel regen (Tier 1), morph-target preview, and anchored HUD; live end-to-end against a running
+  backend (`uvicorn ... --factory` + `npm run dev`).
+- **Real LLM provider** — the OpenRouter (DeepSeek) delta-emitter is built & wired
+  (`openrouter_provider.py`, forced function-calling); it just needs an **API key** to run live
+  (`OPENROUTER_API_KEY`; CI has a key-gated live-smoke job). The strategic macro agent is built (mock);
+  its OpenRouter wiring is the same pattern as the delta provider.
 - **Real PrusaSlicer sidecar** (network-isolated, AGPL boundary) — replaces the analytic estimator for
   the authoritative number. → architecture-blocking decision §3a (counsel).
 - **FEA convergence/cross-validation suite + 20-geometry meshing-robustness sweep** — → FEA engineer.

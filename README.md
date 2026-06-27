@@ -31,6 +31,14 @@ python -m packages.cli status
 The runtime LLM is **OpenRouter** (default model `deepseek/deepseek-chat`) — copy `.env.example` to
 `.env` and set `OPENROUTER_API_KEY`. Without a key the offline mock provider is used.
 
+Run the full app (backend + 3D frontend):
+
+```bash
+pip install -e ".[serve]" && uvicorn packages.transport.app:create_app --factory   # backend :8000
+cd packages/frontend && npm install && npm run dev                                  # viewport :5173
+```
+
+
 Target runtime is Python 3.12; the local floor is 3.10. The kernel/solver/sandbox stack
 (build123d, OCCT, Gmsh, CalculiX, Firecracker/gVisor) is **Linux-only** and lives behind the Truth
 Plane — see [`build-plan/PHASE_0.md`](build-plan/PHASE_0.md) §3c for the Linux dev container.
