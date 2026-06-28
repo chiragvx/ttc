@@ -1,4 +1,4 @@
-export type AnalysisStatus = "idle" | "running" | "done" | "stale" | "error";
+export type AnalysisStatus = "idle" | "running" | "optimizing" | "done" | "stale" | "error";
 
 export interface AnalysisState {
   status: AnalysisStatus;
@@ -10,18 +10,24 @@ export interface AnalysisState {
 export function AnalysisBar({
   state,
   onAnalyze,
+  onOptimize,
   onSignExport,
 }: {
   state: AnalysisState;
   onAnalyze: () => void;
+  onOptimize: () => void;
   onSignExport: () => void;
 }) {
   const eligible = state.exportStatus === "EXPORT_ELIGIBLE";
   const fsColor = state.fs == null ? "#8b949e" : state.fs >= 1.5 ? "#3fb950" : "#f85149";
+  const busy = state.status === "running" || state.status === "optimizing";
   return (
     <div style={row}>
-      <button onClick={onAnalyze} disabled={state.status === "running"} style={btn}>
+      <button onClick={onAnalyze} disabled={busy} style={btn}>
         {state.status === "running" ? "Analyzing…" : "Run analysis"}
+      </button>
+      <button onClick={onOptimize} disabled={busy} style={btn} title="Find the lightest design that passes FS">
+        {state.status === "optimizing" ? "Optimizing…" : "Optimize ⚙"}
       </button>
       {state.fs != null && (
         <span style={{ color: "#8b949e" }}>

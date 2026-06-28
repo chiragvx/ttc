@@ -11,5 +11,6 @@ from packages.truth_plane import jobs
 
 jobs.configure(store=PgVerdictStore.from_env())
 
-# re-export so `dramatiq packages.truth_plane.worker` discovers the actor
+# re-export so `dramatiq packages.truth_plane.worker` discovers the actors
 run_fs_analysis = jobs.run_fs_analysis
+run_optimization = jobs.run_optimization

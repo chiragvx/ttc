@@ -12,9 +12,17 @@ from packages.ledger.derived_resolver import Verdict
 class InMemoryVerdictStore:
     def __init__(self) -> None:
         self._v: dict[str, list[Verdict]] = {}
+        self._opt: dict[str, dict] = {}
 
     def put_verdict(self, project_id: str, verdict: Verdict) -> None:
         self._v.setdefault(project_id, []).append(verdict)
 
     def verdicts(self, project_id: str) -> list[Verdict]:
         return list(self._v.get(project_id, []))
+
+    # optimize-sweep result (variants + best), so the worker can hand it back to the backend
+    def put_optimize(self, project_id: str, result: dict) -> None:
+        self._opt[project_id] = result
+
+    def get_optimize(self, project_id: str) -> dict | None:
+        return self._opt.get(project_id)

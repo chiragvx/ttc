@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 import packages.transport.app as app_module
 from packages.ledger.derived_resolver import Verdict, signature_from_params
 from packages.ledger.fingerprint import fingerprint
-from packages.ledger.nodes import SKIN
+from packages.ledger.nodes import RIB, SKIN
 
 _HAS_KERNEL = importlib.util.find_spec("build123d") is not None
 
@@ -56,6 +56,37 @@ def test_analyze_status_reflects_current_geometry(monkeypatch):
     assert c.get("/analyze/status").json()["current"] is None
     c.post("/analyze")
     assert c.get("/analyze/status").json()["current"]["factor_of_safety"] == 4.0
+
+
+def _fake_optimize(candidates, rib, material_name, load_n, fs_floor):
+    verdict = Verdict(geometry_signature=signature_from_params({SKIN: 4.0, RIB: rib}), fingerprint=fingerprint(),
+                      factor_of_safety=1.8, mesh_converged=True, watertight=True, min_wall_ok=True, solver_seconds=12.0)
+    return {
+        "variants": [
+            {"skin": 2.0, "fs": 0.4, "mass_g": 59.0, "feasible": False},
+            {"skin": 3.0, "fs": 0.9, "mass_g": 89.0, "feasible": False},
+            {"skin": 4.0, "fs": 1.8, "mass_g": 119.0, "feasible": True},
+            {"skin": 5.0, "fs": 2.8, "mass_g": 149.0, "feasible": True},
+        ],
+        "best_skin": 4.0, "best_mass_g": 119.0, "best_verdict": verdict,
+    }
+
+
+def test_optimize_picks_lightest_feasible_applies_and_flips(monkeypatch):
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(app_module, "optimize_in_subprocess", _fake_optimize)
+    c = TestClient(app_module.create_app())
+
+    r = c.post("/optimize").json()
+    assert r["status"] == "done" and r["best_skin"] == 4.0  # lightest passing (not the heaviest 5.0)
+    assert [v["feasible"] for v in r["variants"]] == [False, False, True, True]
+
+    # the chosen design is applied to the ledger
+    assert c.get("/ledger").json()["domains"]["structure"]["skin_thickness_mm"]["value"] == 4.0
+    # and its verdict flips the gate after sign-off
+    c.post("/signoff")
+    assert c.post("/export/check").json()["status"] == "EXPORT_ELIGIBLE"
 
 
 @pytest.mark.skipif(not _HAS_KERNEL, reason="needs build123d for STEP export")

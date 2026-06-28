@@ -63,12 +63,64 @@ def _worker(q, params, material_name, load_n):
         q.put(("error", traceback.format_exc()))
 
 
+# --- optimization: the sanctioned 3-variant sweep -> the lightest design that passes FS ---
+from packages.ledger.nodes import RIB  # noqa: E402
+
+_PLATE_AREA_MM2 = 60.0 * 40.0
+
+
+def _run_optimize(candidates, rib, material_name, load_n, fs_floor):
+    from packages.ledger.bom import material
+    mat = material(material_name)
+    variants = []
+    best_skin = None
+    best_verdict = None
+    for skin in candidates:
+        v = analyze_geometry({SKIN: skin, RIB: rib}, material_name, load_n)
+        fs = v.factor_of_safety
+        feasible = fs is not None and fs >= fs_floor
+        mass = round(mat.density_g_per_mm3 * _PLATE_AREA_MM2 * skin, 1)  # thinner = lighter (monotone)
+        variants.append({"skin": skin, "fs": round(fs, 2) if fs is not None else None,
+                         "mass_g": mass, "feasible": feasible})
+        if feasible and (best_skin is None or skin < best_skin):  # lightest feasible = thinnest passing
+            best_skin, best_verdict = skin, v
+    best_mass = round(mat.density_g_per_mm3 * _PLATE_AREA_MM2 * best_skin, 1) if best_skin else None
+    return {"variants": variants, "best_skin": best_skin, "best_mass_g": best_mass, "best_verdict": best_verdict}
+
+
+def _optimize_worker(q, candidates, rib, material_name, load_n, fs_floor):
+    try:
+        q.put(("ok", _run_optimize(candidates, rib, material_name, load_n, fs_floor)))
+    except Exception:
+        q.put(("error", traceback.format_exc()))
+
+
+def optimize_in_subprocess(candidates: list[float], rib: float, material_name: str, load_n: float,
+                           fs_floor: float, timeout_s: float = 600.0) -> dict:
+    """Sweep skin candidates (each a real CalculiX FS) in a child process; return the variants + the
+    lightest one that passes the FS floor. Runs in a child so gmsh gets a main thread."""
+    ctx = mp.get_context("spawn")  # spawn: clean child (safe from a Dramatiq worker; runs gmsh in a main thread)
+    q: mp.Queue = ctx.Queue()
+    p = ctx.Process(target=_optimize_worker, args=(q, candidates, rib, material_name, load_n, fs_floor))
+    p.start()
+    try:
+        status, payload = q.get(timeout=timeout_s)
+    except queue.Empty:
+        p.terminate()
+        raise RuntimeError("optimize timed out") from None
+    finally:
+        p.join(10)
+    if status == "error":
+        raise RuntimeError(payload)
+    return payload
+
+
 def analyze_in_subprocess(params: dict[str, float], material_name: str, load_n: float,
                           timeout_s: float = 300.0) -> Verdict:
     """Run the analysis in a child PROCESS so gmsh gets a main thread (it installs a signal handler,
     which fails inside a threadpool / Dramatiq worker thread). Used by both the inline endpoint and
     the queued actor."""
-    ctx = mp.get_context("spawn")
+    ctx = mp.get_context("spawn")  # spawn: clean child (safe from a Dramatiq worker; runs gmsh in a main thread)
     q: mp.Queue = ctx.Queue()
     p = ctx.Process(target=_worker, args=(q, params, material_name, load_n))
     p.start()

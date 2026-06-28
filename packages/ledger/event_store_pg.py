@@ -22,6 +22,8 @@ _DDL = [
     """CREATE TABLE IF NOT EXISTS verdicts (
         id SERIAL PRIMARY KEY, project_id TEXT NOT NULL, geo_sig TEXT NOT NULL, fingerprint TEXT NOT NULL,
         verdict_json TEXT NOT NULL, created TIMESTAMPTZ DEFAULT now())""",
+    """CREATE TABLE IF NOT EXISTS optimize_results (
+        project_id TEXT PRIMARY KEY, result_json TEXT NOT NULL, created TIMESTAMPTZ DEFAULT now())""",
 ]
 
 
@@ -91,3 +93,16 @@ class PgVerdictStore:
             "SELECT verdict_json FROM verdicts WHERE project_id = %s ORDER BY id", (project_id,)
         ).fetchall()
         return [Verdict(**json.loads(r[0])) for r in rows]
+
+    def put_optimize(self, project_id: str, result: dict) -> None:
+        self.conn.execute(
+            "INSERT INTO optimize_results (project_id, result_json) VALUES (%s, %s) "
+            "ON CONFLICT (project_id) DO UPDATE SET result_json = EXCLUDED.result_json, created = now()",
+            (project_id, json.dumps(result)),
+        )
+
+    def get_optimize(self, project_id: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT result_json FROM optimize_results WHERE project_id = %s", (project_id,)
+        ).fetchone()
+        return json.loads(row[0]) if row else None

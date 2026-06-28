@@ -26,7 +26,7 @@ from packages.ledger.derived_resolver import latest_verdict, ledger_with_derived
 from packages.ledger.fingerprint import fingerprint
 from packages.ledger.gates import evaluate_export_gates
 from packages.ledger.nodes import RIB, SKIN
-from packages.truth_plane.analysis import analyze_in_subprocess  # module-level so tests can monkeypatch it
+from packages.truth_plane.analysis import analyze_in_subprocess, optimize_in_subprocess  # module-level for monkeypatch
 from packages.truth_plane.verdict_store import InMemoryVerdictStore
 from packages.ledger.parameter import LockState, ParameterDef
 from packages.ledger.schema import (
@@ -199,6 +199,37 @@ def create_app() -> FastAPI:
             return {"status": "error", "message": str(e)}
         state.verdict_store.put_verdict(state.project_id, verdict)
         return {"status": "done", "verdict": dataclasses.asdict(verdict)}
+
+    @app.post("/optimize")
+    async def optimize(load_n: float = 25.0):
+        # the sanctioned 3-variant sweep: find the lightest skin that passes FS
+        led = state.ledger()
+        lo, hi = led.domains.structure.skin_thickness_mm.bounds
+        rib = led.domains.structure.internal_rib_spacing_mm.value
+        fs_floor = led.global_constraints.factor_of_safety_floor
+        candidates = [c for c in (2.0, 3.0, 4.0, 5.0) if lo <= c <= hi]
+        if os.environ.get("REDIS_URL"):  # durable queued path (worker) — poll /optimize/status
+            from packages.truth_plane import jobs
+            jobs.configure(store=state.verdict_store, publish=None)
+            jobs.run_optimization.send(state.project_id, candidates, rib, "PLA", load_n, fs_floor)
+            return {"status": "queued"}
+        try:  # inline (dev/tests): run the sweep in a child process
+            result = await run_in_threadpool(optimize_in_subprocess, candidates, rib, "PLA", load_n, fs_floor)
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+        best_skin = result["best_skin"]
+        if best_skin is not None:
+            delta = ParameterDelta(target_node=SKIN, requested_value=best_skin)
+            _, outcome = apply_delta(led, delta)
+            if outcome.changed:
+                state.log.append_mutation(delta, actor="optimizer", ts=_TS)
+            state.verdict_store.put_verdict(state.project_id, result["best_verdict"])
+        return {"status": "done", "variants": result["variants"], "best_skin": best_skin,
+                "best_mass_g": result["best_mass_g"], "fs_floor": fs_floor}
+
+    @app.get("/optimize/status")
+    def optimize_status():
+        return {"result": state.verdict_store.get_optimize(state.project_id)}
 
     @app.get("/analyze/status")
     def analyze_status():

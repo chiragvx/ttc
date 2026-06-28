@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { analyze, analyzeStatus, exportCheck, signoff } from "./api";
+import { analyze, analyzeStatus, exportCheck, optimize, optimizeStatus, signoff } from "./api";
 import { AnalysisBar, type AnalysisState } from "./AnalysisBar";
+import { OptimizeResult, type OptimizeResultData } from "./OptimizeResult";
 import { Chat } from "./chat/Chat";
 import { FloatingControls } from "./FloatingControls";
 import { Hud } from "./Hud";
@@ -21,6 +22,7 @@ export default function App() {
   const [analysis, setAnalysis] = useState<AnalysisState>({
     status: "idle", fs: null, solverSeconds: null, exportStatus: "EXPORT_BLOCKED",
   });
+  const [optimizeResult, setOptimizeResult] = useState<OptimizeResultData | null>(null);
 
   useEffect(() => {
     exportCheck().then((e) => setAnalysis((a) => ({ ...a, exportStatus: e.status }))).catch(() => {});
@@ -93,6 +95,31 @@ export default function App() {
     }
   };
 
+  const runOptimize = async () => {
+    setAnalysis((a) => ({ ...a, status: "optimizing" }));
+    try {
+      const r = await optimize(25);
+      let result = r.status === "done" ? r : null; // inline (dev) returns the result directly
+      for (let i = 0; r.status === "queued" && !result && i < 120; i++) {
+        await sleep(2000); // durable (compose) path: the worker runs the sweep, poll for it
+        const s = await optimizeStatus();
+        if (s.result) result = s.result;
+      }
+      if (!result || result.best_skin == null) {
+        setOptimizeResult({ variants: result?.variants ?? [], bestSkin: null, bestMass: null });
+        setAnalysis((a) => ({ ...a, status: "error" }));
+        return;
+      }
+      await mutate(SKIN, result.best_skin); // apply through the rules path -> ledger + viewport follow
+      const best = result.variants.find((v: { skin: number }) => v.skin === result.best_skin);
+      const e = await exportCheck();
+      setOptimizeResult({ variants: result.variants, bestSkin: result.best_skin, bestMass: result.best_mass_g });
+      setAnalysis({ status: "done", fs: best?.fs ?? null, solverSeconds: null, exportStatus: e.status });
+    } catch {
+      setAnalysis((a) => ({ ...a, status: "error" }));
+    }
+  };
+
   const signAndExport = async () => {
     await signoff();
     const e = await exportCheck();
@@ -124,11 +151,12 @@ export default function App() {
               mutate(node, params[node], lock ? "HARD_LOCK" : "DYNAMIC");
             }}
           />
+          {optimizeResult && <OptimizeResult result={optimizeResult} onClose={() => setOptimizeResult(null)} />}
         </main>
       </div>
 
       <div>
-        <AnalysisBar state={analysis} onAnalyze={runAnalyze} onSignExport={signAndExport} />
+        <AnalysisBar state={analysis} onAnalyze={runAnalyze} onOptimize={runOptimize} onSignExport={signAndExport} />
         <Hud telemetry={telemetry} reject={lastReject} />
       </div>
 

@@ -44,8 +44,31 @@ docker compose up --build      # -> http://localhost:8000  (backend serves the S
 of Docker Desktop recovered it; the real-CalculiX container e2e is green.) The container test alone:
 `docker run --rm -v $PWD:/app gtc-dev pytest tests/solvers/test_analysis_flow.py`.
 
+## Optimization — the 3-variant sweep, wired live
+
+The sanctioned in-scope optimizer (CLAUDE.md cut-list: *use a 3-variant sweep*, not NSGA-II) is now an
+**Optimize** action in the running app: find the **lightest** skin that clears the FS floor, then apply it.
+
+| Piece | Module |
+|---|---|
+| **Sweep + pick** (`_run_optimize`: render each candidate → real CalculiX FS → mass `ρ·A·skin`; pick the thinnest feasible) | `truth_plane/analysis.py` |
+| **Subprocess wrapper** (`optimize_in_subprocess`, spawn child — gmsh needs a main thread) | `truth_plane/analysis.py` |
+| **Dramatiq actor** `run_optimization` (stores best `Verdict` + variants summary) | `truth_plane/jobs.py`, `worker.py` |
+| **API** `POST /optimize` (queued→worker when `REDIS_URL`, else inline/monkeypatchable), `GET /optimize/status` | `transport/app.py` |
+| **Optimize-results table** (upsert by project, survives restart) | `ledger/event_store_pg.py`, `verdict_store.py` |
+| **Frontend** Optimize button → poll `/optimize/status` → apply best skin via the WS rules path → variants table | `frontend/src/{AnalysisBar,OptimizeResult,App,api}` |
+
+Same uvicorn-can't-spawn constraint as `/analyze`: the sweep runs in the **worker** (where spawn is
+clean), the backend only enqueues and the browser polls. `test_analysis_api.py::test_optimize_picks_lightest_feasible_applies_and_flips` covers the inline path (faked solver) — 4 passed.
+
+**Live (compose) verified end-to-end:** `POST /optimize` → `queued` → worker runs the real CalculiX
+sweep over skin ∈ {2,3,4,5}mm → FS `0.57 / 1.25 / 2.22 / 3.39` → **best_skin = 4.0** (lightest design
+clearing FS ≥ 1.5; 3mm @ 1.25 fails) → frontend applies 4.0 via WS (`2.0→4.0 APPLIED`) → the stored
+verdict resolves → export flips **EXPORT_ELIGIBLE** → a real 30 KB ISO-10303-21 **STEP** downloads.
+
 ## Out of scope (deferred, as planned)
 
 Firecracker/gVisor sandbox (analysis runs trusted templated code); real PrusaSlicer sidecar (analytic
-estimator kept); multi-tenant auth/RLS; optimizer beyond the 3-variant sweep. Redis pub/sub → WS
-`SOLVER_RESULT` push is wired as a *polling* `/analyze/status` for now (the documented fallback).
+estimator kept); multi-tenant auth/RLS; optimizer beyond the 3-variant sweep (NSGA-II Pareto). Redis
+pub/sub → WS `SOLVER_RESULT` push is wired as a *polling* `/analyze/status` + `/optimize/status` for
+now (the documented fallback).

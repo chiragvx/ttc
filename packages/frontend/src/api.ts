@@ -16,6 +16,12 @@ export async function analyze(loadN = 40): Promise<any> {
 export async function analyzeStatus(): Promise<any> {
   return (await fetch("/analyze/status")).json();
 }
+export async function optimize(loadN = 25): Promise<any> {
+  return (await fetch(`/optimize?load_n=${loadN}`, { method: "POST" })).json();
+}
+export async function optimizeStatus(): Promise<any> {
+  return (await fetch("/optimize/status")).json();
+}
 export async function exportCheck(): Promise<{ status: string; reasons: string[]; unknowns: string[] }> {
   return (await fetch("/export/check", { method: "POST" })).json();
 }

@@ -13,7 +13,7 @@ from typing import Callable, Optional, Protocol
 import dramatiq
 
 from packages.ledger.derived_resolver import Verdict
-from packages.truth_plane.analysis import analyze_in_subprocess
+from packages.truth_plane.analysis import analyze_in_subprocess, optimize_in_subprocess
 
 
 def _make_broker():
@@ -57,3 +57,23 @@ def run_fs_analysis(project_id: str, params: dict, material_name: str, load_n: f
         _store.put_verdict(project_id, verdict)
     if _publish:
         _publish(project_id, "done", verdict)
+
+
+@dramatiq.actor(max_retries=0, time_limit=900_000)
+def run_optimization(project_id: str, candidates: list, rib: float, material_name: str,
+                     load_n: float, fs_floor: float) -> None:
+    if _publish:
+        _publish(project_id, "optimizing", None)
+    try:
+        result = optimize_in_subprocess(candidates, rib, material_name, load_n, fs_floor)
+    except Exception:
+        if _publish:
+            _publish(project_id, "failed", None)
+        raise
+    if _store:
+        if result.get("best_verdict") is not None:
+            _store.put_verdict(project_id, result["best_verdict"])
+        _store.put_optimize(project_id, {"variants": result["variants"], "best_skin": result["best_skin"],
+                                         "best_mass_g": result["best_mass_g"]})
+    if _publish:
+        _publish(project_id, "done", None)
