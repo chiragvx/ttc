@@ -23,7 +23,7 @@ def _fake_analyze(params, material_name, load_n):
 def _client(monkeypatch):
     monkeypatch.delenv("REDIS_URL", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.setattr(app_module, "analyze_geometry", _fake_analyze)
+    monkeypatch.setattr(app_module, "analyze_in_subprocess", _fake_analyze)
     return TestClient(app_module.create_app())
 
 

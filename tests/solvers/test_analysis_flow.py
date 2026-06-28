@@ -36,6 +36,11 @@ def test_analyze_geometry_returns_grounded_verdict():
 def test_export_gate_flips_then_goes_stale(client):
     assert client.post("/export/check").json()["status"] == "EXPORT_BLOCKED"
 
+    # the default 2 mm plate genuinely fails FS — thicken it to 8 mm first (as a user would)
+    with client.websocket_connect("/ws") as ws:
+        ws.send_json({"target_node": SKIN, "requested_value": 8.0})
+        ws.receive_json()
+
     r = client.post("/analyze", params={"load_n": 40.0}).json()
     assert r["status"] == "done" and r["verdict"]["factor_of_safety"] > 1.5
 

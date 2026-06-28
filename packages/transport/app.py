@@ -26,7 +26,7 @@ from packages.ledger.derived_resolver import latest_verdict, ledger_with_derived
 from packages.ledger.fingerprint import fingerprint
 from packages.ledger.gates import evaluate_export_gates
 from packages.ledger.nodes import RIB, SKIN
-from packages.truth_plane.analysis import analyze_geometry  # module-level so tests can monkeypatch it
+from packages.truth_plane.analysis import analyze_in_subprocess  # module-level so tests can monkeypatch it
 from packages.truth_plane.verdict_store import InMemoryVerdictStore
 from packages.ledger.parameter import LockState, ParameterDef
 from packages.ledger.schema import (
@@ -192,9 +192,9 @@ def create_app() -> FastAPI:
             jobs.configure(store=state.verdict_store, publish=None)
             jobs.run_fs_analysis.send(state.project_id, params, material, load_n)
             return {"status": "queued"}
-        # inline path: run the real FS in a threadpool (needs solvers — Linux container)
+        # inline path: run the real FS (in a child process via the threadpool) — needs solvers
         try:
-            verdict = await run_in_threadpool(analyze_geometry, params, material, load_n)
+            verdict = await run_in_threadpool(analyze_in_subprocess, params, material, load_n)
         except Exception as e:
             return {"status": "error", "message": str(e)}
         state.verdict_store.put_verdict(state.project_id, verdict)

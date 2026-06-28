@@ -13,7 +13,7 @@ from typing import Callable, Optional, Protocol
 import dramatiq
 
 from packages.ledger.derived_resolver import Verdict
-from packages.truth_plane.analysis import analyze_geometry
+from packages.truth_plane.analysis import analyze_in_subprocess
 
 
 def _make_broker():
@@ -48,7 +48,7 @@ def run_fs_analysis(project_id: str, params: dict, material_name: str, load_n: f
     if _publish:
         _publish(project_id, "running", None)
     try:
-        verdict = analyze_geometry(params, material_name, load_n)
+        verdict = analyze_in_subprocess(params, material_name, load_n)
     except Exception:
         if _publish:
             _publish(project_id, "failed", None)

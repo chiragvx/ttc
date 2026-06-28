@@ -7,9 +7,12 @@ the derived-resolver turns into ledger `derived.*` state.
 
 from __future__ import annotations
 
+import multiprocessing as mp
 import os
+import queue
 import tempfile
 import time
+import traceback
 
 from packages.ledger.apply import MIN_WALL_MM
 from packages.ledger.derived_resolver import Verdict, signature_from_params
@@ -26,7 +29,7 @@ def analyze_geometry(params: dict[str, float], material_name: str, load_n: float
 
     skin = params[SKIN]
     part = render_bracket(width_mm=60.0, depth_mm=40.0, thickness_mm=max(1.0, skin), hole_dia_mm=6.0, n_holes=4)
-    watertight = bool(part.solid.is_valid())
+    watertight = bool(part.solid.is_valid)  # build123d exposes is_valid as a property, not a method
 
     fd, path = tempfile.mkstemp(suffix=".step")
     os.close(fd)
@@ -51,3 +54,31 @@ def analyze_geometry(params: dict[str, float], material_name: str, load_n: float
         min_wall_ok=skin >= MIN_WALL_MM,
         solver_seconds=round(dt, 2),
     )
+
+
+def _worker(q, params, material_name, load_n):
+    try:
+        q.put(("ok", analyze_geometry(params, material_name, load_n)))
+    except Exception:
+        q.put(("error", traceback.format_exc()))
+
+
+def analyze_in_subprocess(params: dict[str, float], material_name: str, load_n: float,
+                          timeout_s: float = 300.0) -> Verdict:
+    """Run the analysis in a child PROCESS so gmsh gets a main thread (it installs a signal handler,
+    which fails inside a threadpool / Dramatiq worker thread). Used by both the inline endpoint and
+    the queued actor."""
+    ctx = mp.get_context("spawn")
+    q: mp.Queue = ctx.Queue()
+    p = ctx.Process(target=_worker, args=(q, params, material_name, load_n))
+    p.start()
+    try:
+        status, payload = q.get(timeout=timeout_s)
+    except queue.Empty:
+        p.terminate()
+        raise RuntimeError("analysis timed out") from None
+    finally:
+        p.join(10)
+    if status == "error":
+        raise RuntimeError(payload)
+    return payload
