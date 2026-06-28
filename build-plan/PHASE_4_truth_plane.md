@@ -77,7 +77,7 @@ orphaned. Now the session carries the goal as a `VerificationMatrix` and judges 
 | **Goal → targets** (`StrategicAgent.plan`: NL goal → `Requirement`s; never originates a safety value, only TARGETS) | `agents/strategic.py` |
 | **Grounded metric snapshot** (`SessionState.metrics`: FS from the **resolved real-solver verdict**, mass/time from deterministic geometry) | `transport/app.py` |
 | **API** `POST /requirements` (set goal), `GET /requirements` (compliance readout: per-req SATISFIED/VIOLATED/**UNKNOWN** + `implied_fs_floor`) | `transport/app.py` |
-| **Frontend** goal input + compliance card (✓/✗/? per requirement vs the live numbers; refreshes on analyze/optimize/geometry-change) | `frontend/src/{RequirementsCard,App,api}` |
+| **Single input** — the goal is stated **in the chat** (no separate box); each user message folds any stated TARGETS into the goal via `StrategicAgent.merge` (upsert by metric; a no-target message is a no-op, so ordinary chat never wipes the goal). The compliance panel is **read-only**. | `agents/strategic.py`, `frontend/src/{chat/Chat,RequirementsCard,App}` |
 
 **The keystone — inversion #1 made conversational:** `factor_of_safety` in the readout comes from the
 real verdict, so it is **UNKNOWN until a solver has run for the current geometry** — never assumed

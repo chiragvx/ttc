@@ -143,8 +143,9 @@ class SessionState:
         self.strategic = StrategicAgent()
         self.matrix: VerificationMatrix = VerificationMatrix()
 
-    def set_goal(self, goal: str) -> None:
-        self.matrix = self.strategic.plan(goal)
+    def note_message(self, message: str) -> None:
+        # the chat is the single input: fold any stated TARGETS into the goal (no-op if none stated)
+        self.matrix = self.strategic.merge(self.matrix, message)
 
     def metrics(self) -> dict[str, float | None]:
         """The live, GROUNDED metric snapshot a requirement is judged against. factor_of_safety comes
@@ -242,8 +243,8 @@ def create_app() -> FastAPI:
 
     @app.post("/requirements")
     def set_requirements(req: GoalRequest):
-        # the strategic agent parses the goal into TARGETS (it never originates a safety value)
-        state.set_goal(req.goal)
+        # fed from the chat: extract any stated TARGETS and fold them into the goal (never a safety value)
+        state.note_message(req.goal)
         return _requirements_payload()
 
     @app.get("/requirements")

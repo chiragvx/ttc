@@ -12,11 +12,12 @@ interface Props {
   onApply: (deltas: ParameterDelta[]) => Promise<DeltaOutcome[]>;
   onUndo: (outcomes: DeltaOutcome[]) => Promise<void>;
   onOpenSettings: () => void;
+  onUserMessage?: (text: string) => void;  // extract any goal/targets from what the user says
 }
 
 const uid = () => (crypto?.randomUUID?.() ?? String(Math.random()));
 
-export function Chat({ settings, onApply, onUndo, onOpenSettings }: Props) {
+export function Chat({ settings, onApply, onUndo, onOpenSettings, onUserMessage }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [undone, setUndone] = useState<Record<string, boolean>>({});
@@ -28,6 +29,7 @@ export function Chat({ settings, onApply, onUndo, onOpenSettings }: Props) {
   const send = useCallback(
     async (text: string) => {
       if (streaming) return;
+      onUserMessage?.(text);  // fold any stated targets into the goal — works with or without an LLM key
       const user: ChatMessage = { id: uid(), role: "user", text };
       const aid = uid();
       const history = [...messages, user].map((m) => ({ role: m.role, content: m.text }));
@@ -65,7 +67,7 @@ export function Chat({ settings, onApply, onUndo, onOpenSettings }: Props) {
         abortRef.current = null;
       }
     },
-    [messages, streaming, settings, onApply],
+    [messages, streaming, settings, onApply, onUserMessage],
   );
 
   const stop = () => abortRef.current?.abort();

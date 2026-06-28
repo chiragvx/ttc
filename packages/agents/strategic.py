@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from packages.ledger.requirements import Requirement, VerificationMatrix, VerificationMethod
 
@@ -30,7 +30,10 @@ class RequirementSpec:
 
 class StrategicProvider(ABC):
     @abstractmethod
-    def plan_requirements(self, goal: str) -> list[RequirementSpec]: ...
+    def plan_requirements(self, goal: str, *, inject_default_fs: bool = True) -> list[RequirementSpec]:
+        """Parse a goal into requirement TARGETS. With inject_default_fs, a default FS floor is added
+        when none is stated (full-goal planning); without it, only explicitly-stated targets are
+        returned (incremental extraction from a chat message)."""
 
 
 _FS = re.compile(r"(?:fs|factor of safety)\s*(?:of|=|>=)?\s*([0-9]+(?:\.[0-9]+)?)", re.I)
@@ -41,7 +44,7 @@ _HOURS = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*(?:h|hr|hour)", re.I)
 class HeuristicStrategicProvider(StrategicProvider):
     """Deterministic, rule-based goal -> requirements (no LLM)."""
 
-    def plan_requirements(self, goal: str) -> list[RequirementSpec]:
+    def plan_requirements(self, goal: str, *, inject_default_fs: bool = True) -> list[RequirementSpec]:
         specs: list[RequirementSpec] = []
         if (m := _FS.search(goal)):
             specs.append(RequirementSpec(f"factor of safety >= {m.group(1)}", "factor_of_safety", ">=", float(m.group(1))))
@@ -50,7 +53,7 @@ class HeuristicStrategicProvider(StrategicProvider):
         if (m := _HOURS.search(goal)):
             secs = float(m.group(1)) * 3600.0
             specs.append(RequirementSpec(f"print time <= {m.group(1)} h", "print_time_s", "<=", secs))
-        if not any(s.metric == "factor_of_safety" for s in specs):
+        if inject_default_fs and not any(s.metric == "factor_of_safety" for s in specs):
             specs.append(RequirementSpec("default factor of safety >= 1.5", "factor_of_safety", ">=", 1.5))
         return specs
 
@@ -63,6 +66,20 @@ class StrategicAgent:
         specs = self.provider.plan_requirements(goal)
         reqs = [Requirement(id=f"R{i+1}", text=s.text, metric=s.metric, op=s.op, target=s.target,
                             method=VerificationMethod(s.method)) for i, s in enumerate(specs)]
+        return VerificationMatrix(reqs)
+
+    def merge(self, matrix: VerificationMatrix, message: str) -> VerificationMatrix:
+        """Fold any TARGETS stated in a chat message into the existing matrix (upsert by metric). A
+        message with no recognizable target leaves the matrix untouched — so ordinary chat doesn't wipe
+        the goal. This is what lets the chat be the single input: goals accrete as the conversation goes."""
+        specs = self.provider.plan_requirements(message, inject_default_fs=False)
+        if not specs:
+            return matrix
+        by_metric = {r.metric: r for r in matrix.requirements}
+        for s in specs:
+            by_metric[s.metric] = Requirement(id="", text=s.text, metric=s.metric, op=s.op,
+                                              target=s.target, method=VerificationMethod(s.method))
+        reqs = [replace(r, id=f"R{i+1}") for i, r in enumerate(by_metric.values())]
         return VerificationMatrix(reqs)
 
     def floor_fs(self, matrix: VerificationMatrix) -> float | None:

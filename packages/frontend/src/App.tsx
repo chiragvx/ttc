@@ -152,9 +152,10 @@ export default function App() {
 
       <div style={{ display: "grid", gridTemplateColumns: "380px 1fr", minHeight: 0 }}>
         <aside style={{ padding: 14, borderRight: "1px solid #30363d", minHeight: 0, display: "flex", flexDirection: "column" }}>
-          <RequirementsCard data={requirements} onSetGoal={applyGoal} onOptimize={runOptimize} />
+          <RequirementsCard data={requirements} onOptimize={runOptimize} />
           <div style={{ flex: 1, minHeight: 0 }}>
-            <Chat settings={settings} onApply={applyDeltas} onUndo={undo} onOpenSettings={() => setSettingsOpen(true)} />
+            <Chat settings={settings} onApply={applyDeltas} onUndo={undo} onUserMessage={applyGoal}
+                  onOpenSettings={() => setSettingsOpen(true)} />
           </div>
         </aside>
         <main style={{ position: "relative", minHeight: 0 }}>

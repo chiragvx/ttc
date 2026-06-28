@@ -1,8 +1,8 @@
-import { useState } from "react";
 import type { RequirementsData } from "./api";
 
-// The design goal + a grounded compliance readout: each requirement judged against the LIVE metric.
-// factor_of_safety is "?" (unknown) until a real solver verdict exists — never assumed green.
+// A read-only compliance widget. The GOAL is stated in the chat (the single input) — this panel just
+// shows each requirement judged against the LIVE metric. factor_of_safety is "?" (unknown) until a
+// real solver verdict exists — never assumed green.
 const MARK: Record<string, { icon: string; color: string }> = {
   SATISFIED: { icon: "✓", color: "#3fb950" },
   VIOLATED: { icon: "✗", color: "#f85149" },
@@ -10,40 +10,27 @@ const MARK: Record<string, { icon: string; color: string }> = {
 };
 
 export function RequirementsCard({
-  data, onSetGoal, onOptimize,
+  data, onOptimize,
 }: {
   data: RequirementsData | null;
-  onSetGoal: (goal: string) => void;
   onOptimize: () => void;
 }) {
-  const [goal, setGoal] = useState("");
   const fsUnmet = data?.requirements.some((r) => r.metric === "factor_of_safety" && r.status !== "SATISFIED");
 
   return (
     <div style={card}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-        <strong style={{ fontSize: 13 }}>Design goal</strong>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: data?.goal_set ? 8 : 0 }}>
+        <strong style={{ fontSize: 13 }}>Goal &amp; compliance</strong>
         {data?.goal_set && (
-          <span style={{ fontSize: 12, color: "#8b949e" }}>
-            {data.satisfied}/{data.total} met
-          </span>
+          <span style={{ fontSize: 12, color: "#8b949e" }}>{data.satisfied}/{data.total} met</span>
         )}
       </div>
 
-      <form
-        onSubmit={(e) => { e.preventDefault(); if (goal.trim()) onSetGoal(goal.trim()); }}
-        style={{ display: "flex", gap: 6, marginBottom: data?.goal_set ? 10 : 0 }}
-      >
-        <input
-          value={goal}
-          onChange={(e) => setGoal(e.target.value)}
-          placeholder="e.g. hold 200 N at FS 2, under 30 g"
-          style={input}
-        />
-        <button type="submit" style={btn}>Set</button>
-      </form>
-
-      {data?.goal_set && (
+      {!data?.goal_set ? (
+        <div style={{ fontSize: 11, color: "#8b949e" }}>
+          State a goal in chat — e.g. <i>“a bracket that holds 200&nbsp;N at FS&nbsp;2, under 200&nbsp;g”</i>.
+        </div>
+      ) : (
         <>
           <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 4 }}>
             {data.requirements.map((r) => {
@@ -76,6 +63,4 @@ export function RequirementsCard({
 }
 
 const card: React.CSSProperties = { padding: "12px 14px", border: "1px solid #30363d", borderRadius: 10, background: "#161b22", marginBottom: 12 };
-const input: React.CSSProperties = { flex: 1, background: "#0d1117", border: "1px solid #30363d", borderRadius: 6, color: "#c9d1d9", padding: "5px 8px", fontSize: 12 };
-const btn: React.CSSProperties = { background: "#238636", border: "none", borderRadius: 6, color: "white", padding: "5px 12px", fontSize: 12, cursor: "pointer" };
 const fixBtn: React.CSSProperties = { marginTop: 10, width: "100%", background: "#1f6feb", border: "none", borderRadius: 6, color: "white", padding: "6px 10px", fontSize: 12, cursor: "pointer" };

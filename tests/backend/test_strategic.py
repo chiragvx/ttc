@@ -20,6 +20,23 @@ def test_default_fs_when_unspecified():
     assert fs and fs[0].target == 1.5
 
 
+def test_merge_accretes_targets_across_messages():
+    agent = StrategicAgent()
+    m = agent.plan("a bracket at FS 2")                 # {FS 2}
+    m = agent.merge(m, "actually make it under 30 g")    # + mass, FS kept
+    metrics = {r.metric: r.target for r in m.requirements}
+    assert metrics == {"factor_of_safety": 2.0, "mass_g": 30.0}
+    m = agent.merge(m, "bump it to FS 3")                # upsert FS, mass kept
+    metrics = {r.metric: r.target for r in m.requirements}
+    assert metrics == {"factor_of_safety": 3.0, "mass_g": 30.0}
+
+
+def test_merge_ignores_messages_with_no_target():
+    agent = StrategicAgent()
+    m = agent.plan("a bracket at FS 2")
+    assert agent.merge(m, "make it look nicer please") is m   # untouched -> ordinary chat won't wipe the goal
+
+
 def test_matrix_evaluates_against_metrics():
     matrix = StrategicAgent().plan("bracket at FS 2, under 30 g")
     # FS met, mass violated
