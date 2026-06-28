@@ -165,10 +165,24 @@ class SessionState:
                 RIB: led.domains.structure.internal_rib_spacing_mm.value,
                 HOLE_DIA: led.domains.manufacturing.hole_diameter_mm.value}
 
+    def effective_fs_floor(self) -> float:
+        # the LLM sets the TARGET; everything downstream enforces it. The enforced floor is the stricter
+        # of the project default and whatever the stated goal demands.
+        base = self.ledger().global_constraints.factor_of_safety_floor
+        goal = self.strategic.floor_fs(self.matrix)
+        return max(base, goal) if goal is not None else base
+
     def resolved_ledger(self) -> MasterParametricLedger:
-        # the export gate sees `derived` resolved from the latest matching analysis verdict
-        return ledger_with_derived(self.ledger(), self.verdict_store.verdicts(self.project_id),
-                                   fingerprint=fingerprint())
+        # the export gate sees `derived` resolved from the latest matching analysis verdict, AND the
+        # FS floor RAISED to whatever the stated goal demands. Both are resolved at read time on a
+        # fresh fold; neither is persisted.
+        led = ledger_with_derived(self.ledger(), self.verdict_store.verdicts(self.project_id),
+                                  fingerprint=fingerprint())
+        floor = self.effective_fs_floor()
+        if floor > led.global_constraints.factor_of_safety_floor:
+            gc = led.global_constraints.model_copy(update={"factor_of_safety_floor": floor})
+            led = led.model_copy(update={"global_constraints": gc})
+        return led
 
     def signoff(self, reviewer: str) -> None:
         self.log.append_signoff(reviewer, ts=_TS)
@@ -214,6 +228,7 @@ def create_app() -> FastAPI:
         return {
             "goal_set": bool(state.matrix.requirements),
             "implied_fs_floor": state.strategic.floor_fs(state.matrix),  # the FS the goal demands
+            "enforced_fs_floor": state.effective_fs_floor(),             # what the export gate enforces
             "metrics": metrics,
             "satisfied": sum(1 for r in results if r.status.value == "SATISFIED"),
             "total": len(results),
@@ -262,7 +277,7 @@ def create_app() -> FastAPI:
         lo, hi = led.domains.structure.skin_thickness_mm.bounds
         rib = led.domains.structure.internal_rib_spacing_mm.value
         hole_dia = led.domains.manufacturing.hole_diameter_mm.value  # held fixed across the sweep
-        fs_floor = led.global_constraints.factor_of_safety_floor
+        fs_floor = state.effective_fs_floor()  # optimize toward the STATED goal, not just the default
         candidates = [c for c in (2.0, 3.0, 4.0, 5.0) if lo <= c <= hi]
         if os.environ.get("REDIS_URL"):  # durable queued path (worker) — poll /optimize/status
             from packages.truth_plane import jobs

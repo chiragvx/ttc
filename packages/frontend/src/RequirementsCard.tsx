@@ -10,12 +10,14 @@ const MARK: Record<string, { icon: string; color: string }> = {
 };
 
 export function RequirementsCard({
-  data, onSetGoal,
+  data, onSetGoal, onOptimize,
 }: {
   data: RequirementsData | null;
   onSetGoal: (goal: string) => void;
+  onOptimize: () => void;
 }) {
   const [goal, setGoal] = useState("");
+  const fsUnmet = data?.requirements.some((r) => r.metric === "factor_of_safety" && r.status !== "SATISFIED");
 
   return (
     <div style={card}>
@@ -59,8 +61,13 @@ export function RequirementsCard({
           </ul>
           {data.implied_fs_floor != null && (
             <div style={{ fontSize: 11, color: "#8b949e", marginTop: 8 }}>
-              Goal demands FS ≥ {data.implied_fs_floor}. FS is verified by the solver — run analysis to ground it.
+              Goal demands FS ≥ {data.implied_fs_floor}; the export gate now enforces FS ≥ {data.enforced_fs_floor}.
             </div>
+          )}
+          {fsUnmet && (
+            <button onClick={onOptimize} style={fixBtn}>
+              Find the lightest design meeting FS ≥ {data.enforced_fs_floor}
+            </button>
           )}
         </>
       )}
@@ -71,3 +78,4 @@ export function RequirementsCard({
 const card: React.CSSProperties = { padding: "12px 14px", border: "1px solid #30363d", borderRadius: 10, background: "#161b22", marginBottom: 12 };
 const input: React.CSSProperties = { flex: 1, background: "#0d1117", border: "1px solid #30363d", borderRadius: 6, color: "#c9d1d9", padding: "5px 8px", fontSize: 12 };
 const btn: React.CSSProperties = { background: "#238636", border: "none", borderRadius: 6, color: "white", padding: "5px 12px", fontSize: 12, cursor: "pointer" };
+const fixBtn: React.CSSProperties = { marginTop: 10, width: "100%", background: "#1f6feb", border: "none", borderRadius: 6, color: "white", padding: "6px 10px", fontSize: 12, cursor: "pointer" };

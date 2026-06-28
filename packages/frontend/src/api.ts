@@ -33,7 +33,7 @@ export interface RequirementRow {
   method: string; status: "SATISFIED" | "VIOLATED" | "UNKNOWN"; value: number | null;
 }
 export interface RequirementsData {
-  goal_set: boolean; implied_fs_floor: number | null;
+  goal_set: boolean; implied_fs_floor: number | null; enforced_fs_floor: number;
   satisfied: number; total: number; requirements: RequirementRow[];
   metrics: Record<string, number | null>;
 }

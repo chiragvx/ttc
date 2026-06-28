@@ -65,3 +65,34 @@ def test_violated_fs_goal_is_reported_not_hidden(monkeypatch):
     c.post("/analyze")
     fs = {req["metric"]: req for req in c.get("/requirements").json()["requirements"]}["factor_of_safety"]
     assert fs["status"] == "VIOLATED" and fs["value"] == 2.4
+
+
+def test_goal_raises_the_enforced_export_floor(monkeypatch):
+    # the stated FS target must be ENFORCED at the gate, not merely reported. The LLM sets the target;
+    # the deterministic gate enforces it.
+    c = _client(monkeypatch)
+    c.post("/analyze")                                              # FS 2.4 (faked)
+    c.post("/signoff", params={"reviewer": "pe@example.com"})
+    assert c.post("/export/check").json()["status"] == "EXPORT_ELIGIBLE"  # default floor 1.5 -> passes
+
+    c.post("/requirements", json={"goal": "hold the load at FS 3"})  # now demand FS >= 3
+    r = c.post("/export/check").json()
+    assert r["status"] == "EXPORT_BLOCKED"                          # the SAME design is now blocked
+    assert any("below floor 3" in reason for reason in r["reasons"])
+
+
+def test_optimize_targets_the_goal_floor(monkeypatch):
+    # "Find a passing design" must aim at the STATED goal, not the default 1.5 floor
+    captured: dict = {}
+
+    def _capture(candidates, rib, hole_dia, material_name, load_n, fs_floor):
+        captured["floor"] = fs_floor
+        return {"variants": [], "best_skin": None, "best_mass_g": None, "best_verdict": None}
+
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(app_module, "optimize_in_subprocess", _capture)
+    c = TestClient(app_module.create_app())
+    c.post("/requirements", json={"goal": "hold the load at FS 3"})
+    c.post("/optimize")
+    assert captured["floor"] == 3.0   # the goal raised the sweep's target floor

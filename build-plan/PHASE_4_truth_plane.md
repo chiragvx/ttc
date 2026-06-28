@@ -90,6 +90,14 @@ judged **SATISFIED at 2.22** against the real verdict for the matching geometry;
 (no verdict) → FS flips to **UNKNOWN** while mass stays known (160 g). The conversation now knows the
 goal and refuses to claim safety it can't prove.
 
+**The goal is ENFORCED, not just reported** (`SessionState.effective_fs_floor` = max(default, goal)):
+- The **export gate** raises its FS floor to the goal at read time — an already-eligible design (FS
+  2.4 vs default 1.5) goes **BLOCKED** the moment a stricter "FS 3" goal is stated.
+- **Optimize is goal-aware** — the sweep targets the effective floor, and the card surfaces a *"Find
+  the lightest design meeting FS ≥ N"* action when FS is unmet. Live: with an "FS 3" goal, Optimize
+  rejects skin 2/3/4 (FS 0.56/1.24/2.17) and picks **skin 5 (FS 3.36)** — a stronger design than the
+  default-floor sweep's skin 4. The LLM sets the target; the deterministic gate + real solver enforce it.
+
 ## Domain — a tunable bolt-hole feature (the part gets designable)
 
 The part was a plate with **hardcoded** bolt-holes (`n_holes=4, hole_dia=6mm`) — the agent could only
