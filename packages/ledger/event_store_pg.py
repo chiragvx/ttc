@@ -14,23 +14,25 @@ import os
 from packages.ledger.derived_resolver import Verdict
 from packages.ledger.events import BaseEventLog, Event, EventKind
 
-_DDL = """
-CREATE TABLE IF NOT EXISTS events (
-  seq INTEGER PRIMARY KEY, kind TEXT NOT NULL, actor TEXT NOT NULL, ts TEXT NOT NULL,
-  payload TEXT NOT NULL, prev_hash TEXT NOT NULL, hash TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS artifacts (sha256 TEXT PRIMARY KEY, content BYTEA NOT NULL);
-CREATE TABLE IF NOT EXISTS verdicts (
-  id SERIAL PRIMARY KEY, project_id TEXT NOT NULL, geo_sig TEXT NOT NULL, fingerprint TEXT NOT NULL,
-  verdict_json TEXT NOT NULL, created TIMESTAMPTZ DEFAULT now()
-);
-"""
+_DDL = [
+    """CREATE TABLE IF NOT EXISTS events (
+        seq INTEGER PRIMARY KEY, kind TEXT NOT NULL, actor TEXT NOT NULL, ts TEXT NOT NULL,
+        payload TEXT NOT NULL, prev_hash TEXT NOT NULL, hash TEXT NOT NULL)""",
+    "CREATE TABLE IF NOT EXISTS artifacts (sha256 TEXT PRIMARY KEY, content BYTEA NOT NULL)",
+    """CREATE TABLE IF NOT EXISTS verdicts (
+        id SERIAL PRIMARY KEY, project_id TEXT NOT NULL, geo_sig TEXT NOT NULL, fingerprint TEXT NOT NULL,
+        verdict_json TEXT NOT NULL, created TIMESTAMPTZ DEFAULT now())""",
+]
 
 
 def _connect(dsn: str | None = None):
     import psycopg
     conn = psycopg.connect(dsn or os.environ["DATABASE_URL"], autocommit=True)
-    conn.execute(_DDL)
+    for stmt in _DDL:
+        try:
+            conn.execute(stmt)
+        except (psycopg.errors.UniqueViolation, psycopg.errors.DuplicateTable):
+            pass  # CREATE TABLE IF NOT EXISTS races across concurrent connections; the table exists
     return conn
 
 

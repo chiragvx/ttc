@@ -35,10 +35,13 @@ services:
         condition: service_started
     ports:
       - "8000:8000"
+    volumes:
+      - .:/app          # use host code (dist is baked at build time, served from here)
 
   worker:
     image: ttc-app
-    command: ["dramatiq", "packages.truth_plane.worker"]
+    # 1 process: FS analysis is heavy, and it avoids the CREATE-TABLE-IF-NOT-EXISTS race storm
+    command: ["dramatiq", "packages.truth_plane.worker", "--processes", "1", "--threads", "2"]
     environment:
       DATABASE_URL: postgresql://postgres:cad@postgres:5432/cad
       REDIS_URL: redis://redis:6379/0
@@ -46,6 +49,8 @@ services:
       - backend
       - postgres
       - redis
+    volumes:
+      - .:/app
 
 volumes:
   pgdata:

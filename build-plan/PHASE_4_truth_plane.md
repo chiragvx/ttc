@@ -1,7 +1,11 @@
 # Phase 4 — Truth-Plane Activation (the grounded analysis loop, live)
 
-**Status:** 🟢 Built & verified (loop logic green on Windows); the full-stack compose run is blocked by
-a host issue (Docker unresponsive — C: full), not by the code.
+**Status:** 🟢 **DONE & verified live.** Loop green on Windows, real-CalculiX e2e green in the
+container, AND the **full wedge stack runs end-to-end via `docker compose up`**: a slider change →
+`/analyze` **queued to the Dramatiq worker** → real CalculiX (~8 s) → verdict → the export gate
+**flips ELIGIBLE** → Sign off & **Export STEP**; a geometry change makes it **stale**; verdicts +
+events **persist in Postgres across a backend restart**. (Docker had wedged on a full C: — fixed by
+freeing C: + a hard Docker Desktop restart.)
 **Goal:** *chat/slider → change a parameter → real CalculiX FS (durable async job) → the export gate
 flips ELIGIBLE in the browser.* Activates the third architecture tier on the documented wedge stack.
 
@@ -18,7 +22,7 @@ resolved, never folded. (`packages/ledger/derived_resolver.py`.)
 | Piece | Module | Tests |
 |---|---|---|
 | **Derived resolver** (signature, latest-verdict, resolve, auto-invalidate) | `ledger/derived_resolver.py` | `tests/ledger/test_derived_resolver.py` ✅ |
-| **Grounded analysis** (render → CalculiX FS → validity → Verdict) | `truth_plane/analysis.py` | container e2e (blocked, see below) |
+| **Grounded analysis** (render → CalculiX FS → validity → Verdict; runs in a child process so gmsh gets a main thread) | `truth_plane/analysis.py` | `tests/solvers/test_analysis_flow.py` ✅ (real CalculiX) |
 | **Dramatiq actor** (idempotent FS job; StubBroker in tests, Redis in worker) | `truth_plane/jobs.py`, `worker.py` | `tests/backend/test_jobs.py` ✅ |
 | **Verdict store** (in-memory + Postgres) | `truth_plane/verdict_store.py`, `ledger/event_store_pg.py` | (pg via compose) |
 | **API:** `/analyze` (inline or queued, cached), `/analyze/status`, `/signoff`, `/export/step`; `/export/check` resolver-based | `transport/app.py` | `tests/backend/test_analysis_api.py` ✅ |
@@ -31,15 +35,14 @@ resolved, never folded. (`packages/ledger/derived_resolver.py`.)
 cache, real STEP export) is verified in `test_analysis_api.py` with the solver faked (build123d export
 is real); the real CalculiX FS is already validated in `test_fs_cantilever` + the hero pipeline.
 
-## Blocked — host issue (not the code)
+## Live run
 
-`docker compose up` and the container e2e (`tests/solvers/test_analysis_flow.py`, real CalculiX) are
-**blocked because Docker is unresponsive** — even a trivial `docker run` hangs. Root cause: **C: is
-100% full**, and Docker Desktop's data lives on C:. **Free C:**, then:
 ```
-docker compose up --build      # -> http://localhost:8000
+docker compose up --build      # -> http://localhost:8000  (backend serves the SPA + solvers)
 ```
-The container test runs with `docker run -v $PWD:/app gtc-dev pytest tests/solvers/test_analysis_flow.py`.
+(Docker had wedged on a 100%-full C: — Docker Desktop's data lives on C:. Freeing C: + a hard restart
+of Docker Desktop recovered it; the real-CalculiX container e2e is green.) The container test alone:
+`docker run --rm -v $PWD:/app gtc-dev pytest tests/solvers/test_analysis_flow.py`.
 
 ## Out of scope (deferred, as planned)
 
