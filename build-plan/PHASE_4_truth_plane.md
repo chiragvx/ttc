@@ -66,6 +66,30 @@ sweep over skin ∈ {2,3,4,5}mm → FS `0.57 / 1.25 / 2.22 / 3.39` → **best_sk
 clearing FS ≥ 1.5; 3mm @ 1.25 fails) → frontend applies 4.0 via WS (`2.0→4.0 APPLIED`) → the stored
 verdict resolves → export flips **EXPORT_ELIGIBLE** → a real 30 KB ISO-10303-21 **STEP** downloads.
 
+## Goal-grounded conversational design (the AI layer, wired live)
+
+The chat was a stateless delta-puppet — it nudged sliders but had no concept of the user's **goal**.
+The strategic requirements layer (`agents/strategic.py`, `ledger/requirements.py`) existed but was
+orphaned. Now the session carries the goal as a `VerificationMatrix` and judges the design against it.
+
+| Piece | Module |
+|---|---|
+| **Goal → targets** (`StrategicAgent.plan`: NL goal → `Requirement`s; never originates a safety value, only TARGETS) | `agents/strategic.py` |
+| **Grounded metric snapshot** (`SessionState.metrics`: FS from the **resolved real-solver verdict**, mass/time from deterministic geometry) | `transport/app.py` |
+| **API** `POST /requirements` (set goal), `GET /requirements` (compliance readout: per-req SATISFIED/VIOLATED/**UNKNOWN** + `implied_fs_floor`) | `transport/app.py` |
+| **Frontend** goal input + compliance card (✓/✗/? per requirement vs the live numbers; refreshes on analyze/optimize/geometry-change) | `frontend/src/{RequirementsCard,App,api}` |
+
+**The keystone — inversion #1 made conversational:** `factor_of_safety` in the readout comes from the
+real verdict, so it is **UNKNOWN until a solver has run for the current geometry** — never assumed
+green. Mass / print-time are deterministic geometry and are known immediately. Tests:
+`test_requirements_api.py` (goal parse → targets + implied FS floor; FS UNKNOWN→SATISFIED after analyze;
+a too-strict goal reported VIOLATED, not hidden) — 4 passed.
+
+**Live (compose) verified:** goal *"holds 200 N at FS 2, under 200 g"* → `implied_fs_floor 2.0`; FS
+judged **SATISFIED at 2.22** against the real verdict for the matching geometry; change skin 4→3.5
+(no verdict) → FS flips to **UNKNOWN** while mass stays known (160 g). The conversation now knows the
+goal and refuses to claim safety it can't prove.
+
 ## Out of scope (deferred, as planned)
 
 Firecracker/gVisor sandbox (analysis runs trusted templated code); real PrusaSlicer sidecar (analytic

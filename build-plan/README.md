@@ -4,13 +4,17 @@ Master index for turning the `prd-27-8.14` vision into a real product, engineere
 (dev-time) and powered by Claude (runtime).
 
 **Last updated:** 2026-06-28
-**Current phase:** Phases 0–3 implemented & green (**77 backend tests pass on Windows**, more in the
-container). Spike 4 fully PASSES (deflection-validated FS + 19/19 auto-mesh). Built across the phases:
-ledger + rules validator + event store/replay (in-mem + SQL), hero-bracket end-to-end, sandbox
-kill-primitives, **strategic macro agent**, **OpenRouter/DeepSeek delta-emitter** + runtime **CLI**,
-**3-variant sweep**, **project/branch service**, **neutral STEP/STL export**, **cost accounting**, and a
-**React + react-three-fiber frontend** (builds clean). Gated/remaining: live keys, microVM isolation,
-live PG/RLS, scale-infra, and the specialist spikes (identity, FEA methodology, legal).
+**Current phase:** Phases 0–4 implemented & green (**92 backend tests pass on Windows**, more in the
+container) and the **full wedge stack runs end-to-end on `docker compose up`**. Spike 4 fully PASSES
+(deflection-validated FS + 19/19 auto-mesh). Built across the phases: ledger + rules validator + event
+store/replay (in-mem + SQL + **Postgres**), hero-bracket end-to-end, sandbox kill-primitives,
+**strategic macro agent**, **OpenRouter/DeepSeek delta-emitter** + runtime **CLI**, **derived-resolution
++ Dramatiq FS jobs**, **live `/optimize` 3-variant sweep**, **project/branch service**, **neutral
+STEP/STL export**, **cost accounting**, and a **React + react-three-fiber chat frontend** (builds clean).
+The live loop — chat/slider → real CalculiX FS / optimize → export gate flips ELIGIBLE → STEP — is
+verified on compose. Gated/remaining: live keys (CI secret), microVM isolation, PG **RLS**/multi-tenant
+auth, real slicer cost, WS status push (currently polling), scale-infra, and the specialist spikes
+(OCAF identity, FEA methodology, legal).
 
 > ⚠️ Host note: the dev machine's **C: drive is full** — point Python/npm temp at D:
 > (`TEMP=D:/pytmp`) or tests that write temp files will hit `OSError: No space left on device`.
@@ -54,7 +58,7 @@ never blocks a frame, never re-invoked on replay). Full detail: [`reference/TECH
 | **1 — Foundation** | 30–90 d | Hardened deterministic substrate | 🟢 **Backbone done** (ledger, event store + replay, rules validator, review FSM, determinism, 1 solver) → [`PHASE_1.md`](PHASE_1.md) |
 | **2 — MVP** | 3–6 mo | Grounded product w/ human-in-loop | 🟢 **Backbone done** (requirements matrix, BOM/datums, agent loop + evals, WS protocol + NACK, estimator) → [`PHASE_2.md`](PHASE_2.md) |
 | **3 — Scale / Aerospace** | 6–12 mo | Multi-tenant, audit-ready | 🟡 **Core arch done** (branching + invariant-aware merge, content-addressed event-sourcing); infra/optimizer/aero gated → [`PHASE_3.md`](PHASE_3.md) |
-| **4 — Truth-Plane Activation** | — | The grounded analysis loop, live | 🟢 **Built & verified** (loop green on Windows): derived-resolution, Dramatiq FS jobs, Postgres, `/analyze`→export-flip, compose stack. Compose run blocked by Docker/C:-full → [`PHASE_4_truth_plane.md`](PHASE_4_truth_plane.md) |
+| **4 — Truth-Plane Activation** | — | The grounded analysis loop, live | 🟢 **Built & verified LIVE on compose**: derived-resolution, Dramatiq FS jobs, Postgres, `/analyze`→export-flip, **`/optimize` 3-variant sweep via the worker**. End-to-end on `docker compose up`: optimize → real CalculiX → export ELIGIBLE → STEP downloads → [`PHASE_4_truth_plane.md`](PHASE_4_truth_plane.md) |
 
 > "Backbone done" = the load-bearing architecture is implemented in code and green under test. It is
 > **not** a shippable product: no frontend, no microVM sandbox, no DB, no real LLM/slicer, no

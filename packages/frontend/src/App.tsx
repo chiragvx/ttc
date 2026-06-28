@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { analyze, analyzeStatus, exportCheck, optimize, optimizeStatus, signoff } from "./api";
+import { analyze, analyzeStatus, exportCheck, getRequirements, optimize, optimizeStatus, setGoal, signoff, type RequirementsData } from "./api";
 import { AnalysisBar, type AnalysisState } from "./AnalysisBar";
 import { OptimizeResult, type OptimizeResultData } from "./OptimizeResult";
 import { Chat } from "./chat/Chat";
 import { FloatingControls } from "./FloatingControls";
+import { RequirementsCard } from "./RequirementsCard";
 import { Hud } from "./Hud";
 import { SettingsModal } from "./SettingsModal";
 import { Viewport } from "./Viewport";
@@ -23,16 +24,27 @@ export default function App() {
     status: "idle", fs: null, solverSeconds: null, exportStatus: "EXPORT_BLOCKED",
   });
   const [optimizeResult, setOptimizeResult] = useState<OptimizeResultData | null>(null);
+  const [requirements, setRequirements] = useState<RequirementsData | null>(null);
+
+  const refreshRequirements = async () => {
+    try { setRequirements(await getRequirements()); } catch { /* ignore */ }
+  };
+  const applyGoal = async (goal: string) => {
+    try { setRequirements(await setGoal(goal)); } catch { /* ignore */ }
+  };
 
   useEffect(() => {
     exportCheck().then((e) => setAnalysis((a) => ({ ...a, exportStatus: e.status }))).catch(() => {});
+    void refreshRequirements();
   }, []);
 
-  // a geometry change invalidates the last analysis (resolver returns "unknown" -> export blocked)
+  // a geometry change invalidates the last analysis (resolver returns "unknown" -> export blocked);
+  // it also re-grounds the goal compliance (FS back to unknown, mass/time recomputed)
   const onGeometryChanged = async () => {
     try {
       const e = await exportCheck();
       setAnalysis((a) => ({ ...a, exportStatus: e.status, status: a.status === "done" ? "stale" : a.status }));
+      void refreshRequirements();
     } catch {
       /* ignore */
     }
@@ -90,6 +102,7 @@ export default function App() {
         status: "done", fs: verdict?.factor_of_safety ?? null,
         solverSeconds: verdict?.solver_seconds ?? null, exportStatus: e.status,
       });
+      void refreshRequirements(); // FS is now grounded -> the compliance readout can go green
     } catch {
       setAnalysis((a) => ({ ...a, status: "error" }));
     }
@@ -115,6 +128,7 @@ export default function App() {
       const e = await exportCheck();
       setOptimizeResult({ variants: result.variants, bestSkin: result.best_skin, bestMass: result.best_mass_g });
       setAnalysis({ status: "done", fs: best?.fs ?? null, solverSeconds: null, exportStatus: e.status });
+      void refreshRequirements();
     } catch {
       setAnalysis((a) => ({ ...a, status: "error" }));
     }
@@ -137,8 +151,11 @@ export default function App() {
       </header>
 
       <div style={{ display: "grid", gridTemplateColumns: "380px 1fr", minHeight: 0 }}>
-        <aside style={{ padding: 14, borderRight: "1px solid #30363d", minHeight: 0 }}>
-          <Chat settings={settings} onApply={applyDeltas} onUndo={undo} onOpenSettings={() => setSettingsOpen(true)} />
+        <aside style={{ padding: 14, borderRight: "1px solid #30363d", minHeight: 0, display: "flex", flexDirection: "column" }}>
+          <RequirementsCard data={requirements} onSetGoal={applyGoal} />
+          <div style={{ flex: 1, minHeight: 0 }}>
+            <Chat settings={settings} onApply={applyDeltas} onUndo={undo} onOpenSettings={() => setSettingsOpen(true)} />
+          </div>
         </aside>
         <main style={{ position: "relative", minHeight: 0 }}>
           <Viewport skinMm={params[SKIN]} />

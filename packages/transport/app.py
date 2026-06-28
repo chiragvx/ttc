@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from starlette.background import BackgroundTask
 
+from packages.agents.strategic import StrategicAgent
 from packages.ledger.apply import apply_delta
 from packages.ledger.bom import BOM, Component, ComponentKind, material
 from packages.ledger.deltas import ParameterDelta
@@ -26,6 +27,7 @@ from packages.ledger.derived_resolver import latest_verdict, ledger_with_derived
 from packages.ledger.fingerprint import fingerprint
 from packages.ledger.gates import evaluate_export_gates
 from packages.ledger.nodes import RIB, SKIN
+from packages.ledger.requirements import VerificationMatrix
 from packages.truth_plane.analysis import analyze_in_subprocess, optimize_in_subprocess  # module-level for monkeypatch
 from packages.truth_plane.verdict_store import InMemoryVerdictStore
 from packages.ledger.parameter import LockState, ParameterDef
@@ -105,6 +107,11 @@ class ChatRequest(BaseModel):
     model: str | None = None
 
 
+class GoalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    goal: str                    # natural-language design goal -> a verification matrix (TARGETS only)
+
+
 def _sse(obj: dict) -> str:
     return f"data: {json.dumps(obj)}\n\n"
 
@@ -130,6 +137,23 @@ class SessionState:
         if not self.log.events():  # fresh project -> seed genesis; else reuse the durable history
             self.log.append_genesis(make_demo_ledger(), actor="system", ts=_TS)
         self.verdict_store = _make_verdict_store()
+        # the user's GOAL as a verification matrix — the strategic layer sets TARGETS (never values);
+        # compliance is judged later against real solver / geometry metrics. Empty until a goal is stated.
+        self.strategic = StrategicAgent()
+        self.matrix: VerificationMatrix = VerificationMatrix()
+
+    def set_goal(self, goal: str) -> None:
+        self.matrix = self.strategic.plan(goal)
+
+    def metrics(self) -> dict[str, float | None]:
+        """The live, GROUNDED metric snapshot a requirement is judged against. factor_of_safety comes
+        from the resolved real-solver verdict (None == unknown == not-yet-proven, never assumed);
+        mass / print-time are deterministic geometry computations (the analytic estimate, labeled)."""
+        derived = self.resolved_ledger().derived
+        tel = _telemetry(self.ledger())
+        return {"factor_of_safety": derived.factor_of_safety,
+                "mass_g": tel.total_mass_g,
+                "print_time_s": tel.estimated_print_time_s}
 
     def ledger(self) -> MasterParametricLedger:
         return self.log.fold()
@@ -179,6 +203,35 @@ def create_app() -> FastAPI:
     def export_check():
         # derived is resolved from the latest matching analysis verdict (stale -> unknown -> blocked)
         return evaluate_export_gates(state.resolved_ledger()).model_dump(mode="json")
+
+    def _requirements_payload() -> dict:
+        # judge the stated goal against the LIVE grounded metrics — FS from the real verdict (UNKNOWN
+        # if geometry changed since the last analysis), mass/time from deterministic geometry.
+        metrics = state.metrics()
+        results = state.matrix.evaluate(metrics)
+        return {
+            "goal_set": bool(state.matrix.requirements),
+            "implied_fs_floor": state.strategic.floor_fs(state.matrix),  # the FS the goal demands
+            "metrics": metrics,
+            "satisfied": sum(1 for r in results if r.status.value == "SATISFIED"),
+            "total": len(results),
+            "requirements": [
+                {"id": r.requirement.id, "text": r.requirement.text, "metric": r.requirement.metric,
+                 "op": r.requirement.op, "target": r.requirement.target,
+                 "method": r.requirement.method.value, "status": r.status.value, "value": r.value}
+                for r in results
+            ],
+        }
+
+    @app.post("/requirements")
+    def set_requirements(req: GoalRequest):
+        # the strategic agent parses the goal into TARGETS (it never originates a safety value)
+        state.set_goal(req.goal)
+        return _requirements_payload()
+
+    @app.get("/requirements")
+    def get_requirements():
+        return _requirements_payload()
 
     @app.post("/analyze")
     async def analyze(material: str = "PLA", load_n: float = 40.0):

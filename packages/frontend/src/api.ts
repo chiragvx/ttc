@@ -25,6 +25,25 @@ export async function optimizeStatus(): Promise<any> {
 export async function exportCheck(): Promise<{ status: string; reasons: string[]; unknowns: string[] }> {
   return (await fetch("/export/check", { method: "POST" })).json();
 }
+
+// --- goal-grounded requirements (the design agent's targets, judged vs live metrics) ---
+export interface RequirementRow {
+  id: string; text: string; metric: string; op: string; target: number;
+  method: string; status: "SATISFIED" | "VIOLATED" | "UNKNOWN"; value: number | null;
+}
+export interface RequirementsData {
+  goal_set: boolean; implied_fs_floor: number | null;
+  satisfied: number; total: number; requirements: RequirementRow[];
+  metrics: Record<string, number | null>;
+}
+export async function setGoal(goal: string): Promise<RequirementsData> {
+  return (await fetch("/requirements", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ goal }),
+  })).json();
+}
+export async function getRequirements(): Promise<RequirementsData> {
+  return (await fetch("/requirements")).json();
+}
 export async function signoff(): Promise<void> {
   await fetch("/signoff?reviewer=engineer", { method: "POST" });
 }
