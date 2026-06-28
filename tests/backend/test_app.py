@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import importlib.util
+
+import pytest
 from fastapi.testclient import TestClient
 
 from packages.transport.app import create_app
@@ -65,3 +68,23 @@ def test_export_check_blocks_on_unknown_safety():
     res = c.post("/export/check").json()
     assert res["status"] == "EXPORT_BLOCKED"
     assert "factor_of_safety" in res["unknowns"]
+
+
+def test_propose_with_mock_returns_delta():
+    res = _client().post("/propose", json={"intent": "make the skin 3 mm"}).json()
+    assert res["provider"] == "mock"
+    assert res["deltas"][0]["requested_value"] == 3.0
+    assert res["clarification"] is None
+
+
+def test_propose_clarifies_on_ambiguous():
+    res = _client().post("/propose", json={"intent": "make it stronger"}).json()
+    assert res["clarification"] is not None and not res["deltas"]
+
+
+@pytest.mark.needs_kernel
+@pytest.mark.skipif(importlib.util.find_spec("build123d") is None, reason="needs build123d")
+def test_mesh_returns_real_geometry():
+    res = _client().get("/mesh", params={"skin": 3.0}).json()
+    assert len(res["positions"]) > 0 and len(res["positions"]) % 3 == 0
+    assert len(res["indices"]) > 0 and len(res["indices"]) % 3 == 0

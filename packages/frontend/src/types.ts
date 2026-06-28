@@ -34,5 +34,23 @@ export interface MutationRejected {
 
 export type ServerMessage = CascadeUpdate | MutationRejected;
 
+export interface ParameterDelta {
+  target_node: string;
+  requested_value: number;
+  set_lock?: string | null;
+  rationale?: string | null;
+}
+
+export interface ProposeResponse {
+  deltas: ParameterDelta[];
+  clarification: string | null;
+  provider: string;
+}
+
+export interface MeshData {
+  positions: number[];
+  indices: number[];
+}
+
 export const SKIN = "domains.structure.skin_thickness_mm";
 export const RIB = "domains.structure.internal_rib_spacing_mm";

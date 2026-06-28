@@ -8,6 +8,7 @@ solver tiers live behind the Truth Plane and are out of this hot path by design.
 from __future__ import annotations
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, ConfigDict
 
 from packages.ledger.apply import apply_delta
 from packages.ledger.bom import BOM, Component, ComponentKind, material
@@ -77,6 +78,13 @@ def _telemetry(ledger: MasterParametricLedger) -> TelemetryDelta:
     )
 
 
+class ProposeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    intent: str
+    api_key: str | None = None   # user-supplied OpenRouter key (else the offline mock is used)
+    model: str | None = None
+
+
 class SessionState:
     def __init__(self) -> None:
         self.log = EventLog()
@@ -116,6 +124,34 @@ def create_app() -> FastAPI:
     @app.post("/export/check")
     def export_check():
         return evaluate_export_gates(state.ledger()).model_dump(mode="json")
+
+    @app.post("/propose")
+    def propose(req: ProposeRequest):
+        # OpenRouter (user key) if provided, else the offline mock — the LLM only proposes deltas.
+        if req.api_key:
+            from packages.agents.openrouter_provider import OpenRouterDeltaProvider
+            provider = OpenRouterDeltaProvider(api_key=req.api_key, model=req.model or None)
+        else:
+            from packages.agents.mock_provider import MockProvider
+            provider = MockProvider()
+        proposal = provider.propose_delta(
+            system="", conversation=[{"role": "user", "content": req.intent}],
+            ledger_json=state.ledger().model_dump_json(),
+        )
+        return {"deltas": [d.model_dump(mode="json") for d in proposal.deltas],
+                "clarification": proposal.request_clarification,
+                "provider": "openrouter" if req.api_key else "mock"}
+
+    @app.get("/mesh")
+    def mesh(skin: float = 2.0):
+        # the REAL build123d bracket (plate thickness tracks skin), tessellated for the viewport
+        from packages.truth_plane.regen.templated import render_bracket
+        part = render_bracket(width_mm=60.0, depth_mm=40.0, thickness_mm=max(1.0, skin),
+                              hole_dia_mm=6.0, n_holes=4)
+        verts, tris = part.solid.tessellate(0.2)
+        positions = [c for v in verts for c in (v.X, v.Y, v.Z)]
+        indices = [int(i) for t in tris for i in t]
+        return {"positions": positions, "indices": indices}
 
     @app.websocket("/ws")
     async def ws(socket: WebSocket):

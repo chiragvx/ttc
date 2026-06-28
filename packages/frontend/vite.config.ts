@@ -9,6 +9,8 @@ export default defineConfig({
       "/ws": { target: "ws://localhost:8000", ws: true },
       "/ledger": "http://localhost:8000",
       "/export": "http://localhost:8000",
+      "/propose": "http://localhost:8000",
+      "/mesh": "http://localhost:8000",
     },
   },
 });
