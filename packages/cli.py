@@ -3,9 +3,9 @@
   python -m packages.cli status
   python -m packages.cli propose "make the skin 3 mm"
 
-Uses OpenRouter (DeepSeek) when OPENROUTER_API_KEY is set, else the offline mock provider. A proposal
-is AI-PROPOSED only (previewed via the rules validator); committing + sign-off + a grounded FS are
-what make a design export-eligible.
+Uses OpenRouter (DeepSeek) when OPENROUTER_API_KEY is set; with no key there is NO LLM (it says so).
+A proposal is AI-PROPOSED only (previewed via the rules validator); committing + sign-off + a grounded
+FS are what make a design export-eligible.
 """
 
 from __future__ import annotations
@@ -58,7 +58,13 @@ def main(argv: list[str] | None = None) -> int:
         _print_status(_new_session())
         return 0
 
-    session, result = run_once(args.intent)
+    provider = get_provider()
+    if provider is None:
+        print("No LLM configured — set OPENROUTER_API_KEY (see .env.example).")
+        _print_status(_new_session())
+        return 0
+
+    session, result = run_once(args.intent, provider=provider)
     if result.needs_clarification:
         print(f"? clarification needed: {result.proposal.request_clarification}")
     elif not result.proposal.deltas:

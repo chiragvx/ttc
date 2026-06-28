@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from packages.agents.strategic import MockStrategicProvider, StrategicAgent
+from packages.agents.strategic import HeuristicStrategicProvider, StrategicAgent
 from packages.ledger.requirements import ReqStatus
 
 
 def test_goal_becomes_requirements():
-    agent = StrategicAgent(MockStrategicProvider())
+    agent = StrategicAgent(HeuristicStrategicProvider())
     matrix = agent.plan("a bracket that holds the load at FS 2, prints under 2 hours, stays under 30 g")
     metrics = {r.metric for r in matrix.requirements}
     assert metrics == {"factor_of_safety", "mass_g", "print_time_s"}

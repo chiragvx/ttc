@@ -1,30 +1,20 @@
-"""Runtime agent layer: mock provider, propose->review->commit session, eval harness."""
+"""Runtime agent layer: propose->review->commit session + eval harness (test-only stub provider)."""
 
 from __future__ import annotations
 
-from packages.agents.eval import grade
-from packages.agents.mock_provider import SKIN, MockProvider
+from packages.agents.eval import CLARIFY, EvalCase, grade
 from packages.agents.runtime import CoModelingSession
 from packages.ledger.events import EventLog
+from packages.ledger.nodes import SKIN
 from packages.ledger.schema import ReviewState
 
 TS = "2026-06-28T00:00:00Z"
 
 
-def test_mock_provider_maps_intent_and_clarifies():
-    p = MockProvider()
-    good = p.propose_delta(system="", conversation=[{"role": "user", "content": "make the skin 3 mm"}], ledger_json="{}")
-    assert [(d.target_node, d.requested_value) for d in good.deltas] == [(SKIN, 3.0)]
-    assert good.request_clarification is None
-
-    amb = p.propose_delta(system="", conversation=[{"role": "user", "content": "make it stronger"}], ledger_json="{}")
-    assert amb.request_clarification is not None and not amb.deltas
-
-
-def test_session_proposes_then_human_commits(base_ledger):
+def test_session_proposes_then_human_commits(base_ledger, stub_provider):
     log = EventLog()
     log.append_genesis(base_ledger, actor="system", ts=TS)
-    session = CoModelingSession(MockProvider(), log)
+    session = CoModelingSession(stub_provider, log)
 
     result = session.propose("make the skin 3 mm", ts=TS)
     assert not result.needs_clarification
@@ -40,16 +30,22 @@ def test_session_proposes_then_human_commits(base_ledger):
     assert log.fold().review.state is ReviewState.ENGINEER_REVIEWED
 
 
-def test_clarification_proposal_commits_nothing(base_ledger):
+def test_clarification_proposal_commits_nothing(base_ledger, stub_provider):
     log = EventLog()
     log.append_genesis(base_ledger, actor="system", ts=TS)
-    session = CoModelingSession(MockProvider(), log)
-    result = session.propose("make it stronger", ts=TS)
+    session = CoModelingSession(stub_provider, log)
+    result = session.propose("make it better somehow", ts=TS)
     assert result.needs_clarification
     assert not result.proposal.deltas
+    assert SKIN  # node constant import sanity
 
 
-def test_eval_harness_golden_is_perfect():
-    report = grade(MockProvider())
-    assert report.accuracy == 1.0, report.failures
-    assert report.clarification_precision == 1.0
+def test_eval_harness_computes_metrics(stub_provider):
+    cases = [
+        EvalCase("make the skin 3 mm", [(SKIN, 3.0)]),     # stub correct
+        EvalCase("make it stronger", CLARIFY),             # stub clarifies (correct)
+        EvalCase("make the skin 3 mm", [(SKIN, 99.0)]),    # stub returns 3.0 -> WRONG
+    ]
+    report = grade(stub_provider, cases)
+    assert report.total == 3 and report.passed == 2       # one mismatch detected
+    assert report.clarified == 1 and report.clarification_precision == 1.0

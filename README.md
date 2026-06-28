@@ -23,13 +23,14 @@ python -m pip install -e ".[dev]"   # pure-Python backbone deps
 python -m pytest -q                  # backbone tests (kernel/solver tests skip without the image)
 docker run --rm gtc-dev python -m pytest -q   # full suite (+ determinism, FS, sandbox, robustness)
 
-# try the runtime CLI (uses the mock provider; set OPENROUTER_API_KEY for the real DeepSeek emitter)
+# the runtime CLI (set OPENROUTER_API_KEY for the DeepSeek emitter; without a key it says "no LLM")
 python -m packages.cli propose "make the skin 3 mm"
 python -m packages.cli status
 ```
 
 The runtime LLM is **OpenRouter** (default model `deepseek/deepseek-chat`) — copy `.env.example` to
-`.env` and set `OPENROUTER_API_KEY`. Without a key the offline mock provider is used.
+`.env` and set `OPENROUTER_API_KEY`. **Without a key there is no LLM** (the app says so) — there is no
+mock fallback.
 
 Run the full app (backend + 3D frontend):
 
@@ -53,7 +54,7 @@ packages/
   interactive_plane/ Tier-0 closed-form proxies (no OCCT/LLM/solver)
   truth_plane/regen/    determinism probe + tagged templated generator (Spike 1 fallback)
   truth_plane/solvers/  validated CalculiX FS pipeline + print estimator (Linux)
-  agents/            LLMProvider seam + mock provider + propose→review→commit session + eval harness
+  agents/            LLMProvider seam + OpenRouter provider + strategic agent + session + eval harness
   transport/         FastAPI app + two-plane WebSocket protocol (with NACK)
   frontend/          placeholder (React/r3f — not built)
 tests/

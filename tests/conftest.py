@@ -50,3 +50,31 @@ def ledger_factory():
 @pytest.fixture
 def pd_factory():
     return make_pd
+
+
+# --- a TEST-ONLY deterministic provider (the product ships no mock) ----------
+import re  # noqa: E402
+
+from packages.agents.llm_provider import LLMProvider  # noqa: E402
+from packages.ledger.deltas import DeltaProposal, ParameterDelta  # noqa: E402
+from packages.ledger.nodes import RIB, SKIN  # noqa: E402
+
+_NUM = re.compile(r"(\d+(?:\.\d+)?)")
+
+
+class StubProvider(LLMProvider):
+    """Deterministic intent->delta for tests only. NOT shipped; lives under tests/."""
+
+    def propose_delta(self, *, system: str, conversation: list[dict], ledger_json: str) -> DeltaProposal:
+        text = (conversation[-1]["content"] if conversation else "").lower()
+        m = _NUM.search(text)
+        if "skin" in text and m:
+            return DeltaProposal(deltas=[ParameterDelta(target_node=SKIN, requested_value=float(m.group(1)))])
+        if "rib" in text and m:
+            return DeltaProposal(deltas=[ParameterDelta(target_node=RIB, requested_value=float(m.group(1)))])
+        return DeltaProposal(request_clarification="Which parameter and value?")
+
+
+@pytest.fixture
+def stub_provider() -> StubProvider:
+    return StubProvider()

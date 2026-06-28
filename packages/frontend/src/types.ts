@@ -45,6 +45,7 @@ export interface ProposeResponse {
   deltas: ParameterDelta[];
   clarification: string | null;
   provider: string;
+  no_llm?: boolean;
 }
 
 export interface MeshData {

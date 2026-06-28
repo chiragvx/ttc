@@ -32,7 +32,7 @@ export function Settings({ value, onChange }: { value: LlmSettings; onChange: (s
   return (
     <div style={{ marginTop: 8 }}>
       <button onClick={() => setOpen((o) => !o)} style={btn}>
-        ⚙ LLM settings {value.apiKey ? "· OpenRouter" : "· mock"}
+        ⚙ LLM settings · {value.apiKey ? "OpenRouter" : "no LLM"}
       </button>
       {open && (
         <div style={{ marginTop: 8, padding: 12, border: "1px solid #30363d", borderRadius: 6, background: "#0d1117" }}>

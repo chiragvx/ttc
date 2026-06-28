@@ -6,11 +6,11 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      "/ws": { target: "ws://localhost:8000", ws: true },
-      "/ledger": "http://localhost:8000",
-      "/export": "http://localhost:8000",
-      "/propose": "http://localhost:8000",
-      "/mesh": "http://localhost:8000",
+      "/ws": { target: "ws://localhost:8001", ws: true },
+      "/ledger": "http://localhost:8001",
+      "/export": "http://localhost:8001",
+      "/propose": "http://localhost:8001",
+      "/mesh": "http://localhost:8001",
     },
   },
 });

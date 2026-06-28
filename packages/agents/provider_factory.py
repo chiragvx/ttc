@@ -1,7 +1,7 @@
-"""Provider selection — OpenRouter (DeepSeek) when a key is set, else the offline mock.
+"""Provider selection — OpenRouter (DeepSeek) when a key is set, otherwise NO LLM.
 
-Keeps call sites vendor-agnostic: everything depends on `LLMProvider`, and this is the one place that
-decides which concrete provider to instantiate from the environment.
+There is no mock fallback: if no key is configured, `get_provider` returns None and callers must show
+a "no LLM configured" state rather than silently faking results.
 """
 
 from __future__ import annotations
@@ -11,9 +11,9 @@ import os
 from packages.agents.llm_provider import LLMProvider
 
 
-def get_provider() -> LLMProvider:
-    if os.environ.get("OPENROUTER_API_KEY"):
-        from packages.agents.openrouter_provider import OpenRouterDeltaProvider
-        return OpenRouterDeltaProvider()
-    from packages.agents.mock_provider import MockProvider
-    return MockProvider()
+def get_provider(api_key: str | None = None, model: str | None = None) -> LLMProvider | None:
+    key = api_key or os.environ.get("OPENROUTER_API_KEY")
+    if not key:
+        return None
+    from packages.agents.openrouter_provider import OpenRouterDeltaProvider
+    return OpenRouterDeltaProvider(api_key=key, model=model)

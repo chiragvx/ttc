@@ -127,20 +127,21 @@ def create_app() -> FastAPI:
 
     @app.post("/propose")
     def propose(req: ProposeRequest):
-        # OpenRouter (user key) if provided, else the offline mock — the LLM only proposes deltas.
-        if req.api_key:
-            from packages.agents.openrouter_provider import OpenRouterDeltaProvider
-            provider = OpenRouterDeltaProvider(api_key=req.api_key, model=req.model or None)
-        else:
-            from packages.agents.mock_provider import MockProvider
-            provider = MockProvider()
-        proposal = provider.propose_delta(
-            system="", conversation=[{"role": "user", "content": req.intent}],
-            ledger_json=state.ledger().model_dump_json(),
-        )
+        # OpenRouter only — no mock. No key -> no LLM (the caller must say so, not fake a result).
+        from packages.agents.provider_factory import get_provider
+        provider = get_provider(req.api_key, req.model or None)
+        if provider is None:
+            return {"deltas": [], "clarification": None, "provider": "none", "no_llm": True}
+        try:
+            proposal = provider.propose_delta(
+                system="", conversation=[{"role": "user", "content": req.intent}],
+                ledger_json=state.ledger().model_dump_json(),
+            )
+        except Exception as e:  # bad key / model / network -> a message, not a 500
+            return {"deltas": [], "clarification": f"LLM call failed: {e}", "provider": "openrouter", "no_llm": False}
         return {"deltas": [d.model_dump(mode="json") for d in proposal.deltas],
                 "clarification": proposal.request_clarification,
-                "provider": "openrouter" if req.api_key else "mock"}
+                "provider": "openrouter", "no_llm": False}
 
     @app.get("/mesh")
     def mesh(skin: float = 2.0):

@@ -70,16 +70,12 @@ def test_export_check_blocks_on_unknown_safety():
     assert "factor_of_safety" in res["unknowns"]
 
 
-def test_propose_with_mock_returns_delta():
+def test_propose_without_key_returns_no_llm(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     res = _client().post("/propose", json={"intent": "make the skin 3 mm"}).json()
-    assert res["provider"] == "mock"
-    assert res["deltas"][0]["requested_value"] == 3.0
-    assert res["clarification"] is None
-
-
-def test_propose_clarifies_on_ambiguous():
-    res = _client().post("/propose", json={"intent": "make it stronger"}).json()
-    assert res["clarification"] is not None and not res["deltas"]
+    assert res["no_llm"] is True
+    assert res["provider"] == "none"
+    assert res["deltas"] == []
 
 
 @pytest.mark.needs_kernel

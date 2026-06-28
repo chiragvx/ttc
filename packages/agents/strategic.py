@@ -5,8 +5,9 @@ goal ("a bracket that holds 200 N at FS 2, prints under 2 h, stays under 30 g") 
 `VerificationMatrix` the rest of the system verifies geometry against. Like the delta-emitter it never
 originates a safety scalar — it sets TARGETS (requirements); the solvers later produce the values.
 
-Vendor-agnostic: `StrategicProvider` is the seam; `MockStrategicProvider` is the deterministic offline
-stand-in (an OpenRouter strategic provider would emit the same `RequirementSpec` list via tool-use).
+Vendor-agnostic: `StrategicProvider` is the seam; `HeuristicStrategicProvider` is a deterministic
+rule-based parser (an OpenRouter strategic provider would emit the same `RequirementSpec` list via
+tool-use). It is a real heuristic, not a fake LLM — the product uses no mock providers.
 """
 
 from __future__ import annotations
@@ -37,8 +38,8 @@ _MASS = re.compile(r"(?:under|<=|below|max)?\s*([0-9]+(?:\.[0-9]+)?)\s*g(?:rams)
 _HOURS = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*(?:h|hr|hour)", re.I)
 
 
-class MockStrategicProvider(StrategicProvider):
-    """Deterministic goal -> requirements (offline stand-in for the strategic LLM)."""
+class HeuristicStrategicProvider(StrategicProvider):
+    """Deterministic, rule-based goal -> requirements (no LLM)."""
 
     def plan_requirements(self, goal: str) -> list[RequirementSpec]:
         specs: list[RequirementSpec] = []
@@ -56,7 +57,7 @@ class MockStrategicProvider(StrategicProvider):
 
 class StrategicAgent:
     def __init__(self, provider: StrategicProvider | None = None) -> None:
-        self.provider = provider or MockStrategicProvider()
+        self.provider = provider or HeuristicStrategicProvider()
 
     def plan(self, goal: str) -> VerificationMatrix:
         specs = self.provider.plan_requirements(goal)

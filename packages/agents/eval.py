@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from packages.agents.llm_provider import LLMProvider
-from packages.agents.mock_provider import RIB, SKIN
+from packages.ledger.nodes import RIB, SKIN
 
 CLARIFY = "CLARIFY"
 

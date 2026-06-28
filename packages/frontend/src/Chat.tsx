@@ -27,7 +27,9 @@ export function Chat({ settings, onApply }: Props) {
     setIntent("");
     try {
       const res = await postPropose(text, settings.apiKey, settings.model);
-      if (res.clarification) {
+      if (res.no_llm) {
+        setLog((l) => [...l, { intent: text, reply: "No LLM configured — add an OpenRouter API key in ⚙ settings.", kind: "error" }]);
+      } else if (res.clarification) {
         setLog((l) => [...l, { intent: text, reply: res.clarification!, kind: "clarify" }]);
       } else if (res.deltas.length) {
         onApply(res.deltas);
@@ -48,6 +50,11 @@ export function Chat({ settings, onApply }: Props) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <h3 style={{ margin: "0 0 2px" }}>Intent</h3>
+      {!settings.apiKey && (
+        <div style={{ fontSize: 11, color: "#d29922" }}>
+          No LLM configured — add an OpenRouter key in ⚙ settings below to enable the chat.
+        </div>
+      )}
       <div style={{ display: "flex", gap: 6 }}>
         <input
           value={intent}
