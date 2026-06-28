@@ -35,6 +35,7 @@ class TelemetryDelta(_Msg):
 class MutationApplied(_Msg):
     node: str
     value: float
+    old_value: Optional[float] = None  # pre-change value, so the client can Undo
     status: str  # APPLIED | CLAMPED
 
 

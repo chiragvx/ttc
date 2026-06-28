@@ -10,6 +10,7 @@ export default defineConfig({
       "/ledger": "http://localhost:8001",
       "/export": "http://localhost:8001",
       "/propose": "http://localhost:8001",
+      "/chat": "http://localhost:8001",
       "/mesh": "http://localhost:8001",
     },
   },

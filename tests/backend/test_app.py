@@ -29,7 +29,9 @@ def test_ws_valid_mutation_returns_cascade_and_persists():
         ws.send_json({"target_node": SKIN, "requested_value": 3.0})
         msg = ws.receive_json()
     assert msg["event_type"] == "PARAMETER_CASCADE_UPDATE"
-    assert msg["mutations_applied"][0] == {"node": SKIN, "value": 3.0, "status": "APPLIED"}
+    m = msg["mutations_applied"][0]
+    assert m["node"] == SKIN and m["value"] == 3.0 and m["status"] == "APPLIED"
+    assert m["old_value"] == 2.0  # for Undo
     assert msg["telemetry_delta"]["total_mass_g"] > 0
     # committed to the shared event log
     assert c.get("/ledger").json()["domains"]["structure"]["skin_thickness_mm"]["value"] == 3.0
@@ -76,6 +78,12 @@ def test_propose_without_key_returns_no_llm(monkeypatch):
     assert res["no_llm"] is True
     assert res["provider"] == "none"
     assert res["deltas"] == []
+
+
+def test_chat_without_key_streams_no_llm():
+    res = _client().post("/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+    assert res.status_code == 200
+    assert '"type": "no_llm"' in res.text
 
 
 @pytest.mark.needs_kernel

@@ -37,6 +37,8 @@ class DeltaProposal(BaseModel):
 
     deltas: list[ParameterDelta] = Field(default_factory=list)
     request_clarification: Optional[str] = None
+    suggestions: list[str] = Field(default_factory=list,
+                                   description="quick-reply options to offer with a clarification")
 
 
 def parameter_delta_tool_schema() -> dict:

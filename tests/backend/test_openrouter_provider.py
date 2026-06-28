@@ -55,3 +55,29 @@ def test_missing_api_key_asks_for_it():
     prov = OpenRouterDeltaProvider(api_key="")  # no post injected, no key
     out = prov.propose_delta(system="", conversation=[{"role": "user", "content": "x"}], ledger_json="{}")
     assert "OPENROUTER_API_KEY" in (out.request_clarification or "")
+
+
+def test_stream_chat_yields_tokens_then_proposal():
+    # tool-call arguments fragmented across two chunks (the tricky streaming case)
+    def fake_stream(*, url, headers, json):
+        yield {"choices": [{"delta": {"content": "I'll set "}}]}
+        yield {"choices": [{"delta": {"content": "the skin."}}]}
+        yield {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": '{"deltas":[{"target_node":"'}}]}}]}
+        yield {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": SKIN + '","requested_value":3.0}]}'}}]}}]}
+
+    prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+    events = list(prov.stream_chat(messages=[{"role": "user", "content": "skin 3mm"}], ledger_json="{}"))
+
+    tokens = "".join(p for k, p in events if k == "token")
+    assert tokens == "I'll set the skin."
+    proposals = [p for k, p in events if k == "proposal"]
+    assert proposals and proposals[0].deltas == [ParameterDelta(target_node=SKIN, requested_value=3.0)]
+    assert events[-1] == ("done", None)
+
+
+def test_stream_chat_no_key_errors():
+    prov = OpenRouterDeltaProvider(api_key="")
+    events = list(prov.stream_chat(messages=[{"role": "user", "content": "x"}], ledger_json="{}"))
+    assert events == [("error", "OPENROUTER_API_KEY is not set")]

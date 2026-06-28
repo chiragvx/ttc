@@ -16,6 +16,7 @@ export interface TelemetryDelta {
 export interface MutationApplied {
   node: string;
   value: number;
+  old_value?: number | null; // pre-change value, for Undo
   status: string; // APPLIED | CLAMPED
 }
 
@@ -51,6 +52,33 @@ export interface ProposeResponse {
 export interface MeshData {
   positions: number[];
   indices: number[];
+}
+
+// --- chat (SSE) ---
+export type ChatEvent =
+  | { type: "token"; text: string }
+  | { type: "proposal"; deltas: ParameterDelta[]; clarification: string | null; suggestions: string[] }
+  | { type: "no_llm" }
+  | { type: "error"; message: string }
+  | { type: "done" };
+
+export interface DeltaOutcome {
+  node: string;
+  requested: number;
+  applied: number | null;
+  oldValue: number | null;
+  status: "APPLIED" | "CLAMPED" | "REJECTED" | "CONFLICT";
+  reason?: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  streaming?: boolean;
+  clarification?: string | null;
+  suggestions?: string[];
+  outcomes?: DeltaOutcome[];
 }
 
 export const SKIN = "domains.structure.skin_thickness_mm";

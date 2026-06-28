@@ -7,7 +7,10 @@ solver tiers live behind the Truth Plane and are out of this hot path by design.
 
 from __future__ import annotations
 
+import json
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from packages.ledger.apply import apply_delta
@@ -81,8 +84,19 @@ def _telemetry(ledger: MasterParametricLedger) -> TelemetryDelta:
 class ProposeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     intent: str
-    api_key: str | None = None   # user-supplied OpenRouter key (else the offline mock is used)
+    api_key: str | None = None   # user-supplied OpenRouter key (else no LLM)
     model: str | None = None
+
+
+class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    messages: list[dict]         # [{role, content}, ...] conversation history
+    api_key: str | None = None
+    model: str | None = None
+
+
+def _sse(obj: dict) -> str:
+    return f"data: {json.dumps(obj)}\n\n"
 
 
 class SessionState:
@@ -102,7 +116,7 @@ class SessionState:
             self.log.append_mutation(delta, actor="user", ts=_TS)
             return CascadeUpdate(
                 mutations_applied=[MutationApplied(node=outcome.target, value=outcome.new_value,
-                                                   status=outcome.status.value)],
+                                                   old_value=outcome.old_value, status=outcome.status.value)],
                 telemetry_delta=_telemetry(new),
             )
         return MutationRejected(target_node=outcome.target, status=outcome.status.value,
@@ -142,6 +156,33 @@ def create_app() -> FastAPI:
         return {"deltas": [d.model_dump(mode="json") for d in proposal.deltas],
                 "clarification": proposal.request_clarification,
                 "provider": "openrouter", "no_llm": False}
+
+    @app.post("/chat")
+    def chat(req: ChatRequest):
+        # Streams a conversational reply (prose) + an optional delta proposal. Mutates nothing —
+        # the client applies any deltas via the rules-validated WS path.
+        def gen():
+            if not req.api_key:
+                yield _sse({"type": "no_llm"})
+                return
+            from packages.agents.openrouter_provider import OpenRouterDeltaProvider
+            provider = OpenRouterDeltaProvider(api_key=req.api_key, model=req.model or None)
+            ledger_json = state.ledger().model_dump_json()
+            for kind, payload in provider.stream_chat(messages=req.messages, ledger_json=ledger_json):
+                if kind == "token":
+                    yield _sse({"type": "token", "text": payload})
+                elif kind == "proposal":
+                    yield _sse({"type": "proposal",
+                                "deltas": [d.model_dump(mode="json") for d in payload.deltas],
+                                "clarification": payload.request_clarification,
+                                "suggestions": payload.suggestions})
+                elif kind == "error":
+                    yield _sse({"type": "error", "message": payload})
+                elif kind == "done":
+                    yield _sse({"type": "done"})
+
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @app.get("/mesh")
     def mesh(skin: float = 2.0):
