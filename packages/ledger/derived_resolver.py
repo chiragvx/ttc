@@ -20,6 +20,8 @@ from packages.ledger.schema import DerivedSafety, MasterParametricLedger
 GEOMETRY_PARAMS = (
     "domains.structure.skin_thickness_mm",
     "domains.structure.internal_rib_spacing_mm",
+    "domains.structure.plate_width_mm",        # footprint changes the FEA + mass -> invalidates the verdict
+    "domains.structure.plate_depth_mm",
     "domains.manufacturing.hole_diameter_mm",  # hole size changes the FEA stress field -> invalidates the verdict
 )
 

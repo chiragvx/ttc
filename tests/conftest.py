@@ -28,6 +28,8 @@ def build_ledger(skin_bounds: tuple[float, float] = (1.0, 5.0)) -> MasterParamet
                 material_profile="PLA",
                 skin_thickness_mm=make_pd(2.0, *skin_bounds),
                 internal_rib_spacing_mm=make_pd(20.0, 10.0, 50.0),
+                plate_width_mm=make_pd(60.0, 40.0, 120.0),
+                plate_depth_mm=make_pd(40.0, 30.0, 80.0),
             ),
             manufacturing=ManufacturingDomain(
                 build_orientation_deg=make_pd(0.0, 0.0, 90.0),

@@ -10,13 +10,13 @@ import { SettingsModal } from "./SettingsModal";
 import { Viewport } from "./Viewport";
 import { loadSettings, type LlmSettings } from "./settings";
 import { useCadSocket } from "./useCadSocket";
-import { HOLE_DIA, RIB, SKIN, type DeltaOutcome, type ParameterDelta, type ServerMessage } from "./types";
+import { DEPTH, HOLE_DIA, RIB, SKIN, WIDTH, type DeltaOutcome, type ParameterDelta, type ServerMessage } from "./types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export default function App() {
   const { connected, telemetry, lastReject, send } = useCadSocket();
-  const [params, setParams] = useState<Record<string, number>>({ [SKIN]: 2, [RIB]: 20, [HOLE_DIA]: 6 });
+  const [params, setParams] = useState<Record<string, number>>({ [SKIN]: 2, [RIB]: 20, [HOLE_DIA]: 6, [WIDTH]: 60, [DEPTH]: 40 });
   const [locked, setLocked] = useState<Record<string, boolean>>({});
   const [settings, setSettings] = useState<LlmSettings>(() => loadSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -159,7 +159,7 @@ export default function App() {
           </div>
         </aside>
         <main style={{ position: "relative", minHeight: 0 }}>
-          <Viewport skinMm={params[SKIN]} holeDiaMm={params[HOLE_DIA]} />
+          <Viewport skinMm={params[SKIN]} holeDiaMm={params[HOLE_DIA]} widthMm={params[WIDTH]} depthMm={params[DEPTH]} />
           <FloatingControls
             value={params}
             locked={locked}

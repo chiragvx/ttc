@@ -1,4 +1,4 @@
-import { HOLE_DIA, RIB, SKIN } from "./types";
+import { DEPTH, HOLE_DIA, RIB, SKIN, WIDTH } from "./types";
 
 interface Bound {
   node: string;
@@ -9,6 +9,8 @@ interface Bound {
 }
 
 const BOUNDS: Bound[] = [
+  { node: WIDTH, label: "Plate width (mm)", min: 40, max: 120, step: 1 },
+  { node: DEPTH, label: "Plate depth (mm)", min: 30, max: 80, step: 1 },
   { node: SKIN, label: "Skin thickness (mm)", min: 1, max: 5, step: 0.1 },
   { node: RIB, label: "Rib spacing (mm)", min: 10, max: 50, step: 1 },
   { node: HOLE_DIA, label: "Bolt-hole dia (mm)", min: 3, max: 10, step: 0.5 },

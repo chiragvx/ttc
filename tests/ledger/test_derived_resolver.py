@@ -50,6 +50,16 @@ def test_resizing_a_bolt_hole_invalidates_verdict(base_ledger, pd_factory):
     assert latest_verdict(base_ledger, verdicts, fingerprint=FP) is None
 
 
+def test_resizing_the_plate_footprint_invalidates_verdict(base_ledger, pd_factory):
+    # plate width/depth are tunable geometry: changing the footprint changes the FEA, so an old verdict
+    # must not stand for the new size
+    sig = geometry_signature(base_ledger)
+    verdicts = [_verdict(sig)]
+    assert latest_verdict(base_ledger, verdicts, fingerprint=FP) is not None
+    base_ledger.domains.structure.plate_width_mm = pd_factory(90.0, 40.0, 120.0)
+    assert latest_verdict(base_ledger, verdicts, fingerprint=FP) is None
+
+
 def test_fingerprint_mismatch_invalidates(base_ledger):
     sig = geometry_signature(base_ledger)
     assert latest_verdict(base_ledger, [_verdict(sig)], fingerprint="different") is None

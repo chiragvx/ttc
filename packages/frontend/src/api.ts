@@ -3,9 +3,12 @@ import type { LlmSettings } from "./settings";
 
 // REST + SSE calls to the FastAPI backend (proxied by Vite in dev).
 
-export async function fetchMesh(skin: number, holeDia?: number): Promise<MeshData> {
-  const q = holeDia != null ? `&hole_dia=${encodeURIComponent(holeDia)}` : "";
-  const res = await fetch(`/mesh?skin=${encodeURIComponent(skin)}${q}`);
+export async function fetchMesh(skin: number, holeDia?: number, width?: number, depth?: number): Promise<MeshData> {
+  const p = new URLSearchParams({ skin: String(skin) });
+  if (holeDia != null) p.set("hole_dia", String(holeDia));
+  if (width != null) p.set("width", String(width));
+  if (depth != null) p.set("depth", String(depth));
+  const res = await fetch(`/mesh?${p.toString()}`);
   if (!res.ok) throw new Error(`mesh failed: ${res.status}`);
   return res.json();
 }

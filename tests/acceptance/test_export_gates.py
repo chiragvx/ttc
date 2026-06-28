@@ -37,6 +37,8 @@ def _ledger(**overrides) -> MasterParametricLedger:
                 material_profile="PLA",
                 skin_thickness_mm=_pd(2.0, 1.0, 5.0),
                 internal_rib_spacing_mm=_pd(20.0, 10.0, 50.0),
+                plate_width_mm=_pd(60.0, 40.0, 120.0),
+                plate_depth_mm=_pd(40.0, 30.0, 80.0),
             ),
             manufacturing=ManufacturingDomain(
                 build_orientation_deg=_pd(0.0, 0.0, 90.0),

@@ -85,7 +85,7 @@ def test_optimize_targets_the_goal_floor(monkeypatch):
     # "Find a passing design" must aim at the STATED goal, not the default 1.5 floor
     captured: dict = {}
 
-    def _capture(candidates, rib, hole_dia, material_name, load_n, fs_floor):
+    def _capture(candidates, base_params, material_name, load_n, fs_floor):
         captured["floor"] = fs_floor
         return {"variants": [], "best_skin": None, "best_mass_g": None, "best_verdict": None}
 

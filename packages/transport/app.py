@@ -26,7 +26,7 @@ from packages.ledger.events import EventLog
 from packages.ledger.derived_resolver import latest_verdict, ledger_with_derived
 from packages.ledger.fingerprint import fingerprint
 from packages.ledger.gates import evaluate_export_gates
-from packages.ledger.nodes import HOLE_DIA, RIB, SKIN
+from packages.ledger.nodes import DEPTH, HOLE_DIA, RIB, SKIN, WIDTH
 from packages.ledger.requirements import VerificationMatrix
 from packages.truth_plane.analysis import analyze_in_subprocess, optimize_in_subprocess  # module-level for monkeypatch
 from packages.truth_plane.verdict_store import InMemoryVerdictStore
@@ -47,7 +47,6 @@ from packages.transport.protocol import (
     TelemetryDelta,
 )
 
-_PLATE_AREA_MM2 = 60.0 * 40.0  # demo: structural mass scales with skin thickness over this area
 _PROFILE = "PLA"
 _TS = "2026-06-28T00:00:00Z"
 
@@ -65,6 +64,8 @@ def make_demo_ledger() -> MasterParametricLedger:
                 material_profile=_PROFILE,
                 skin_thickness_mm=_pd(2.0, 1.0, 5.0),
                 internal_rib_spacing_mm=_pd(20.0, 10.0, 50.0),
+                plate_width_mm=_pd(60.0, 40.0, 120.0),
+                plate_depth_mm=_pd(40.0, 30.0, 80.0),
             ),
             manufacturing=ManufacturingDomain(
                 build_orientation_deg=_pd(0.0, 0.0, 90.0),
@@ -83,9 +84,10 @@ _DEMO_BOM = BOM([
 
 
 def _telemetry(ledger: MasterParametricLedger) -> TelemetryDelta:
-    skin = ledger.domains.structure.skin_thickness_mm.value
-    vol = _PLATE_AREA_MM2 * skin
-    structural_g = material(ledger.domains.structure.material_profile).density_g_per_mm3 * vol
+    s = ledger.domains.structure
+    skin = s.skin_thickness_mm.value
+    vol = s.plate_width_mm.value * s.plate_depth_mm.value * skin  # the actual footprint, not a constant
+    structural_g = material(s.material_profile).density_g_per_mm3 * vol
     total = _DEMO_BOM.total_mass_g() + structural_g
     return TelemetryDelta(
         total_mass_g=round(total, 3),
@@ -162,8 +164,11 @@ class SessionState:
 
     def current_params(self) -> dict[str, float]:
         led = self.ledger()
-        return {SKIN: led.domains.structure.skin_thickness_mm.value,
-                RIB: led.domains.structure.internal_rib_spacing_mm.value,
+        s = led.domains.structure
+        return {SKIN: s.skin_thickness_mm.value,
+                RIB: s.internal_rib_spacing_mm.value,
+                WIDTH: s.plate_width_mm.value,
+                DEPTH: s.plate_depth_mm.value,
                 HOLE_DIA: led.domains.manufacturing.hole_diameter_mm.value}
 
     def effective_fs_floor(self) -> float:
@@ -276,17 +281,16 @@ def create_app() -> FastAPI:
         # the sanctioned 3-variant sweep: find the lightest skin that passes FS
         led = state.ledger()
         lo, hi = led.domains.structure.skin_thickness_mm.bounds
-        rib = led.domains.structure.internal_rib_spacing_mm.value
-        hole_dia = led.domains.manufacturing.hole_diameter_mm.value  # held fixed across the sweep
+        base_params = state.current_params()  # the rest of the geometry, held fixed across the skin sweep
         fs_floor = state.effective_fs_floor()  # optimize toward the STATED goal, not just the default
         candidates = [c for c in (2.0, 3.0, 4.0, 5.0) if lo <= c <= hi]
         if os.environ.get("REDIS_URL"):  # durable queued path (worker) — poll /optimize/status
             from packages.truth_plane import jobs
             jobs.configure(store=state.verdict_store, publish=None)
-            jobs.run_optimization.send(state.project_id, candidates, rib, hole_dia, "PLA", load_n, fs_floor)
+            jobs.run_optimization.send(state.project_id, candidates, base_params, "PLA", load_n, fs_floor)
             return {"status": "queued"}
         try:  # inline (dev/tests): run the sweep in a child process
-            result = await run_in_threadpool(optimize_in_subprocess, candidates, rib, hole_dia, "PLA", load_n, fs_floor)
+            result = await run_in_threadpool(optimize_in_subprocess, candidates, base_params, "PLA", load_n, fs_floor)
         except Exception as e:
             return {"status": "error", "message": str(e)}
         best_skin = result["best_skin"]
@@ -371,12 +375,15 @@ def create_app() -> FastAPI:
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @app.get("/mesh")
-    def mesh(skin: float = 2.0, hole_dia: float | None = None):
-        # the REAL build123d bracket (plate thickness tracks skin, hole size tracks the ledger), tessellated
+    def mesh(skin: float = 2.0, hole_dia: float | None = None,
+             width: float | None = None, depth: float | None = None):
+        # the REAL build123d plate; thickness/footprint/hole size track the ledger unless overridden
         from packages.truth_plane.regen.templated import render_bracket
+        s = state.ledger().domains.structure
         dia = hole_dia if hole_dia is not None else state.ledger().domains.manufacturing.hole_diameter_mm.value
-        part = render_bracket(width_mm=60.0, depth_mm=40.0, thickness_mm=max(1.0, skin),
-                              hole_dia_mm=dia, n_holes=4)
+        part = render_bracket(width_mm=width if width is not None else s.plate_width_mm.value,
+                              depth_mm=depth if depth is not None else s.plate_depth_mm.value,
+                              thickness_mm=max(1.0, skin), hole_dia_mm=dia, n_holes=4)
         verts, tris = part.solid.tessellate(0.2)
         positions = [c for v in verts for c in (v.X, v.Y, v.Z)]
         indices = [int(i) for t in tris for i in t]

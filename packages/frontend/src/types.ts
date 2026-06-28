@@ -83,4 +83,6 @@ export interface ChatMessage {
 
 export const SKIN = "domains.structure.skin_thickness_mm";
 export const RIB = "domains.structure.internal_rib_spacing_mm";
+export const WIDTH = "domains.structure.plate_width_mm";
+export const DEPTH = "domains.structure.plate_depth_mm";
 export const HOLE_DIA = "domains.manufacturing.hole_diameter_mm";

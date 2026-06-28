@@ -41,6 +41,9 @@ class StructureDomain(_Strict):
     material_profile: str  # string key resolved against the (versioned) material DB; see external-dataset gap
     skin_thickness_mm: ParameterDef
     internal_rib_spacing_mm: ParameterDef
+    # the mounting-plate footprint: tunable continuous dims (no topology change) that drive the FEA + mass
+    plate_width_mm: ParameterDef
+    plate_depth_mm: ParameterDef
 
 
 class ManufacturingDomain(_Strict):

@@ -98,6 +98,25 @@ goal and refuses to claim safety it can't prove.
   rejects skin 2/3/4 (FS 0.56/1.24/2.17) and picks **skin 5 (FS 3.36)** — a stronger design than the
   default-floor sweep's skin 4. The LLM sets the target; the deterministic gate + real solver enforce it.
 
+## Domain — a tunable plate footprint (real geometric freedom)
+
+The part was locked to a 60×40 plate. **Width and depth are now tunable** (`structure.plate_width_mm`
+40–120, `plate_depth_mm` 30–80) — continuous box dims (no topology change → clear of the identity
+wall) that drive the FEA *and* the mass. The agent now designs a 4-DOF mounting plate (footprint +
+skin + hole), not one fixed bracket.
+
+| Piece | Module |
+|---|---|
+| **Schema params** width/depth, **in `GEOMETRY_PARAMS`** (footprint change invalidates the verdict) | `ledger/schema.py`, `ledger/derived_resolver.py` |
+| **Threaded through** render, `/mesh`, `current_params`; **mass = density·(w·d)·skin** (real footprint, not a constant) | `truth_plane/analysis.py`, `transport/app.py` |
+| **Optimize refactor** — the sweep takes a `base_params` dict (rib/hole/footprint held fixed) instead of one positional arg per param; the actor/endpoint pass it through | `truth_plane/analysis.py`, `jobs.py`, `transport/app.py` |
+| **Frontend** width/depth sliders + the viewport re-renders the real geometry on resize | `frontend/src/{FloatingControls,Viewport,App}` |
+
+Tests: `test_resizing_the_plate_footprint_invalidates_verdict`. **Live-verified:** widen 60→100mm →
+mass rises (geometry-driven), `/mesh` honors it, and Optimize (base_params → worker) returns variants
+whose mass scales exactly with the 100×40 footprint (skin 5 → 24.8 g vs 14.9 g at 60×40) — proving
+width reaches both the mass model and CalculiX. (Schema change → demo-DB reset, as before.)
+
 ## Domain — a tunable bolt-hole feature (the part gets designable)
 
 The part was a plate with **hardcoded** bolt-holes (`n_holes=4, hole_dia=6mm`) — the agent could only
