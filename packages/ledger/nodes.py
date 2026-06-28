@@ -2,3 +2,4 @@
 
 SKIN = "domains.structure.skin_thickness_mm"
 RIB = "domains.structure.internal_rib_spacing_mm"
+HOLE_DIA = "domains.manufacturing.hole_diameter_mm"

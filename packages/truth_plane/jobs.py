@@ -60,12 +60,12 @@ def run_fs_analysis(project_id: str, params: dict, material_name: str, load_n: f
 
 
 @dramatiq.actor(max_retries=0, time_limit=900_000)
-def run_optimization(project_id: str, candidates: list, rib: float, material_name: str,
+def run_optimization(project_id: str, candidates: list, rib: float, hole_dia: float, material_name: str,
                      load_n: float, fs_floor: float) -> None:
     if _publish:
         _publish(project_id, "optimizing", None)
     try:
-        result = optimize_in_subprocess(candidates, rib, material_name, load_n, fs_floor)
+        result = optimize_in_subprocess(candidates, rib, hole_dia, material_name, load_n, fs_floor)
     except Exception:
         if _publish:
             _publish(project_id, "failed", None)

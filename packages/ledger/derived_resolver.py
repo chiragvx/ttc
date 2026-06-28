@@ -20,6 +20,7 @@ from packages.ledger.schema import DerivedSafety, MasterParametricLedger
 GEOMETRY_PARAMS = (
     "domains.structure.skin_thickness_mm",
     "domains.structure.internal_rib_spacing_mm",
+    "domains.manufacturing.hole_diameter_mm",  # hole size changes the FEA stress field -> invalidates the verdict
 )
 
 

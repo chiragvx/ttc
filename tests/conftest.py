@@ -32,6 +32,7 @@ def build_ledger(skin_bounds: tuple[float, float] = (1.0, 5.0)) -> MasterParamet
             manufacturing=ManufacturingDomain(
                 build_orientation_deg=make_pd(0.0, 0.0, 90.0),
                 slip_fit_clearance_mm=make_pd(0.2, 0.0, 1.0),
+                hole_diameter_mm=make_pd(6.0, 3.0, 10.0),
             ),
         ),
     )

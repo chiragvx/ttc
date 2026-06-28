@@ -7,14 +7,14 @@ import type { MeshData } from "./types";
 
 // Read-only viewport rendering the REAL build123d bracket (plate thickness = skin), re-fetched on
 // change (debounced ~ regen-on-release). Geometry is driven only by parameters — no mesh editing.
-function Bracket({ skinMm }: { skinMm: number }) {
+function Bracket({ skinMm, holeDiaMm }: { skinMm: number; holeDiaMm: number }) {
   const ref = useRef<Mesh>(null);
   const [mesh, setMesh] = useState<MeshData | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     const t = setTimeout(() => {
-      fetchMesh(skinMm)
+      fetchMesh(skinMm, holeDiaMm)
         .then((d) => !cancelled && setMesh(d))
         .catch(() => {});
     }, 250);
@@ -22,7 +22,7 @@ function Bracket({ skinMm }: { skinMm: number }) {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [skinMm]);
+  }, [skinMm, holeDiaMm]);
 
   const geom = useMemo(() => {
     if (!mesh) return null;
@@ -46,13 +46,13 @@ function Bracket({ skinMm }: { skinMm: number }) {
   );
 }
 
-export function Viewport({ skinMm }: { skinMm: number }) {
+export function Viewport({ skinMm, holeDiaMm }: { skinMm: number; holeDiaMm: number }) {
   return (
     <Canvas camera={{ position: [3.5, 3, 4], fov: 45 }} style={{ background: "#0d1117" }}>
       <ambientLight intensity={0.6} />
       <directionalLight position={[5, 8, 5]} intensity={1.2} />
       <directionalLight position={[-4, 2, -3]} intensity={0.4} />
-      <Bracket skinMm={skinMm} />
+      <Bracket skinMm={skinMm} holeDiaMm={holeDiaMm} />
       <gridHelper args={[20, 20, "#484f58", "#30363d"]} />
     </Canvas>
   );

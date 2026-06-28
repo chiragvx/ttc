@@ -26,7 +26,7 @@ from packages.ledger.events import EventLog
 from packages.ledger.derived_resolver import latest_verdict, ledger_with_derived
 from packages.ledger.fingerprint import fingerprint
 from packages.ledger.gates import evaluate_export_gates
-from packages.ledger.nodes import RIB, SKIN
+from packages.ledger.nodes import HOLE_DIA, RIB, SKIN
 from packages.ledger.requirements import VerificationMatrix
 from packages.truth_plane.analysis import analyze_in_subprocess, optimize_in_subprocess  # module-level for monkeypatch
 from packages.truth_plane.verdict_store import InMemoryVerdictStore
@@ -69,6 +69,7 @@ def make_demo_ledger() -> MasterParametricLedger:
             manufacturing=ManufacturingDomain(
                 build_orientation_deg=_pd(0.0, 0.0, 90.0),
                 slip_fit_clearance_mm=_pd(0.2, 0.0, 1.0),
+                hole_diameter_mm=_pd(6.0, 3.0, 10.0),
             ),
         ),
     )
@@ -161,7 +162,8 @@ class SessionState:
     def current_params(self) -> dict[str, float]:
         led = self.ledger()
         return {SKIN: led.domains.structure.skin_thickness_mm.value,
-                RIB: led.domains.structure.internal_rib_spacing_mm.value}
+                RIB: led.domains.structure.internal_rib_spacing_mm.value,
+                HOLE_DIA: led.domains.manufacturing.hole_diameter_mm.value}
 
     def resolved_ledger(self) -> MasterParametricLedger:
         # the export gate sees `derived` resolved from the latest matching analysis verdict
@@ -259,15 +261,16 @@ def create_app() -> FastAPI:
         led = state.ledger()
         lo, hi = led.domains.structure.skin_thickness_mm.bounds
         rib = led.domains.structure.internal_rib_spacing_mm.value
+        hole_dia = led.domains.manufacturing.hole_diameter_mm.value  # held fixed across the sweep
         fs_floor = led.global_constraints.factor_of_safety_floor
         candidates = [c for c in (2.0, 3.0, 4.0, 5.0) if lo <= c <= hi]
         if os.environ.get("REDIS_URL"):  # durable queued path (worker) — poll /optimize/status
             from packages.truth_plane import jobs
             jobs.configure(store=state.verdict_store, publish=None)
-            jobs.run_optimization.send(state.project_id, candidates, rib, "PLA", load_n, fs_floor)
+            jobs.run_optimization.send(state.project_id, candidates, rib, hole_dia, "PLA", load_n, fs_floor)
             return {"status": "queued"}
         try:  # inline (dev/tests): run the sweep in a child process
-            result = await run_in_threadpool(optimize_in_subprocess, candidates, rib, "PLA", load_n, fs_floor)
+            result = await run_in_threadpool(optimize_in_subprocess, candidates, rib, hole_dia, "PLA", load_n, fs_floor)
         except Exception as e:
             return {"status": "error", "message": str(e)}
         best_skin = result["best_skin"]
@@ -352,11 +355,12 @@ def create_app() -> FastAPI:
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @app.get("/mesh")
-    def mesh(skin: float = 2.0):
-        # the REAL build123d bracket (plate thickness tracks skin), tessellated for the viewport
+    def mesh(skin: float = 2.0, hole_dia: float | None = None):
+        # the REAL build123d bracket (plate thickness tracks skin, hole size tracks the ledger), tessellated
         from packages.truth_plane.regen.templated import render_bracket
+        dia = hole_dia if hole_dia is not None else state.ledger().domains.manufacturing.hole_diameter_mm.value
         part = render_bracket(width_mm=60.0, depth_mm=40.0, thickness_mm=max(1.0, skin),
-                              hole_dia_mm=6.0, n_holes=4)
+                              hole_dia_mm=dia, n_holes=4)
         verts, tris = part.solid.tessellate(0.2)
         positions = [c for v in verts for c in (v.X, v.Y, v.Z)]
         indices = [int(i) for t in tris for i in t]

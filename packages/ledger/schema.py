@@ -47,6 +47,9 @@ class ManufacturingDomain(_Strict):
     # supportless overhang is a constraint relative to a build direction the ledger MUST carry
     build_orientation_deg: ParameterDef
     slip_fit_clearance_mm: ParameterDef
+    # bolt-hole diameter: a real designable feature (changes the FEA stress field -> a geometry param).
+    # The hole COUNT is deliberately NOT tunable here — it is topology-changing (the OCAF identity wall).
+    hole_diameter_mm: ParameterDef
 
 
 class Domains(_Strict):

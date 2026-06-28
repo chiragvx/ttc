@@ -3,8 +3,9 @@ import type { LlmSettings } from "./settings";
 
 // REST + SSE calls to the FastAPI backend (proxied by Vite in dev).
 
-export async function fetchMesh(skin: number): Promise<MeshData> {
-  const res = await fetch(`/mesh?skin=${encodeURIComponent(skin)}`);
+export async function fetchMesh(skin: number, holeDia?: number): Promise<MeshData> {
+  const q = holeDia != null ? `&hole_dia=${encodeURIComponent(holeDia)}` : "";
+  const res = await fetch(`/mesh?skin=${encodeURIComponent(skin)}${q}`);
   if (!res.ok) throw new Error(`mesh failed: ${res.status}`);
   return res.json();
 }

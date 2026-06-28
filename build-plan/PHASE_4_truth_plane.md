@@ -90,6 +90,25 @@ judged **SATISFIED at 2.22** against the real verdict for the matching geometry;
 (no verdict) → FS flips to **UNKNOWN** while mass stays known (160 g). The conversation now knows the
 goal and refuses to claim safety it can't prove.
 
+## Domain — a tunable bolt-hole feature (the part gets designable)
+
+The part was a plate with **hardcoded** bolt-holes (`n_holes=4, hole_dia=6mm`) — the agent could only
+move wall/rib. Bolt-hole **diameter** is now a tunable ledger param (`manufacturing.hole_diameter_mm`,
+bounds 3–10mm), so the AI can design a real feature.
+
+| Piece | Module |
+|---|---|
+| **Schema param** `hole_diameter_mm` (the hole COUNT stays fixed — it is topology-changing, the OCAF identity wall) | `ledger/schema.py` |
+| **In the geometry signature** — resizing a hole invalidates the FS verdict (it changes the stress field) | `ledger/derived_resolver.py` (`GEOMETRY_PARAMS`) |
+| **Threaded through** render (`analyze_geometry`), the optimize sweep (held fixed), `/mesh`, `current_params` | `truth_plane/analysis.py`, `transport/app.py` |
+| **Frontend** bolt-hole slider + the viewport re-renders the real geometry on resize | `frontend/src/{FloatingControls,Viewport,App}` |
+
+Tests: `test_derived_resolver.py::test_resizing_a_bolt_hole_invalidates_verdict` (Windows). **Live
+(compose) verified:** the hole size flows to CalculiX — FS `0.2826` (6mm) vs `0.2802` (9mm) at the
+same skin/load, a real signed change (bigger hole → more stress). NB: a schema change needs a demo-DB
+reset (`TRUNCATE events,verdicts,optimize_results,artifacts`) — the old genesis lacks the new required
+field; in production this is a migration.
+
 ## Out of scope (deferred, as planned)
 
 Firecracker/gVisor sandbox (analysis runs trusted templated code); real PrusaSlicer sidecar (analytic

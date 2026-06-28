@@ -17,7 +17,7 @@ import traceback
 from packages.ledger.apply import MIN_WALL_MM
 from packages.ledger.derived_resolver import Verdict, signature_from_params
 from packages.ledger.fingerprint import fingerprint
-from packages.ledger.nodes import SKIN
+from packages.ledger.nodes import HOLE_DIA, SKIN
 
 
 def analyze_geometry(params: dict[str, float], material_name: str, load_n: float) -> Verdict:
@@ -28,7 +28,8 @@ def analyze_geometry(params: dict[str, float], material_name: str, load_n: float
     from packages.truth_plane.solvers.fs import evaluate_fs
 
     skin = params[SKIN]
-    part = render_bracket(width_mm=60.0, depth_mm=40.0, thickness_mm=max(1.0, skin), hole_dia_mm=6.0, n_holes=4)
+    hole_dia = params.get(HOLE_DIA, 6.0)  # a tunable feature; defaults preserve old single-param callers
+    part = render_bracket(width_mm=60.0, depth_mm=40.0, thickness_mm=max(1.0, skin), hole_dia_mm=hole_dia, n_holes=4)
     watertight = bool(part.solid.is_valid)  # build123d exposes is_valid as a property, not a method
 
     fd, path = tempfile.mkstemp(suffix=".step")
@@ -69,14 +70,16 @@ from packages.ledger.nodes import RIB  # noqa: E402
 _PLATE_AREA_MM2 = 60.0 * 40.0
 
 
-def _run_optimize(candidates, rib, material_name, load_n, fs_floor):
+def _run_optimize(candidates, rib, hole_dia, material_name, load_n, fs_floor):
     from packages.ledger.bom import material
     mat = material(material_name)
     variants = []
     best_skin = None
     best_verdict = None
     for skin in candidates:
-        v = analyze_geometry({SKIN: skin, RIB: rib}, material_name, load_n)
+        # the sweep varies skin only; hole size is held at the current design so the swept verdict's
+        # signature matches the ledger (else best_verdict would never resolve into derived)
+        v = analyze_geometry({SKIN: skin, RIB: rib, HOLE_DIA: hole_dia}, material_name, load_n)
         fs = v.factor_of_safety
         feasible = fs is not None and fs >= fs_floor
         mass = round(mat.density_g_per_mm3 * _PLATE_AREA_MM2 * skin, 1)  # thinner = lighter (monotone)
@@ -88,20 +91,20 @@ def _run_optimize(candidates, rib, material_name, load_n, fs_floor):
     return {"variants": variants, "best_skin": best_skin, "best_mass_g": best_mass, "best_verdict": best_verdict}
 
 
-def _optimize_worker(q, candidates, rib, material_name, load_n, fs_floor):
+def _optimize_worker(q, candidates, rib, hole_dia, material_name, load_n, fs_floor):
     try:
-        q.put(("ok", _run_optimize(candidates, rib, material_name, load_n, fs_floor)))
+        q.put(("ok", _run_optimize(candidates, rib, hole_dia, material_name, load_n, fs_floor)))
     except Exception:
         q.put(("error", traceback.format_exc()))
 
 
-def optimize_in_subprocess(candidates: list[float], rib: float, material_name: str, load_n: float,
-                           fs_floor: float, timeout_s: float = 600.0) -> dict:
+def optimize_in_subprocess(candidates: list[float], rib: float, hole_dia: float, material_name: str,
+                           load_n: float, fs_floor: float, timeout_s: float = 600.0) -> dict:
     """Sweep skin candidates (each a real CalculiX FS) in a child process; return the variants + the
     lightest one that passes the FS floor. Runs in a child so gmsh gets a main thread."""
     ctx = mp.get_context("spawn")  # spawn: clean child (safe from a Dramatiq worker; runs gmsh in a main thread)
     q: mp.Queue = ctx.Queue()
-    p = ctx.Process(target=_optimize_worker, args=(q, candidates, rib, material_name, load_n, fs_floor))
+    p = ctx.Process(target=_optimize_worker, args=(q, candidates, rib, hole_dia, material_name, load_n, fs_floor))
     p.start()
     try:
         status, payload = q.get(timeout=timeout_s)

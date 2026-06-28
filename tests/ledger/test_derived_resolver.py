@@ -40,6 +40,16 @@ def test_changing_geometry_invalidates_verdict(base_ledger, pd_factory):
     assert resolve_derived(base_ledger, verdicts, fingerprint=FP).factor_of_safety is None
 
 
+def test_resizing_a_bolt_hole_invalidates_verdict(base_ledger, pd_factory):
+    # hole diameter is a tunable geometry param: changing it alters the FEA stress field, so a verdict
+    # for the old hole size must NOT silently stand for the new one
+    sig = geometry_signature(base_ledger)
+    verdicts = [_verdict(sig)]
+    assert latest_verdict(base_ledger, verdicts, fingerprint=FP) is not None
+    base_ledger.domains.manufacturing.hole_diameter_mm = pd_factory(8.0, 3.0, 10.0)
+    assert latest_verdict(base_ledger, verdicts, fingerprint=FP) is None
+
+
 def test_fingerprint_mismatch_invalidates(base_ledger):
     sig = geometry_signature(base_ledger)
     assert latest_verdict(base_ledger, [_verdict(sig)], fingerprint="different") is None

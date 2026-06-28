@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 import packages.transport.app as app_module
 from packages.ledger.derived_resolver import Verdict, signature_from_params
 from packages.ledger.fingerprint import fingerprint
-from packages.ledger.nodes import RIB, SKIN
+from packages.ledger.nodes import HOLE_DIA, RIB, SKIN
 
 _HAS_KERNEL = importlib.util.find_spec("build123d") is not None
 
@@ -58,8 +58,8 @@ def test_analyze_status_reflects_current_geometry(monkeypatch):
     assert c.get("/analyze/status").json()["current"]["factor_of_safety"] == 4.0
 
 
-def _fake_optimize(candidates, rib, material_name, load_n, fs_floor):
-    verdict = Verdict(geometry_signature=signature_from_params({SKIN: 4.0, RIB: rib}), fingerprint=fingerprint(),
+def _fake_optimize(candidates, rib, hole_dia, material_name, load_n, fs_floor):
+    verdict = Verdict(geometry_signature=signature_from_params({SKIN: 4.0, RIB: rib, HOLE_DIA: hole_dia}), fingerprint=fingerprint(),
                       factor_of_safety=1.8, mesh_converged=True, watertight=True, min_wall_ok=True, solver_seconds=12.0)
     return {
         "variants": [

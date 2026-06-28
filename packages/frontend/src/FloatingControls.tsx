@@ -1,4 +1,4 @@
-import { RIB, SKIN } from "./types";
+import { HOLE_DIA, RIB, SKIN } from "./types";
 
 interface Bound {
   node: string;
@@ -11,6 +11,7 @@ interface Bound {
 const BOUNDS: Bound[] = [
   { node: SKIN, label: "Skin thickness (mm)", min: 1, max: 5, step: 0.1 },
   { node: RIB, label: "Rib spacing (mm)", min: 10, max: 50, step: 1 },
+  { node: HOLE_DIA, label: "Bolt-hole dia (mm)", min: 3, max: 10, step: 0.5 },
 ];
 
 // Floating contextual parameter panel over the viewport (PRD style). Bounded sliders + HARD_LOCK.

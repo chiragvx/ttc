@@ -41,6 +41,7 @@ def _ledger(**overrides) -> MasterParametricLedger:
             manufacturing=ManufacturingDomain(
                 build_orientation_deg=_pd(0.0, 0.0, 90.0),
                 slip_fit_clearance_mm=_pd(0.2, 0.0, 1.0),
+                hole_diameter_mm=_pd(6.0, 3.0, 10.0),
             ),
         ),
     )
