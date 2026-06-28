@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { analyze, analyzeStatus, exportCheck, signoff } from "./api";
+import { AnalysisBar, type AnalysisState } from "./AnalysisBar";
 import { Chat } from "./chat/Chat";
 import { FloatingControls } from "./FloatingControls";
 import { Hud } from "./Hud";
@@ -8,18 +10,38 @@ import { loadSettings, type LlmSettings } from "./settings";
 import { useCadSocket } from "./useCadSocket";
 import { RIB, SKIN, type DeltaOutcome, type ParameterDelta, type ServerMessage } from "./types";
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export default function App() {
   const { connected, telemetry, lastReject, send } = useCadSocket();
   const [params, setParams] = useState<Record<string, number>>({ [SKIN]: 2, [RIB]: 20 });
   const [locked, setLocked] = useState<Record<string, boolean>>({});
   const [settings, setSettings] = useState<LlmSettings>(() => loadSettings());
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [analysis, setAnalysis] = useState<AnalysisState>({
+    status: "idle", fs: null, solverSeconds: null, exportStatus: "EXPORT_BLOCKED",
+  });
+
+  useEffect(() => {
+    exportCheck().then((e) => setAnalysis((a) => ({ ...a, exportStatus: e.status }))).catch(() => {});
+  }, []);
+
+  // a geometry change invalidates the last analysis (resolver returns "unknown" -> export blocked)
+  const onGeometryChanged = async () => {
+    try {
+      const e = await exportCheck();
+      setAnalysis((a) => ({ ...a, exportStatus: e.status, status: a.status === "done" ? "stale" : a.status }));
+    } catch {
+      /* ignore */
+    }
+  };
 
   // every parameter change — from a slider OR the chat — goes through the rules-validated WS path
   const mutate = async (node: string, value: number, lock?: string | null): Promise<ServerMessage> => {
     const resp = await send({ target_node: node, requested_value: value, set_lock: lock ?? null });
     if (resp.event_type === "PARAMETER_CASCADE_UPDATE") {
       setParams((p) => ({ ...p, [node]: resp.mutations_applied[0].value }));
+      void onGeometryChanged();
     }
     return resp;
   };
@@ -46,6 +68,36 @@ export default function App() {
     for (const o of outcomes) {
       if (o.oldValue != null) await mutate(o.node, o.oldValue);
     }
+  };
+
+  const runAnalyze = async () => {
+    setAnalysis((a) => ({ ...a, status: "running" }));
+    try {
+      const r = await analyze(40);
+      if (r.status === "error") {
+        setAnalysis((a) => ({ ...a, status: "error" }));
+        return;
+      }
+      let verdict = r.verdict ?? null;
+      for (let i = 0; r.status === "queued" && !verdict && i < 60; i++) {
+        await sleep(1500);
+        verdict = (await analyzeStatus()).current;
+      }
+      const e = await exportCheck();
+      setAnalysis({
+        status: "done", fs: verdict?.factor_of_safety ?? null,
+        solverSeconds: verdict?.solver_seconds ?? null, exportStatus: e.status,
+      });
+    } catch {
+      setAnalysis((a) => ({ ...a, status: "error" }));
+    }
+  };
+
+  const signAndExport = async () => {
+    await signoff();
+    const e = await exportCheck();
+    setAnalysis((a) => ({ ...a, exportStatus: e.status }));
+    if (e.status === "EXPORT_ELIGIBLE") window.open("/export/step", "_blank");
   };
 
   return (
@@ -75,7 +127,10 @@ export default function App() {
         </main>
       </div>
 
-      <Hud telemetry={telemetry} reject={lastReject} />
+      <div>
+        <AnalysisBar state={analysis} onAnalyze={runAnalyze} onSignExport={signAndExport} />
+        <Hud telemetry={telemetry} reject={lastReject} />
+      </div>
 
       {settingsOpen && <SettingsModal value={settings} onChange={setSettings} onClose={() => setSettingsOpen(false)} />}
     </div>

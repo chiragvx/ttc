@@ -54,6 +54,7 @@ never blocks a frame, never re-invoked on replay). Full detail: [`reference/TECH
 | **1 — Foundation** | 30–90 d | Hardened deterministic substrate | 🟢 **Backbone done** (ledger, event store + replay, rules validator, review FSM, determinism, 1 solver) → [`PHASE_1.md`](PHASE_1.md) |
 | **2 — MVP** | 3–6 mo | Grounded product w/ human-in-loop | 🟢 **Backbone done** (requirements matrix, BOM/datums, agent loop + evals, WS protocol + NACK, estimator) → [`PHASE_2.md`](PHASE_2.md) |
 | **3 — Scale / Aerospace** | 6–12 mo | Multi-tenant, audit-ready | 🟡 **Core arch done** (branching + invariant-aware merge, content-addressed event-sourcing); infra/optimizer/aero gated → [`PHASE_3.md`](PHASE_3.md) |
+| **4 — Truth-Plane Activation** | — | The grounded analysis loop, live | 🟢 **Built & verified** (loop green on Windows): derived-resolution, Dramatiq FS jobs, Postgres, `/analyze`→export-flip, compose stack. Compose run blocked by Docker/C:-full → [`PHASE_4_truth_plane.md`](PHASE_4_truth_plane.md) |
 
 > "Backbone done" = the load-bearing architecture is implemented in code and green under test. It is
 > **not** a shippable product: no frontend, no microVM sandbox, no DB, no real LLM/slicer, no

@@ -9,6 +9,20 @@ export async function fetchMesh(skin: number): Promise<MeshData> {
   return res.json();
 }
 
+// --- truth-plane analysis loop ---
+export async function analyze(loadN = 40): Promise<any> {
+  return (await fetch(`/analyze?load_n=${loadN}`, { method: "POST" })).json();
+}
+export async function analyzeStatus(): Promise<any> {
+  return (await fetch("/analyze/status")).json();
+}
+export async function exportCheck(): Promise<{ status: string; reasons: string[]; unknowns: string[] }> {
+  return (await fetch("/export/check", { method: "POST" })).json();
+}
+export async function signoff(): Promise<void> {
+  await fetch("/signoff?reviewer=engineer", { method: "POST" });
+}
+
 // Stream a conversational reply. Calls onEvent for each SSE event; abortable via signal.
 export async function streamChat(
   messages: Array<{ role: string; content: string }>,

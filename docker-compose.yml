@@ -1,0 +1,51 @@
+# The wedge stack on one box: backend (API + SPA + solvers) + Dramatiq worker + Redis + Postgres.
+#   docker compose up --build   ->   open http://localhost:8000
+# The backend serves the built SPA from the same origin (no proxy); the worker runs FS analysis jobs;
+# verdicts + events persist in Postgres (survive `docker compose restart`).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: cad
+      POSTGRES_DB: cad
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cad"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.app
+    image: ttc-app
+    environment:
+      DATABASE_URL: postgresql://postgres:cad@postgres:5432/cad
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports:
+      - "8000:8000"
+
+  worker:
+    image: ttc-app
+    command: ["dramatiq", "packages.truth_plane.worker"]
+    environment:
+      DATABASE_URL: postgresql://postgres:cad@postgres:5432/cad
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - backend
+      - postgres
+      - redis
+
+volumes:
+  pgdata:

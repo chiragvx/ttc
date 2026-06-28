@@ -7,17 +7,27 @@ solver tiers live behind the Truth Plane and are out of this hot path by design.
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import os
+import tempfile
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
+from starlette.background import BackgroundTask
 
 from packages.ledger.apply import apply_delta
 from packages.ledger.bom import BOM, Component, ComponentKind, material
 from packages.ledger.deltas import ParameterDelta
 from packages.ledger.events import EventLog
+from packages.ledger.derived_resolver import latest_verdict, ledger_with_derived
+from packages.ledger.fingerprint import fingerprint
 from packages.ledger.gates import evaluate_export_gates
+from packages.ledger.nodes import RIB, SKIN
+from packages.truth_plane.analysis import analyze_geometry  # module-level so tests can monkeypatch it
+from packages.truth_plane.verdict_store import InMemoryVerdictStore
 from packages.ledger.parameter import LockState, ParameterDef
 from packages.ledger.schema import (
     Domains,
@@ -99,13 +109,43 @@ def _sse(obj: dict) -> str:
     return f"data: {json.dumps(obj)}\n\n"
 
 
+def _make_verdict_store():
+    if os.environ.get("DATABASE_URL"):
+        from packages.ledger.event_store_pg import PgVerdictStore
+        return PgVerdictStore.from_env()
+    return InMemoryVerdictStore()
+
+
+def _make_event_log():
+    if os.environ.get("DATABASE_URL"):
+        from packages.ledger.event_store_pg import PgEventStore
+        return PgEventStore.from_env()
+    return EventLog()
+
+
 class SessionState:
     def __init__(self) -> None:
-        self.log = EventLog()
-        self.log.append_genesis(make_demo_ledger(), actor="system", ts=_TS)
+        self.project_id = "demo"
+        self.log = _make_event_log()
+        if not self.log.events():  # fresh project -> seed genesis; else reuse the durable history
+            self.log.append_genesis(make_demo_ledger(), actor="system", ts=_TS)
+        self.verdict_store = _make_verdict_store()
 
     def ledger(self) -> MasterParametricLedger:
         return self.log.fold()
+
+    def current_params(self) -> dict[str, float]:
+        led = self.ledger()
+        return {SKIN: led.domains.structure.skin_thickness_mm.value,
+                RIB: led.domains.structure.internal_rib_spacing_mm.value}
+
+    def resolved_ledger(self) -> MasterParametricLedger:
+        # the export gate sees `derived` resolved from the latest matching analysis verdict
+        return ledger_with_derived(self.ledger(), self.verdict_store.verdicts(self.project_id),
+                                   fingerprint=fingerprint())
+
+    def signoff(self, reviewer: str) -> None:
+        self.log.append_signoff(reviewer, ts=_TS)
 
     def mutate(self, req: ParamMutationRequest):
         led = self.ledger()
@@ -137,7 +177,50 @@ def create_app() -> FastAPI:
 
     @app.post("/export/check")
     def export_check():
-        return evaluate_export_gates(state.ledger()).model_dump(mode="json")
+        # derived is resolved from the latest matching analysis verdict (stale -> unknown -> blocked)
+        return evaluate_export_gates(state.resolved_ledger()).model_dump(mode="json")
+
+    @app.post("/analyze")
+    async def analyze(material: str = "PLA", load_n: float = 40.0):
+        params = state.current_params()
+        fp = fingerprint()
+        cached = latest_verdict(state.ledger(), state.verdict_store.verdicts(state.project_id), fingerprint=fp)
+        if cached:
+            return {"status": "done", "cached": True, "verdict": dataclasses.asdict(cached)}
+        if os.environ.get("REDIS_URL"):  # durable queued path (worker + Postgres) — poll /analyze/status
+            from packages.truth_plane import jobs
+            jobs.configure(store=state.verdict_store, publish=None)
+            jobs.run_fs_analysis.send(state.project_id, params, material, load_n)
+            return {"status": "queued"}
+        # inline path: run the real FS in a threadpool (needs solvers — Linux container)
+        try:
+            verdict = await run_in_threadpool(analyze_geometry, params, material, load_n)
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+        state.verdict_store.put_verdict(state.project_id, verdict)
+        return {"status": "done", "verdict": dataclasses.asdict(verdict)}
+
+    @app.get("/analyze/status")
+    def analyze_status():
+        v = latest_verdict(state.ledger(), state.verdict_store.verdicts(state.project_id), fingerprint=fingerprint())
+        return {"current": dataclasses.asdict(v) if v else None}
+
+    @app.post("/signoff")
+    def signoff(reviewer: str = "engineer"):
+        state.signoff(reviewer)
+        return {"ok": True}
+
+    @app.get("/export/step")
+    def export_step():
+        from packages.truth_plane.regen.export import export_part
+        from packages.truth_plane.regen.templated import render_bracket
+        skin = state.current_params()[SKIN]
+        part = render_bracket(width_mm=60.0, depth_mm=40.0, thickness_mm=max(1.0, skin), hole_dia_mm=6.0, n_holes=4)
+        fd, path = tempfile.mkstemp(suffix=".step")
+        os.close(fd)
+        export_part(part.solid, path)
+        return FileResponse(path, media_type="application/step", filename="bracket.step",
+                            background=BackgroundTask(os.remove, path))
 
     @app.post("/propose")
     def propose(req: ProposeRequest):
@@ -205,5 +288,12 @@ def create_app() -> FastAPI:
                 await socket.send_json(state.mutate(req).model_dump(mode="json"))
         except WebSocketDisconnect:
             return
+
+    # serve the built SPA (compose deployment) from the same origin as the API — added LAST so API
+    # routes win. In dev the frontend runs under Vite instead; this dir simply won't exist.
+    dist = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "dist"))
+    if os.path.isdir(dist):
+        from fastapi.staticfiles import StaticFiles
+        app.mount("/", StaticFiles(directory=dist, html=True), name="frontend")
 
     return app
