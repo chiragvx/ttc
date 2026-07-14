@@ -1,5 +1,13 @@
 # Technical Addendum & Implementation Blueprint: AI-Guided Hardware Co-Modeling Platform
 
+> **2026-07-02 — Schema shape revised.** The `domains` node no longer holds a typed block per part.
+> Disciplines (structure/manufacturing/thermal) stay typed; **per-part geometry lives in a generic
+> `domains.geometry: dict[str, ParameterDef]` bag** keyed by param name. Each subsystem declares its
+> params ONCE via a `ParamSpec` list; ledger paths become `domains.geometry.<name>`. This makes
+> adding a subsystem one small self-contained file (no central schema edit). Full record and rationale:
+> [`build-plan/reference/SCALABLE_SUBSYSTEM_REFACTOR.md`](../build-plan/reference/SCALABLE_SUBSYSTEM_REFACTOR.md).
+> The typed-per-part schema below is the ORIGINAL vision — preserved for history.
+
 ## 1. Master Parametric Ledger JSON Schema
 
 This schema defines the single source of truth (`Agnostic Meta-Graph`) for the vehicle state, decoupling design intent from physical mesh generation.
