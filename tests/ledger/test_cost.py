@@ -31,5 +31,5 @@ def test_summary_accumulates_and_does_not_break_replay(base_ledger):
     assert math.isclose(s.solver_seconds, 12.5)
     assert s.usd > 0
     # USAGE events are recorded but don't change ledger state
-    assert log.fold().domains.structure.skin_thickness_mm.value == 2.0
+    assert log.fold().instances["root"].params["skin_thickness_mm"].value == 2.0
     assert log.verify_chain() is True

@@ -8,6 +8,7 @@ from packages.ledger.parameter import LockState, ParameterDef
 from packages.ledger.schema import (
     Domains,
     GlobalConstraints,
+    Instance,
     ManufacturingDomain,
     MasterParametricLedger,
     ProjectMetadata,
@@ -20,23 +21,28 @@ def make_pd(value: float, lo: float, hi: float, lock: LockState = LockState.DYNA
 
 
 def build_ledger(skin_bounds: tuple[float, float] = (1.0, 5.0)) -> MasterParametricLedger:
+    """Build a bracket-shaped test ledger. Phase G: bracket geometry lives in the ROOT instance's
+    params (`instances["root"].params`); `Domains.geometry` is a compat mirror during the migration."""
+    bracket_params = {
+        "skin_thickness_mm":       make_pd(2.0, *skin_bounds),
+        "internal_rib_spacing_mm": make_pd(20.0, 10.0, 50.0),
+        "plate_width_mm":          make_pd(60.0, 40.0, 120.0),
+        "plate_depth_mm":          make_pd(40.0, 30.0, 80.0),
+        "hole_diameter_mm":        make_pd(6.0, 3.0, 10.0),
+    }
+    root = Instance(id="root", subsystem_type="bracket", params=dict(bracket_params), parent_id=None)
     return MasterParametricLedger(
         project_metadata=ProjectMetadata(project_id="p1", version_commit="v0", branch="main"),
         global_constraints=GlobalConstraints(factor_of_safety_floor=1.5),
         domains=Domains(
-            structure=StructureDomain(
-                material_profile="PLA",
-                skin_thickness_mm=make_pd(2.0, *skin_bounds),
-                internal_rib_spacing_mm=make_pd(20.0, 10.0, 50.0),
-                plate_width_mm=make_pd(60.0, 40.0, 120.0),
-                plate_depth_mm=make_pd(40.0, 30.0, 80.0),
-            ),
+            structure=StructureDomain(material_profile="PLA"),
             manufacturing=ManufacturingDomain(
                 build_orientation_deg=make_pd(0.0, 0.0, 90.0),
                 slip_fit_clearance_mm=make_pd(0.2, 0.0, 1.0),
-                hole_diameter_mm=make_pd(6.0, 3.0, 10.0),
             ),
         ),
+        instances={"root": root},
+        root_id="root",
     )
 
 

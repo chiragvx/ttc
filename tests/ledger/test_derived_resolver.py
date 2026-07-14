@@ -35,7 +35,7 @@ def test_changing_geometry_invalidates_verdict(base_ledger, pd_factory):
     verdicts = [_verdict(sig)]
     assert latest_verdict(base_ledger, verdicts, fingerprint=FP) is not None
     # change a geometry param -> signature changes -> the old verdict no longer matches
-    base_ledger.domains.structure.skin_thickness_mm = pd_factory(3.0, 1.0, 5.0)
+    base_ledger.instances["root"].params["skin_thickness_mm"] = pd_factory(3.0, 1.0, 5.0)
     assert latest_verdict(base_ledger, verdicts, fingerprint=FP) is None
     assert resolve_derived(base_ledger, verdicts, fingerprint=FP).factor_of_safety is None
 
@@ -46,7 +46,7 @@ def test_resizing_a_bolt_hole_invalidates_verdict(base_ledger, pd_factory):
     sig = geometry_signature(base_ledger)
     verdicts = [_verdict(sig)]
     assert latest_verdict(base_ledger, verdicts, fingerprint=FP) is not None
-    base_ledger.domains.manufacturing.hole_diameter_mm = pd_factory(8.0, 3.0, 10.0)
+    base_ledger.instances["root"].params["hole_diameter_mm"] = pd_factory(8.0, 3.0, 10.0)
     assert latest_verdict(base_ledger, verdicts, fingerprint=FP) is None
 
 
@@ -56,8 +56,35 @@ def test_resizing_the_plate_footprint_invalidates_verdict(base_ledger, pd_factor
     sig = geometry_signature(base_ledger)
     verdicts = [_verdict(sig)]
     assert latest_verdict(base_ledger, verdicts, fingerprint=FP) is not None
-    base_ledger.domains.structure.plate_width_mm = pd_factory(90.0, 40.0, 120.0)
+    base_ledger.instances["root"].params["plate_width_mm"] = pd_factory(90.0, 40.0, 120.0)
     assert latest_verdict(base_ledger, verdicts, fingerprint=FP) is None
+
+
+def test_adding_a_cut_feature_invalidates_verdict(base_ledger):
+    """A verdict solved against the UN-CUT geometry must not silently keep matching once a
+    hole/pocket/slot is added to the SAME instance -- a stale-but-still-"passing" FS after a cut is
+    exactly the fabricated green light Inversion #1 forbids. `geometry_signature` folds
+    `instance.cut_features` into its hash for exactly this reason (see
+    packages/truth_plane/analysis.py::analyze_geometry's docstring, and
+    packages/ledger/derived_resolver.py::signature_from_params)."""
+    from packages.ledger.schema import CutFeature
+
+    sig = geometry_signature(base_ledger)
+    verdicts = [_verdict(sig)]
+    assert latest_verdict(base_ledger, verdicts, fingerprint=FP) is not None
+
+    feature = CutFeature(id="h0", kind="hole", shape="circle", dia_mm=4.0, depth_mm=2.0)
+    root = base_ledger.instances["root"].model_copy(update={"cut_features": [feature]})
+    cut_ledger = base_ledger.model_copy(update={"instances": {**base_ledger.instances, "root": root}})
+
+    assert latest_verdict(cut_ledger, verdicts, fingerprint=FP) is None
+    assert resolve_derived(cut_ledger, verdicts, fingerprint=FP).factor_of_safety is None
+
+    # removing the cut again restores the ORIGINAL (pre-cut) signature -- not a NEW distinct one --
+    # so the original verdict is honestly valid again, not stuck stale forever.
+    uncut_again = cut_ledger.model_copy(update={
+        "instances": {**cut_ledger.instances, "root": base_ledger.instances["root"]}})
+    assert latest_verdict(uncut_again, verdicts, fingerprint=FP) is not None
 
 
 def test_fingerprint_mismatch_invalidates(base_ledger):

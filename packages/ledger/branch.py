@@ -13,27 +13,36 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel
 
-from packages.ledger.apply import check_invariants
+from packages.ledger.apply import _set, check_invariants
 from packages.ledger.parameter import LockState, ParameterDef
 from packages.ledger.schema import MasterParametricLedger
 
 
 def iter_parameters(model: BaseModel, prefix: str = ""):
-    """Yield (dotted_path, ParameterDef) for every tunable leaf in the ledger."""
+    """Yield (dotted_path, ParameterDef) for every tunable leaf in the ledger.
+    Handles typed BaseModel blocks, dict-of-ParameterDef bags (e.g. `Domains.geometry`), AND the
+    instance tree introduced in Phase G (`instances.<id>.params.<name>`)."""
     for name, value in model:
         path = f"{prefix}{name}"
         if isinstance(value, ParameterDef):
             yield path, value
         elif isinstance(value, BaseModel):
             yield from iter_parameters(value, path + ".")
+        elif isinstance(value, dict):
+            for k, v in value.items():
+                if isinstance(v, ParameterDef):
+                    yield f"{path}.{k}", v
+                elif isinstance(v, BaseModel):
+                    # Phase G: `instances: dict[str, Instance]` — descend into each named instance.
+                    yield from iter_parameters(v, f"{path}.{k}.")
 
 
 def _set_param(ledger: MasterParametricLedger, path: str, pd: ParameterDef) -> None:
     parts = path.split(".")
     obj = ledger
     for p in parts[:-1]:
-        obj = getattr(obj, p)
-    setattr(obj, parts[-1], pd)
+        obj = obj[p] if isinstance(obj, dict) else getattr(obj, p)
+    _set(obj, parts[-1], pd)
 
 
 @dataclass

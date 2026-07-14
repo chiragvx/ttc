@@ -18,15 +18,19 @@ class Material:
     youngs_mod_mpa: float
     poisson: float
     yield_mpa: float
+    service_temp_c: float = 50.0  # max continuous-use temp (thermal discipline L0 gate)
+    cost_per_kg_usd: float = 25.0  # 2026 dev-default; overridden per material in MATERIAL_DB
 
 
 # Minimal, queryable allowables DB (replaces bare string keys). Values are representative.
+# service_temp_c ≈ practical continuous-use limit (thermoplastics near glass transition; metals well below).
+# cost_per_kg_usd ≈ representative 2026 stock prices; real project pricing → cost discipline knowledge fragment.
 MATERIAL_DB: dict[str, Material] = {
-    "PLA":     Material("PLA",     1.24e-3,   3500.0, 0.36,  50.0),
-    "PETG":    Material("PETG",    1.27e-3,   2100.0, 0.40,  50.0),
-    "ABS":     Material("ABS",     1.04e-3,   2200.0, 0.35,  40.0),
-    "AL6061":  Material("AL6061",  2.70e-3,  68900.0, 0.33, 276.0),
-    "STEEL":   Material("STEEL",   7.85e-3, 210000.0, 0.30, 250.0),
+    "PLA":     Material("PLA",     1.24e-3,   3500.0, 0.36,  50.0,  55.0,  22.0),
+    "PETG":    Material("PETG",    1.27e-3,   2100.0, 0.40,  50.0,  70.0,  25.0),
+    "ABS":     Material("ABS",     1.04e-3,   2200.0, 0.35,  40.0,  90.0,  23.0),
+    "AL6061":  Material("AL6061",  2.70e-3,  68900.0, 0.33, 276.0, 200.0,   8.0),  # raw stock; machining is extra
+    "STEEL":   Material("STEEL",   7.85e-3, 210000.0, 0.30, 250.0, 400.0,   2.0),  # raw stock
 }
 
 

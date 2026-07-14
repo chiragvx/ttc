@@ -26,11 +26,17 @@ class LockState(str, Enum):
 
 
 class ParameterDef(BaseModel):
-    """A single tunable parameter: a value with a unit, a lock state, hard bounds, and a precision.
+    """A single tunable parameter: a value with a unit, a lock state, a **recommended range**, and a
+    precision.
 
-    Invariants (enforced at construction — an invalid ParameterDef cannot be built):
-      * bounds[0] <= bounds[1]
-      * bounds[0] <= value <= bounds[1]   (the safe-slider guarantee — sliders are physically bounded)
+    Bounds are ADVISORY — a hint from the subsystem author about the sensible design envelope, not a
+    hard cap. The copilot judges whether a request outside the recommended range is reasonable
+    (grounded in the user's stated intent) and applies it with an `APPLIED_ADVISORY` status. Users
+    aren't second-guessed for wanting 14 legs on a table or 20 holes on a bracket. Only HARD_LOCK
+    (frozen user constraint) and physical invariants (edge-distance rule, etc.) can refuse a value.
+
+    Invariants (enforced at construction):
+      * bounds[0] <= bounds[1]   (sanity: recommended range must not be inverted)
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -46,9 +52,12 @@ class ParameterDef(BaseModel):
         lo, hi = self.bounds
         if lo > hi:
             raise ValueError(f"bounds[0] ({lo}) must be <= bounds[1] ({hi})")
-        if not (lo <= self.value <= hi):
-            raise ValueError(f"value {self.value} outside bounds [{lo}, {hi}]")
         return self
+
+    def is_within_recommended(self, v: float | None = None) -> bool:
+        lo, hi = self.bounds
+        x = self.value if v is None else v
+        return lo <= x <= hi
 
     @property
     def is_locked(self) -> bool:

@@ -10,6 +10,7 @@ This is pure Python (no kernel, no solver, no LLM) and so is fully testable from
 from __future__ import annotations
 
 from enum import Enum
+from typing import Callable, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -33,7 +34,13 @@ class GateResult(BaseModel):
         return self.status is ExportStatus.EXPORT_ELIGIBLE
 
 
-def evaluate_export_gates(ledger: MasterParametricLedger) -> GateResult:
+def evaluate_export_gates(
+    ledger: MasterParametricLedger,
+    extra_findings: Optional[Callable[[MasterParametricLedger], tuple[list[str], list[str]]]] = None,
+) -> GateResult:
+    """Core structural/DFM + human-sign-off gates. `extra_findings` injects additional discipline gate
+    contributions (see packages.disciplines.all_discipline_findings) without coupling this pure package
+    to the discipline registry — a missing grounded scalar there is an `unknown` and blocks, same as here."""
     reasons: list[str] = []
     unknowns: list[str] = []
 
@@ -55,6 +62,12 @@ def evaluate_export_gates(ledger: MasterParametricLedger) -> GateResult:
             reasons.append(f"{name} is unknown")
         elif val is False:
             reasons.append(f"{name} is False")
+
+    # --- Injected discipline gates (thermal, …) — closed-form now, solver-fed later ---
+    if extra_findings is not None:
+        extra_reasons, extra_unknowns = extra_findings(ledger)
+        reasons.extend(extra_reasons)
+        unknowns.extend(extra_unknowns)
 
     # --- Human-in-the-loop sign-off FSM ---
     if ledger.review.state is not ReviewState.ENGINEER_REVIEWED:

@@ -7,6 +7,11 @@ Hard rules:
 - `extra="forbid"` on every model. No bare-number tunables — every adjustable node is a `ParameterDef`.
 - `derived.*` and `review.*` are NOT writable by an LLM delta (`deltas.is_forbidden_target`). A
   missing `derived` value is "unknown" and must BLOCK export (`gates.evaluate_export_gates`).
-- Bounds/lock invariants live in `ParameterDef` and are enforced at construction. Do not add a code
-  path that can build an out-of-bounds or HARD_LOCK-violating parameter.
+- Lock invariants live in `ParameterDef` and are enforced at construction — do not add a code path
+  that can build a HARD_LOCK-violating parameter (`with_value` refuses to mutate one; `apply_delta`
+  REJECTs any delta targeting one). `bounds` are ADVISORY, not a hard construction-time clamp
+  (2026-07-04 policy — see `parameter.py`/`apply.py`'s own docstrings): a value outside the
+  recommended range still constructs and still applies, as `APPLIED_ADVISORY`, on copilot judgment.
+  Only HARD_LOCK and physical cross-field invariants (edge-distance, min-wall, cut depth/fit) may
+  ever REJECT/CONFLICT a value outright.
 - No OCCT, no solver, no LLM, no I/O in this package — it is pure data + pure validation.

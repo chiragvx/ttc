@@ -15,6 +15,7 @@ from packages.ledger.parameter import LockState, ParameterDef
 from packages.ledger.schema import (
     Domains,
     GlobalConstraints,
+    Instance,
     ManufacturingDomain,
     MasterParametricLedger,
     ProjectMetadata,
@@ -29,23 +30,26 @@ def _pd(value: float, lo: float, hi: float, lock: LockState = LockState.DYNAMIC)
 
 
 def _ledger(**overrides) -> MasterParametricLedger:
+    params = {
+        "skin_thickness_mm":       _pd(2.0, 1.0, 5.0),
+        "internal_rib_spacing_mm": _pd(20.0, 10.0, 50.0),
+        "plate_width_mm":          _pd(60.0, 40.0, 120.0),
+        "plate_depth_mm":          _pd(40.0, 30.0, 80.0),
+        "hole_diameter_mm":        _pd(6.0, 3.0, 10.0),
+    }
+    root = Instance(id="root", subsystem_type="bracket", params=params, parent_id=None)
     base = MasterParametricLedger(
         project_metadata=ProjectMetadata(project_id="p1", version_commit="v0", branch="main"),
         global_constraints=GlobalConstraints(factor_of_safety_floor=1.5),
         domains=Domains(
-            structure=StructureDomain(
-                material_profile="PLA",
-                skin_thickness_mm=_pd(2.0, 1.0, 5.0),
-                internal_rib_spacing_mm=_pd(20.0, 10.0, 50.0),
-                plate_width_mm=_pd(60.0, 40.0, 120.0),
-                plate_depth_mm=_pd(40.0, 30.0, 80.0),
-            ),
+            structure=StructureDomain(material_profile="PLA"),
             manufacturing=ManufacturingDomain(
                 build_orientation_deg=_pd(0.0, 0.0, 90.0),
                 slip_fit_clearance_mm=_pd(0.2, 0.0, 1.0),
-                hole_diameter_mm=_pd(6.0, 3.0, 10.0),
             ),
         ),
+        instances={"root": root},
+        root_id="root",
     )
     return base.model_copy(update=overrides)
 
@@ -100,12 +104,22 @@ def test_hard_lock_round_trip_is_exact():
     assert abs(locked.value - 4.5) <= locked.precision
 
 
-def test_out_of_bounds_parameter_cannot_be_constructed():
+def test_out_of_recommended_range_parameter_is_constructible_but_flagged():
+    """Bounds are advisory — the copilot may propose values outside the recommended range when the
+    user's intent warrants it. A ParameterDef with value outside [lo, hi] still constructs; it just
+    reports `is_within_recommended() == False` and its mutation carries APPLIED_ADVISORY status."""
+    pd_out = _pd(10.0, 1.0, 5.0)
+    assert pd_out.value == 10.0
+    assert not pd_out.is_within_recommended()
+
+
+def test_inverted_bounds_still_rejected_as_sanity():
+    """Only the lo<=hi sanity check remains — a subsystem author cannot ship inverted bounds."""
     with pytest.raises(ValueError):
-        _pd(10.0, 1.0, 5.0)  # value above upper bound
+        _pd(3.0, 5.0, 1.0)  # lo > hi
 
 
 def test_llm_cannot_target_derived_or_review_nodes():
     assert is_forbidden_target("derived.factor_of_safety")
     assert is_forbidden_target("review.state")
-    assert not is_forbidden_target("domains.structure.skin_thickness_mm")
+    assert not is_forbidden_target("instances.root.params.skin_thickness_mm")

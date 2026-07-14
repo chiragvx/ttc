@@ -14,7 +14,7 @@ from packages.ledger.requirements import (
 )
 
 FS = Requirement("R1", "FS >= 1.5", "factor_of_safety", ">=", 1.5,
-                 allocated_to=("domains.structure.skin_thickness_mm",))
+                 allocated_to=("instances.root.params.skin_thickness_mm",))
 MASS = Requirement("R2", "mass <= 200 g", "mass_g", "<=", 200.0, method=VerificationMethod.TEST)
 MATRIX = VerificationMatrix([FS, MASS])
 
@@ -37,7 +37,7 @@ def test_violation_detected():
 
 
 def test_traceability_affected_by():
-    reqs = MATRIX.affected_by("domains.structure.skin_thickness_mm")
+    reqs = MATRIX.affected_by("instances.root.params.skin_thickness_mm")
     assert [r.id for r in reqs] == ["R1"]  # which requirement a skin change might break
 
 

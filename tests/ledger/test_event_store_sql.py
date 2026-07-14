@@ -7,7 +7,7 @@ from packages.ledger.event_store_sql import SqlEventStore
 from packages.ledger.events import EventLog
 from packages.ledger.schema import ReviewState
 
-SKIN = "domains.structure.skin_thickness_mm"
+SKIN = "instances.root.params.skin_thickness_mm"
 TS = "2026-06-28T00:00:00Z"
 
 
@@ -33,7 +33,7 @@ def test_sql_store_persists_across_reconnect(tmp_path, base_ledger):
 
     reopened = SqlEventStore(db)  # fresh connection, same file
     led = reopened.fold()
-    assert led.domains.structure.skin_thickness_mm.value == 3.5
+    assert led.instances["root"].params["skin_thickness_mm"].value == 3.5
     assert led.review.state is ReviewState.ENGINEER_REVIEWED
     assert reopened.verify_chain() is True
     assert reopened.get_artifact(sha) == b'{"fs": 4.05}'

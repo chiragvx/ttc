@@ -15,13 +15,13 @@ import hashlib
 import json
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Iterable
+from typing import Callable, Iterable, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from packages.ledger.apply import apply_delta
 from packages.ledger.deltas import ParameterDelta
-from packages.ledger.schema import MasterParametricLedger, Review, ReviewState
+from packages.ledger.schema import CutFeature, Instance, MasterParametricLedger, Review, ReviewState, Transform
 
 
 class EventKind(str, Enum):
@@ -31,11 +31,16 @@ class EventKind(str, Enum):
     NL_INTENT = "NL_INTENT"
     USAGE = "USAGE"            # cost/token/compute accounting (recorded, no state change)
     DERIVATION = "DERIVATION"
+    INSTANCE_ADDED = "INSTANCE_ADDED"
+    INSTANCE_REMOVED = "INSTANCE_REMOVED"
+    INSTANCE_MOVED = "INSTANCE_MOVED"  # reposition/reorient an ALREADY-PLACED instance
+    FEATURE_OP = "FEATURE_OP"  # add/update/remove a hole/pocket/slot cut on an instance
 
 
 FACT_KINDS = {
     EventKind.GENESIS, EventKind.PARAMETER_MUTATION, EventKind.REVIEW_SIGNOFF,
-    EventKind.NL_INTENT, EventKind.USAGE,
+    EventKind.NL_INTENT, EventKind.USAGE, EventKind.INSTANCE_ADDED, EventKind.INSTANCE_REMOVED,
+    EventKind.INSTANCE_MOVED, EventKind.FEATURE_OP,
 }
 
 GENESIS_PREV = "0" * 64
@@ -65,8 +70,26 @@ class Event(BaseModel):
         return self.kind in FACT_KINDS
 
 
-def replay(events: Iterable[Event]) -> MasterParametricLedger:
-    """Reconstruct ledger state from FACTS only. Never calls an LLM/optimizer/solver."""
+def replay(
+    events: Iterable[Event],
+    reconcile: Optional[Callable[[MasterParametricLedger], MasterParametricLedger]] = None,
+) -> MasterParametricLedger:
+    """Reconstruct ledger state from FACTS only. Never calls an LLM/optimizer/solver.
+
+    `reconcile` (default None -> every pre-2026-07-04 caller unaffected, pure fold, no side lookups)
+    is an OPTIONAL injected callable — same style as `apply_delta`'s `domain_checks`/`cascade_rules`
+    and `apply_feature_op`'s `build_part` — applied after EVERY fact folds, not just once at the end.
+    This package still imports no OCCT/subsystem knowledge (`packages/ledger/CLAUDE.md`); the caller
+    (`packages/transport/app.py::SessionState.ledger()`) supplies
+    `packages.subsystems.assembly_template.reconcile_all`.
+
+    Why per-event, not once at the end: an assembly-template child instance (e.g. a table's
+    "table_1_top") is never itself an INSTANCE_ADDED fact — it only exists once `reconcile_all` runs.
+    A FEATURE_OP fact targeting such a child, folded WITHOUT `reconcile` running first, hits the
+    `instance_id in ledger.instances` miss below and is silently dropped (see that branch's comment)
+    -- forever, since a later reconcile-once-at-the-end synthesizes a FRESH child with no memory of
+    the dropped cut. Reconciling after every event closes that gap: by the time the FEATURE_OP event
+    folds, the child it targets already exists (if it's an assembly-template child at all)."""
     ledger: MasterParametricLedger | None = None
     for ev in events:
         if ev.kind is EventKind.DERIVATION:
@@ -80,7 +103,75 @@ def replay(events: Iterable[Event]) -> MasterParametricLedger:
             assert ledger is not None
             ledger = ledger.model_copy(update={
                 "review": Review(state=ReviewState.ENGINEER_REVIEWED, reviewer=ev.payload["reviewer"])})
+        elif ev.kind is EventKind.INSTANCE_ADDED:
+            assert ledger is not None
+            instance = Instance.model_validate(ev.payload["instance"])
+            new_instances = dict(ledger.instances)
+            new_instances[instance.id] = instance
+            update: dict = {"instances": new_instances}
+            if "root_id" in ev.payload:
+                update["root_id"] = ev.payload["root_id"]
+            ledger = ledger.model_copy(update=update)
+        elif ev.kind is EventKind.INSTANCE_REMOVED:
+            assert ledger is not None
+            new_instances = dict(ledger.instances)
+            new_instances.pop(ev.payload["instance_id"], None)
+            ledger = ledger.model_copy(update={"instances": new_instances})
+        elif ev.kind is EventKind.INSTANCE_MOVED:
+            assert ledger is not None
+            # The fact stores the instance_id + the ALREADY-RESOLVED new Transform (exactly
+            # `outcome.instance.transform` from `apply_instance_op`'s move_instance branch at the
+            # time it was applied — the "preserve current rotation if omitted" resolution already
+            # happened there; replay never re-derives it). A pure merge into `instance.transform`,
+            # same "store the resolved fact, don't re-derive it" precedent as INSTANCE_ADDED storing
+            # a fully-seeded Instance.
+            instance_id = ev.payload["instance_id"]
+            if instance_id in ledger.instances:  # see note below for the else-branch
+                inst = ledger.instances[instance_id]
+                new_transform = Transform.model_validate(ev.payload["transform"])
+                new_instances = dict(ledger.instances)
+                new_instances[instance_id] = inst.model_copy(update={"transform": new_transform})
+                ledger = ledger.model_copy(update={"instances": new_instances})
+            # else: the target instance doesn't exist in the pure-FACT ledger at this point in the
+            # fold — same tolerance as FEATURE_OP's else-branch below (an assembly-template child is
+            # never itself an INSTANCE_ADDED fact; it only exists once `reconcile_all` runs). Silently
+            # no-op rather than raise/assert; passing `reconcile` (see this function's docstring)
+            # closes the gap for the ONE caller that needs it.
+        elif ev.kind is EventKind.FEATURE_OP:
+            assert ledger is not None
+            # The fact stores the ALREADY-RESOLVED CutFeature (op="add_feature"/"update_feature" ->
+            # the feature that was added/updated; op="remove_feature" -> the one removed) — exactly
+            # `FeatureOpOutcome.feature` from `packages/ledger/apply.py::apply_feature_op` at the time
+            # it was applied. Replay never re-invokes a geometry builder (this package has none): it
+            # is a pure merge into `instance.cut_features`, the same "store the resolved fact, don't
+            # re-derive it" precedent as INSTANCE_ADDED storing a fully-seeded Instance.
+            instance_id = ev.payload["instance_id"]
+            if instance_id in ledger.instances:  # see note below for the else-branch
+                feature = CutFeature.model_validate(ev.payload["feature"])
+                inst = ledger.instances[instance_id]
+                if ev.payload["op"] == "remove_feature":
+                    new_features = [f for f in inst.cut_features if f.id != feature.id]
+                else:
+                    new_features = [feature if f.id == feature.id else f for f in inst.cut_features]
+                    if not any(f.id == feature.id for f in inst.cut_features):
+                        new_features.append(feature)
+                new_instances = dict(ledger.instances)
+                new_instances[instance_id] = inst.model_copy(update={"cut_features": new_features})
+                ledger = ledger.model_copy(update={"instances": new_instances})
+            # else: the target instance doesn't exist in the pure-FACT ledger at this point in the
+            # fold. An assembly-template child (e.g. a table's "table_1_top") is never itself
+            # persisted as an INSTANCE_ADDED fact — it is only synthesized by `reconcile_all`
+            # (packages/subsystems/assembly_template.py), which lives outside this package and is
+            # intentionally not reachable from here (no OCCT/subsystem imports in packages/ledger).
+            # Passing `reconcile` (see this function's docstring) closes the gap for the ONE caller
+            # that needs it (`SessionState.ledger()`); a bare `replay(events)` with no `reconcile` —
+            # every pre-2026-07-04 caller, and any caller that genuinely doesn't need assembly-child
+            # awareness — still hits this branch and silently drops the op rather than raising,
+            # matching NL_INTENT/USAGE's "recorded, not always state-changing" precedent, instead of
+            # crashing the whole reconstruction over one stale reference.
         # NL_INTENT: recorded, no state change
+        if ledger is not None and reconcile is not None:
+            ledger = reconcile(ledger)
     if ledger is None:
         raise ValueError("no genesis event")
     return ledger
@@ -123,6 +214,43 @@ class BaseEventLog(ABC):
     def append_signoff(self, reviewer: str, ts: str) -> Event:
         return self._append(EventKind.REVIEW_SIGNOFF, {"reviewer": reviewer}, reviewer, ts)
 
+    def append_instance_added(self, instance: "Instance", actor: str, ts: str,
+                              root_id: Optional[str] = None) -> Event:
+        """`root_id` should be passed whenever the ADDING ledger's `root_id` is this instance's own id
+        — i.e. every add, bootstrap or not, since `packages.ledger.apply.resolve_instance_parent`
+        only ever changes `root_id` on a bootstrap (empty-project) add and leaves it as-is otherwise.
+        Without this, `replay()` would never learn about a bootstrap's root_id (the FACT only carries
+        the added Instance, not the ledger-level pointer to it) and every replay/reconstruction would
+        keep the pre-genesis default root_id forever, pointing at nothing."""
+        payload: dict = {"instance": instance.model_dump(mode="json")}
+        if root_id is not None:
+            payload["root_id"] = root_id
+        return self._append(EventKind.INSTANCE_ADDED, payload, actor, ts)
+
+    def append_instance_removed(self, instance_id: str, actor: str, ts: str) -> Event:
+        return self._append(EventKind.INSTANCE_REMOVED, {"instance_id": instance_id}, actor, ts)
+
+    def append_instance_moved(self, instance_id: str, transform: "Transform", actor: str, ts: str) -> Event:
+        """The FACT counterpart to `apply_instance_op`'s move_instance OUTCOME
+        (packages/ledger/apply.py): stores the instance_id + the ALREADY-RESOLVED new Transform
+        (`outcome.instance.transform`, which already carries the "preserve current rotation if
+        omitted" resolution) — mirrors `append_instance_removed`'s shape/style exactly."""
+        return self._append(
+            EventKind.INSTANCE_MOVED,
+            {"instance_id": instance_id, "transform": transform.model_dump(mode="json")},
+            actor, ts,
+        )
+
+    def append_feature_op(self, op: str, instance_id: str, feature: "CutFeature", actor: str, ts: str) -> Event:
+        """The FACT counterpart to `apply_feature_op`'s OUTCOME (packages/ledger/apply.py): stores the
+        ALREADY-RESOLVED `CutFeature` (op="remove_feature" -> the one that was removed), exactly the
+        precedent `replay()`'s `EventKind.FEATURE_OP` branch above documents and expects."""
+        return self._append(
+            EventKind.FEATURE_OP,
+            {"op": op, "instance_id": instance_id, "feature": feature.model_dump(mode="json")},
+            actor, ts,
+        )
+
     def append_nl_intent(self, text: str, actor: str, ts: str) -> Event:
         return self._append(EventKind.NL_INTENT, {"text": text}, actor, ts)
 
@@ -142,8 +270,11 @@ class BaseEventLog(ABC):
     def events(self) -> list[Event]:
         return self._all_events()
 
-    def fold(self) -> MasterParametricLedger:
-        return replay(self._all_events())
+    def fold(
+        self,
+        reconcile: Optional[Callable[[MasterParametricLedger], MasterParametricLedger]] = None,
+    ) -> MasterParametricLedger:
+        return replay(self._all_events(), reconcile=reconcile)
 
     def verify_chain(self) -> bool:
         prev = GENESIS_PREV

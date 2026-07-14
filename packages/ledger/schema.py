@@ -14,9 +14,9 @@ the DO-NOT-BUILD cut-list in /CLAUDE.md.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from packages.ledger.parameter import ParameterDef
 
@@ -29,35 +29,117 @@ class ProjectMetadata(_Strict):
     project_id: str
     version_commit: str
     branch: str = "main"
+    subsystem_type: str = "bracket"  # key into packages/subsystems/SUBSYSTEM_REGISTRY
 
 
 class GlobalConstraints(_Strict):
     factor_of_safety_floor: float = Field(default=1.5, ge=1.0, description="export-blocking FS floor")
     # wedge targets are optional; aerospace range/cruise targets intentionally omitted
     max_print_time_seconds: Optional[float] = None
+    max_cost_usd: Optional[float] = None  # if set, the Cost discipline blocks export above this
 
 
 class StructureDomain(_Strict):
-    material_profile: str  # string key resolved against the (versioned) material DB; see external-dataset gap
-    skin_thickness_mm: ParameterDef
-    internal_rib_spacing_mm: ParameterDef
-    # the mounting-plate footprint: tunable continuous dims (no topology change) that drive the FEA + mass
-    plate_width_mm: ParameterDef
-    plate_depth_mm: ParameterDef
+    """The structures/material discipline — a small, curated typed block.
+    Bracket geometry (plate/skin/rib/hole) has moved to the generic geometry bag; this block now
+    carries only cross-cutting discipline data referenced by name in solvers/gates."""
+
+    material_profile: str  # string key resolved against the (versioned) material DB
 
 
 class ManufacturingDomain(_Strict):
-    # supportless overhang is a constraint relative to a build direction the ledger MUST carry
+    """The manufacturing/DFM discipline — universal print inputs (any subsystem uses these).
+    Per-part geometric features (bolt holes, etc.) live in each subsystem's geometry bag."""
+
     build_orientation_deg: ParameterDef
     slip_fit_clearance_mm: ParameterDef
-    # bolt-hole diameter: a real designable feature (changes the FEA stress field -> a geometry param).
-    # The hole COUNT is deliberately NOT tunable here — it is topology-changing (the OCAF identity wall).
-    hole_diameter_mm: ParameterDef
+
+
+class ThermalDomain(_Strict):
+    """Thermal discipline inputs (DOMAIN_TAXONOMY.md §3.9). Optional — present only when the part has a
+    thermal requirement. operating_temp_c drives a closed-form (L0) material service-temp gate;
+    a positive power_dissipation_w requires a grounded (L1) CalculiX heat-transfer margin before export."""
+
+    operating_temp_c: ParameterDef       # environment/service temp the part must survive
+    power_dissipation_w: ParameterDef    # heat load from mounted electronics (0 = passive)
 
 
 class Domains(_Strict):
+    """Cross-cutting disciplines. Subsystem geometry lives in `MasterParametricLedger.instances`
+    (Phase G) — NOT here. This block only holds the small, curated typed discipline blocks that
+    every design references by name (material, universal DFM, thermal)."""
+
     structure: StructureDomain
     manufacturing: ManufacturingDomain
+    thermal: Optional[ThermalDomain] = None
+
+
+class Transform(_Strict):
+    """Relative-to-parent transform for an instance (identity if omitted)."""
+
+    x_mm: float = 0.0
+    y_mm: float = 0.0
+    z_mm: float = 0.0
+    rx_deg: float = 0.0
+    ry_deg: float = 0.0
+    rz_deg: float = 0.0
+
+
+class CutFeature(_Strict):
+    """A generic subtractive feature (hole/pocket/slot) applied to a HOST instance's own built
+    geometry, positioned relative to the host's bounding-box center in the host's local XY frame.
+
+    `depth_mm` is ALWAYS a concrete, positive float here — never an Optional "through" sentinel. A
+    later (not-yet-built) stage resolves the conversational notion of "through" to a concrete number
+    BEFORE a CutFeature is ever constructed, specifically so the analytic volume path
+    (`packages/subsystems/cut_features.py::swept_volume_mm3`) never needs a geometry build to stay
+    accurate. `kind` is descriptive only (prompt clarity / tagging) — it does not gate whether the cut
+    penetrates; `depth_mm` alone governs that.
+    """
+
+    id: str
+    kind: Literal["hole", "pocket", "slot"]
+    shape: Literal["circle", "rect"]
+    dia_mm: Optional[float] = None
+    length_mm: Optional[float] = None
+    width_mm: Optional[float] = None
+    depth_mm: float = Field(gt=0.0)
+    x_mm: float = 0.0                  # position relative to the host's own bbox center, local XY
+    y_mm: float = 0.0
+
+    @model_validator(mode="after")
+    def _check_shape_fields(self) -> "CutFeature":
+        if self.shape == "circle" and self.dia_mm is None:
+            raise ValueError("CutFeature(shape='circle') requires dia_mm")
+        if self.shape == "rect" and (self.length_mm is None or self.width_mm is None):
+            raise ValueError("CutFeature(shape='rect') requires length_mm and width_mm")
+        # Positivity: depth_mm already gets this from `Field(gt=0.0)`; the shape-conditional footprint
+        # fields need the same floor here (a Pydantic `Field(gt=0.0)` on an Optional field only checks
+        # values that are present, but a zero/negative footprint is exactly as physically nonsensical
+        # as a zero/negative depth -- a hole of diameter 0 or a slot of negative width is not "unknown",
+        # it's a malformed cut that must never reach the geometry kernel).
+        for name, value in (("dia_mm", self.dia_mm), ("length_mm", self.length_mm), ("width_mm", self.width_mm)):
+            if value is not None and value <= 0.0:
+                raise ValueError(f"CutFeature.{name} must be > 0 (got {value})")
+        return self
+
+
+class Instance(_Strict):
+    """A concrete occurrence of a subsystem in the project's design tree.
+
+    Phase G structural change (2026-07-02): the ledger now holds a TREE of named instances instead
+    of a single active subsystem. `ProjectMetadata.subsystem_type` is a compat leftover that mirrors
+    the root instance's `subsystem_type`; new code should read `instances[root_id].subsystem_type`.
+    A single-part design has exactly one instance (`root_id="root"`, `parent_id=None`); a
+    hierarchical design (UAV, robot, machine assembly) has many, related via `parent_id`.
+    """
+
+    id: str
+    subsystem_type: str            # key into SUBSYSTEM_REGISTRY
+    params: dict[str, ParameterDef] = Field(default_factory=dict)
+    transform: Optional[Transform] = None
+    parent_id: Optional[str] = None   # None == root
+    cut_features: list[CutFeature] = Field(default_factory=list)
 
 
 class DerivedSafety(_Strict):
@@ -87,5 +169,10 @@ class MasterParametricLedger(_Strict):
     project_metadata: ProjectMetadata
     global_constraints: GlobalConstraints = Field(default_factory=GlobalConstraints)
     domains: Domains
+    # Phase G — the design tree. A single-part design has one instance (id="root", parent_id=None).
+    # A hierarchical design (UAV, robot) has many, related via parent_id. Empty by default during the
+    # migration; app code seeds a root instance from the active subsystem.
+    instances: dict[str, Instance] = Field(default_factory=dict)
+    root_id: str = "root"
     derived: DerivedSafety = Field(default_factory=DerivedSafety)
     review: Review = Field(default_factory=Review)
