@@ -14,8 +14,9 @@ from packages.ledger.derived_resolver import Verdict, signature_from_params
 from packages.ledger.fingerprint import fingerprint
 
 
-def _fake_analyze(params, material_name, load_n):
-    return Verdict(geometry_signature=signature_from_params(params), fingerprint=fingerprint(),
+def _fake_analyze(params, material_name, load_n, subsystem_name="bracket", cut_features=None):
+    return Verdict(geometry_signature=signature_from_params(params, geometry_params=tuple(params.keys())),
+                   fingerprint=fingerprint(),
                    factor_of_safety=2.4, mesh_converged=True, watertight=True, min_wall_ok=True, solver_seconds=2.5)
 
 
@@ -23,7 +24,11 @@ def _client(monkeypatch):
     monkeypatch.delenv("REDIS_URL", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setattr(app_module, "analyze_in_subprocess", _fake_analyze)
-    return TestClient(app_module.create_app())
+    # a project starts as an empty workspace (2026-07-04) — bootstrap the bracket root every other
+    # test here relies on, exactly as genesis used to seed it automatically.
+    c = TestClient(app_module.create_app())
+    c.post("/instances", json={"subsystem_type": "bracket", "instance_id": "root"})
+    return c
 
 
 def test_no_goal_is_empty(monkeypatch):
@@ -85,14 +90,17 @@ def test_optimize_targets_the_goal_floor(monkeypatch):
     # "Find a passing design" must aim at the STATED goal, not the default 1.5 floor
     captured: dict = {}
 
-    def _capture(candidates, base_params, material_name, load_n, fs_floor):
+    def _capture(candidates, base_params, material_name, load_n, fs_floor, timeout_s=600.0,
+                subsystem_name="bracket", cut_features=None):
         captured["floor"] = fs_floor
-        return {"variants": [], "best_skin": None, "best_mass_g": None, "best_verdict": None}
+        return {"variants": [], "best_value": None, "best_mass_g": None, "best_verdict": None,
+               "param_name": "skin_thickness_mm"}
 
     monkeypatch.delenv("REDIS_URL", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setattr(app_module, "optimize_in_subprocess", _capture)
     c = TestClient(app_module.create_app())
+    c.post("/instances", json={"subsystem_type": "bracket", "instance_id": "root"})
     c.post("/requirements", json={"goal": "hold the load at FS 3"})
     c.post("/optimize")
     assert captured["floor"] == 3.0   # the goal raised the sweep's target floor

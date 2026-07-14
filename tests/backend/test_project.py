@@ -6,8 +6,8 @@ from packages.agents.strategic import StrategicAgent
 from packages.ledger.deltas import ParameterDelta
 from packages.ledger.project import Project
 
-SKIN = "domains.structure.skin_thickness_mm"
-RIB = "domains.structure.internal_rib_spacing_mm"
+SKIN = "instances.root.params.skin_thickness_mm"
+RIB = "instances.root.params.internal_rib_spacing_mm"
 TS = "2026-06-28T00:00:00Z"
 
 
@@ -21,8 +21,8 @@ def test_fork_then_diverge_independently(base_ledger):
     assert proj.branches() == ["main", "variant"]
 
     proj.mutate("variant", ParameterDelta(target_node=SKIN, requested_value=3.0), actor="ai", ts=TS)
-    assert proj.ledger("variant").domains.structure.skin_thickness_mm.value == 3.0
-    assert proj.ledger("main").domains.structure.skin_thickness_mm.value == 2.0  # main untouched
+    assert proj.ledger("variant").instances["root"].params["skin_thickness_mm"].value == 3.0
+    assert proj.ledger("main").instances["root"].params["skin_thickness_mm"].value == 2.0  # main untouched
 
 
 def test_merge_non_conflicting_branches(base_ledger):
@@ -34,8 +34,8 @@ def test_merge_non_conflicting_branches(base_ledger):
 
     result = proj.merge(base="main", ours="a", theirs="b")
     assert result.clean
-    assert result.merged.domains.structure.skin_thickness_mm.value == 3.0
-    assert result.merged.domains.structure.internal_rib_spacing_mm.value == 25.0
+    assert result.merged.instances["root"].params["skin_thickness_mm"].value == 3.0
+    assert result.merged.instances["root"].params["internal_rib_spacing_mm"].value == 25.0
 
 
 def test_merge_conflict_surfaces(base_ledger):

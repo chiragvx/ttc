@@ -34,7 +34,8 @@ def test_actor_runs_stores_verdict_and_publishes_status(worker, monkeypatch):
     jobs.configure(store=Store(), publish=lambda pid, s, v: statuses.append(s))
     fake = Verdict(geometry_signature="sig", fingerprint="fp", factor_of_safety=5.0,
                    mesh_converged=True, watertight=True, min_wall_ok=True, solver_seconds=3.0)
-    monkeypatch.setattr(jobs, "analyze_in_subprocess", lambda params, material_name, load_n: fake)
+    monkeypatch.setattr(jobs, "analyze_in_subprocess",
+                        lambda params, material_name, load_n, subsystem_name="bracket", cut_features=None: fake)
 
     jobs.run_fs_analysis.send("proj-1", {SKIN: 2.0}, "PLA", 40.0)
     jobs.broker.join(jobs.run_fs_analysis.queue_name)
