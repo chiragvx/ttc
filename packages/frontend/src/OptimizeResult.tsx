@@ -1,10 +1,12 @@
 export interface OptimizeResultData {
-  variants: { skin: number; fs: number | null; mass_g: number; feasible: boolean }[];
-  bestSkin: number | null;
+  variants: { value: number; fs: number | null; mass_g: number; feasible: boolean }[];
+  bestValue: number | null;
   bestMass: number | null;
+  paramName: string | null; // which param was swept — e.g. "skin_thickness_mm", "thickness_mm"
 }
 
 export function OptimizeResult({ result, onClose }: { result: OptimizeResultData; onClose: () => void }) {
+  const label = result.paramName?.replace(/_mm$/, "").replace(/_/g, " ") ?? "value";
   return (
     <div style={panel}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -16,7 +18,7 @@ export function OptimizeResult({ result, onClose }: { result: OptimizeResultData
       <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
         <thead>
           <tr style={{ color: "#8b949e" }}>
-            <th style={th}>skin</th>
+            <th style={th}>{label}</th>
             <th style={th}>FS</th>
             <th style={th}>mass</th>
             <th style={th}></th>
@@ -24,10 +26,10 @@ export function OptimizeResult({ result, onClose }: { result: OptimizeResultData
         </thead>
         <tbody>
           {result.variants.map((v, i) => {
-            const chosen = v.skin === result.bestSkin;
+            const chosen = v.value === result.bestValue;
             return (
               <tr key={i} style={{ color: chosen ? "#3fb950" : v.feasible ? "#c9d1d9" : "#8b949e" }}>
-                <td style={td}>{v.skin} mm</td>
+                <td style={td}>{v.value} mm</td>
                 <td style={td}>{v.fs?.toFixed(2) ?? "—"}</td>
                 <td style={td}>{v.mass_g} g</td>
                 <td style={td}>{chosen ? "✓ chosen" : v.feasible ? "passes" : "fails FS"}</td>
@@ -37,9 +39,9 @@ export function OptimizeResult({ result, onClose }: { result: OptimizeResultData
         </tbody>
       </table>
       <div style={{ fontSize: 12, color: "#8b949e", marginTop: 8 }}>
-        {result.bestSkin != null ? (
+        {result.bestValue != null ? (
           <>
-            Chose the lightest design that meets the FS floor: <b style={{ color: "#3fb950" }}>{result.bestSkin} mm</b>{" "}
+            Chose the lightest design that meets the FS floor: <b style={{ color: "#3fb950" }}>{result.bestValue} mm</b>{" "}
             ({result.bestMass} g) — applied to the model.
           </>
         ) : (

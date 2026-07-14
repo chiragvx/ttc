@@ -23,6 +23,10 @@ export function Hud({ telemetry, reject }: { telemetry: TelemetryDelta | null; r
         label="Print (est.)"
         value={telemetry ? `${(telemetry.estimated_print_time_s / 60).toFixed(0)} min` : "—"}
       />
+      <Metric
+        label="Cost (est.)"
+        value={telemetry ? `$${telemetry.estimated_cost_usd.toFixed(2)}` : "—"}
+      />
       <span style={{ flex: 1 }} />
       {reject && (
         <span style={{ color: "#f85149" }}>

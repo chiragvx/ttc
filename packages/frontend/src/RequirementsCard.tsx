@@ -10,21 +10,29 @@ const MARK: Record<string, { icon: string; color: string }> = {
 };
 
 export function RequirementsCard({
-  data, onOptimize,
+  data, onOptimize, bare,
 }: {
   data: RequirementsData | null;
   onOptimize: () => void;
+  // when embedded inside another card/section that already provides its own border/background
+  // (see ModelPanel.tsx), skip this component's own outer box so it doesn't double up
+  bare?: boolean;
 }) {
   const fsUnmet = data?.requirements.some((r) => r.metric === "factor_of_safety" && r.status !== "SATISFIED");
 
   return (
-    <div style={card}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: data?.goal_set ? 8 : 0 }}>
-        <strong style={{ fontSize: 13 }}>Goal &amp; compliance</strong>
-        {data?.goal_set && (
-          <span style={{ fontSize: 12, color: "#8b949e" }}>{data.satisfied}/{data.total} met</span>
-        )}
-      </div>
+    <div style={bare ? undefined : card}>
+      {!bare && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: data?.goal_set ? 8 : 0 }}>
+          <strong style={{ fontSize: 13 }}>Goal &amp; compliance</strong>
+          {data?.goal_set && (
+            <span style={{ fontSize: 12, color: "#8b949e" }}>{data.satisfied}/{data.total} met</span>
+          )}
+        </div>
+      )}
+      {bare && data?.goal_set && (
+        <div style={{ fontSize: 12, color: "#8b949e", marginBottom: 8 }}>{data.satisfied}/{data.total} met</div>
+      )}
 
       {!data?.goal_set ? (
         <div style={{ fontSize: 11, color: "#8b949e" }}>
