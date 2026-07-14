@@ -3,8 +3,8 @@
 Master index for turning the `prd-27-8.14` vision into a real product, engineered with Claude
 (dev-time) and powered by Claude (runtime).
 
-**Last updated:** 2026-07-14
-**Current phase:** Phases 0–4 implemented & green (**502 backend tests pass on Windows** — `python -m
+**Last updated:** 2026-07-15
+**Current phase:** Phases 0–4 implemented & green (**520 backend tests pass on Windows** — `python -m
 pytest tests -q`, 26 skip on dependency-gated markers, more in the Linux container) and the **full
 wedge stack runs end-to-end on `docker compose up`**. Spike 4 fully PASSES (deflection-validated FS +
 19/19 auto-mesh). Built across the phases: ledger + rules validator + event store/replay (in-mem + SQL
@@ -35,17 +35,38 @@ silently cover every subsequent design change for the rest of a session. See
 `packages/ledger/events.py`'s `GEOMETRY_CLASS_KINDS` reset and `packages/transport/app.py`'s `/ws`
 handler.
 
-**Not yet fixed** (found in the same audit, tracked here, ranked roughly by severity): no auth on any
-endpoint + one global session shared by every client + anonymous callers can spend the operator's
-OpenRouter budget; `PgEventStore` has no per-file/stream scoping (multi-file sessions corrupt each
-other's history under the Postgres/compose path — only in-mem/sqlite are test-covered); Dramatiq jobs
-are at-most-once with invisible failure (no retry, no failure surfaced to the poller); a user-added
-cut feature can silently fragment the FS solver's boundary-condition face on a `fea_eligible` part,
-producing a confident-but-wrong FS; the stated goal's load (e.g. "holds 200 N") never reaches the
-solver — `HeuristicStrategicProvider` only parses FS/mass/hours tokens, so the enforced FS floor can
-diverge from what the user actually asked for even though the verdict-cache fix above at least stops
-the WRONG case's verdict from satisfying the request; full event-log refold + per-event deep-copy on
-every read (no snapshotting) will not scale past a demo-length session; zero frontend tests.
+**2026-07-15 — per-session isolation + optional AUTH_TOKEN gate:** closed the "one global session
+shared by every client + zero auth" gap from the 07-14 audit. `SessionManager`
+(`packages/transport/app.py`) now maps an opaque per-browser cookie to its own isolated
+`SessionState`; an operator-configured `AUTH_TOKEN` (unset by default — zero-friction local dev is
+unchanged) gates who can mint a NEW one, and every REST route except `GET /healthz` sits behind it
+(`/ws` does its own cookie/header check, since browser WebSockets can't set custom headers). An
+adversarial review before landing this caught and fixed six real gaps in the first pass: FastAPI's
+implicit `/docs`/`/redoc`/`/openapi.json` leaked the full private schema even with `AUTH_TOKEN` set
+(now gated too); the session cap evicted the OLDEST live session on overflow — an unauthenticated
+DoS letting anyone wipe another user's design (now refuses new sessions with 503 instead); each
+session's first file was literally `"file_1"`, colliding across tenants in Postgres mode (`file_id`
+now carries a random suffix); and — the big one — **`PgEventStore` had no project-scoping column at
+all**, so every file from every session shared one global event stream the moment `DATABASE_URL` was
+set, silently voiding session isolation in the actual `docker-compose` deployment (fixed with a
+`project_id`-scoped composite key — **breaking schema change for any pre-existing dev Postgres
+volume**, no migration tooling yet, `docker compose down -v` to reset). Two findings were documented
+rather than fixed (matches the cut-list's no-scale-infra stance): a WS session minted via
+`Authorization` header — a script/test path the real frontend never takes — isn't reliably reusable
+across separate connections; and `SessionManager`'s in-memory dict doesn't extend across multiple
+worker processes without a shared store (Redis is already provisioned for Dramatiq; not wired up for
+this).
+
+**Still not fixed** (ranked roughly by severity): Dramatiq jobs are at-most-once with invisible
+failure (no retry, no failure surfaced to the poller); a user-added cut feature can silently fragment
+the FS solver's boundary-condition face on a `fea_eligible` part, producing a confident-but-wrong FS;
+the stated goal's load (e.g. "holds 200 N") never reaches the solver — `HeuristicStrategicProvider`
+only parses FS/mass/hours tokens, so the enforced FS floor can diverge from what the user actually
+asked for even though the verdict-cache fix above at least stops the WRONG case's verdict from
+satisfying the request; full event-log refold + per-event deep-copy on every read (no snapshotting)
+will not scale past a demo-length session; zero frontend tests; no TLS anywhere in the stack, so the
+new session cookie has no `Secure` flag (matches existing deployment posture — add both together
+when TLS termination lands).
 
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
