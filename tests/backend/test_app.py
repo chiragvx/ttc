@@ -92,6 +92,44 @@ def test_ws_hard_lock_then_mutate_is_nacked():
     assert msg["event_type"] == "PARAMETER_MUTATION_REJECTED"
 
 
+def test_ws_malformed_frame_is_nacked_not_a_dropped_connection():
+    """A frame that fails schema validation (missing field, wrong type, or an extra key — the
+    protocol is extra='forbid') must NACK and keep the socket open, not raise an uncaught
+    ValidationError out of the handler and kill the connection."""
+    c = _client()
+    with c.websocket_connect("/ws") as ws:
+        ws.send_json({"target_node": SKIN})  # missing required requested_value
+        msg = ws.receive_json()
+        assert msg["event_type"] == "PARAMETER_MUTATION_REJECTED"
+        assert msg["status"] == "REJECTED"
+
+        ws.send_json({"target_node": SKIN, "requested_value": "not a number"})  # wrong type
+        msg2 = ws.receive_json()
+        assert msg2["event_type"] == "PARAMETER_MUTATION_REJECTED"
+
+        ws.send_json({"target_node": SKIN, "requested_value": 3.0, "unexpected_field": 1})  # extra key
+        msg3 = ws.receive_json()
+        assert msg3["event_type"] == "PARAMETER_MUTATION_REJECTED"
+
+        # the connection survived all three malformed frames — a normal mutation still works after
+        ws.send_json({"target_node": SKIN, "requested_value": 3.0})
+        msg4 = ws.receive_json()
+        assert msg4["event_type"] == "PARAMETER_CASCADE_UPDATE"
+        assert msg4["mutations_applied"][0]["value"] == 3.0
+
+
+def test_ws_invalid_json_is_nacked_not_a_dropped_connection():
+    c = _client()
+    with c.websocket_connect("/ws") as ws:
+        ws.send_text("not valid json at all")
+        msg = ws.receive_json()
+        assert msg["event_type"] == "PARAMETER_MUTATION_REJECTED"
+
+        ws.send_json({"target_node": SKIN, "requested_value": 3.0})
+        msg2 = ws.receive_json()
+        assert msg2["event_type"] == "PARAMETER_CASCADE_UPDATE"
+
+
 def test_export_check_blocks_on_unknown_safety():
     c = _client()
     res = c.post("/export/check").json()

@@ -43,6 +43,15 @@ FACT_KINDS = {
     EventKind.INSTANCE_MOVED, EventKind.FEATURE_OP,
 }
 
+# Facts that change the actual geometry/design — a prior ENGINEER_REVIEWED sign-off must not survive
+# one of these (Review's own docstring: "Geometry-class changes start AI_PROPOSED"). Only ever
+# appended when `outcome.changed` was True (packages/transport/app.py), so every one of these really
+# did change something worth re-reviewing — never appended for a REJECTED/CONFLICT attempt.
+GEOMETRY_CLASS_KINDS = {
+    EventKind.PARAMETER_MUTATION, EventKind.INSTANCE_ADDED, EventKind.INSTANCE_REMOVED,
+    EventKind.INSTANCE_MOVED, EventKind.FEATURE_OP,
+}
+
 GENESIS_PREV = "0" * 64
 
 
@@ -170,6 +179,15 @@ def replay(
             # matching NL_INTENT/USAGE's "recorded, not always state-changing" precedent, instead of
             # crashing the whole reconstruction over one stale reference.
         # NL_INTENT: recorded, no state change
+        if (ledger is not None and ev.kind in GEOMETRY_CLASS_KINDS
+                and ledger.review.state is not ReviewState.AI_PROPOSED):
+            # a sign-off does not survive a subsequent geometry-class change — otherwise one
+            # ENGINEER_REVIEWED from early in a session silently covers every later mutation/cut/
+            # instance change forever, with no re-review ever required. This is the human-in-the-loop
+            # half of the export gate; geometry_signature-driven FS staleness (derived_resolver.py) is
+            # a separate mechanism that already re-blocks on most of these same changes, but review
+            # state itself never reset on its own before this.
+            ledger = ledger.model_copy(update={"review": Review(state=ReviewState.AI_PROPOSED, reviewer=None)})
         if ledger is not None and reconcile is not None:
             ledger = reconcile(ledger)
     if ledger is None:

@@ -44,6 +44,42 @@ def test_fold_is_deterministic(base_ledger):
     assert log.fold().model_dump() == log.fold().model_dump()
 
 
+def test_signoff_does_not_survive_a_later_mutation(base_ledger):
+    """Review.__doc__: 'Geometry-class changes start AI_PROPOSED' — a sign-off must not silently
+    cover every later param change forever. A mutation AFTER sign-off resets review back to
+    AI_PROPOSED (and clears the stale reviewer); one that changed nothing (never appended as a fact
+    in the live app) must not have reset anything either, but that's exercised at the API layer."""
+    log = _log_with_history(base_ledger)  # ends signed-off
+    assert log.fold().review.state is ReviewState.ENGINEER_REVIEWED
+
+    log.append_mutation(ParameterDelta(target_node=SKIN, requested_value=4.0), actor="user", ts=TS)
+    led = log.fold()
+    assert led.review.state is ReviewState.AI_PROPOSED
+    assert led.review.reviewer is None
+    assert led.instances["root"].params["skin_thickness_mm"].value == 4.0  # the mutation still applied
+
+
+def test_signoff_does_not_survive_a_later_instance_add(base_ledger):
+    log = _log_with_history(base_ledger)
+    assert log.fold().review.state is ReviewState.ENGINEER_REVIEWED
+
+    log.append_instance_added(_make_instance("leg1"), actor="user", ts=TS)
+    assert log.fold().review.state is ReviewState.AI_PROPOSED
+
+
+def test_a_later_signoff_still_applies_after_reset(base_ledger):
+    """A reset isn't a one-way ratchet -- a fresh sign-off after the invalidating change still
+    moves review to ENGINEER_REVIEWED again."""
+    log = _log_with_history(base_ledger)  # ends signed-off at 3.5mm
+    log.append_mutation(ParameterDelta(target_node=SKIN, requested_value=4.0), actor="user", ts=TS)
+    assert log.fold().review.state is ReviewState.AI_PROPOSED
+
+    log.append_signoff(reviewer="pe2@example.com", ts=TS)
+    led = log.fold()
+    assert led.review.state is ReviewState.ENGINEER_REVIEWED
+    assert led.review.reviewer == "pe2@example.com"
+
+
 def test_hash_chain_verifies(base_ledger):
     log = _log_with_history(base_ledger)
     assert log.verify_chain() is True

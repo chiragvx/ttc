@@ -56,6 +56,27 @@ def test_analysis_flips_export_gate_then_goes_stale(monkeypatch):
     assert c.post("/export/check").json()["status"] == "EXPORT_ELIGIBLE"
 
 
+def test_moving_an_instance_after_signoff_reblocks_export_via_review_reset(monkeypatch):
+    """Isolates the review-reset fix from FS staleness: repositioning an instance (Transform only)
+    does NOT touch any geometry param the FS signature hashes, so the cached verdict stays fresh --
+    yet export must still re-block, because the human sign-off itself no longer covers this design
+    (schema.py's Review docstring: 'Geometry-class changes start AI_PROPOSED'). Before this fix,
+    review never reset on its own and this would have stayed EXPORT_ELIGIBLE."""
+    c = _client(monkeypatch)
+    c.post("/analyze")
+    c.post("/signoff", params={"reviewer": "pe@example.com"})
+    assert c.post("/export/check").json()["status"] == "EXPORT_ELIGIBLE"
+
+    root_id = c.get("/ledger").json()["root_id"]
+    move = c.post("/instance_ops", json={
+        "op": "move_instance", "instance_id": root_id, "x_mm": 10.0, "y_mm": 0.0, "z_mm": 0.0,
+    }).json()
+    assert move["ok"] is True
+
+    assert c.post("/analyze").json().get("cached") is True  # FS verdict is still fresh, unaffected
+    assert c.post("/export/check").json()["status"] == "EXPORT_BLOCKED"  # but review reset -> blocked
+
+
 def test_analyze_status_reflects_current_geometry(monkeypatch):
     c = _client(monkeypatch)
     assert c.get("/analyze/status").json()["current"] is None

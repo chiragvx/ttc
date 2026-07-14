@@ -963,8 +963,24 @@ def create_app() -> FastAPI:
         await socket.accept()
         try:
             while True:
-                raw = await socket.receive_json()
-                req = ParamMutationRequest.model_validate(raw)
+                raw = None
+                try:
+                    raw = await socket.receive_json()
+                    req = ParamMutationRequest.model_validate(raw)
+                except WebSocketDisconnect:
+                    raise
+                except Exception as e:
+                    # a malformed frame (invalid JSON, missing/extra/wrong-type field — the protocol
+                    # is extra="forbid") must NACK, not tear down the whole socket: previously an
+                    # uncaught ValidationError/JSONDecodeError propagated out of this handler and
+                    # killed the connection on the client's very next bad message, with no signal
+                    # sent back at all and every other in-flight mutation on this socket lost with it.
+                    bad_target = raw.get("target_node") if isinstance(raw, dict) else None
+                    await socket.send_json(MutationRejected(
+                        target_node=str(bad_target) if bad_target is not None else "",
+                        status="REJECTED", reason=f"malformed frame: {e}",
+                    ).model_dump(mode="json"))
+                    continue
                 await socket.send_json(state.mutate(req).model_dump(mode="json"))
         except WebSocketDisconnect:
             return
