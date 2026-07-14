@@ -7,12 +7,14 @@ solver tiers live behind the Truth Plane and are out of this hot path by design.
 
 from __future__ import annotations
 
+import contextvars
 import dataclasses
 import json
 import os
+import secrets
 import tempfile
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
@@ -231,10 +233,13 @@ def _make_verdict_store():
     return InMemoryVerdictStore()
 
 
-def _make_event_log():
+def _make_event_log(project_id: str):
     if os.environ.get("DATABASE_URL"):
         from packages.ledger.event_store_pg import PgEventStore
-        return PgEventStore.from_env()
+        # project_id scopes the shared Postgres `events` table per file (2026-07-15 — the table used
+        # to have NO scoping column at all, so every file/session/tenant folded one shared global
+        # stream; see event_store_pg.py's module docstring).
+        return PgEventStore.from_env(project_id=project_id)
     return EventLog()
 
 
@@ -249,7 +254,7 @@ class FileState:
     def __init__(self, file_id: str, name: str, verdict_store, strategic: StrategicAgent) -> None:
         self.file_id = file_id
         self.name = name
-        self.log = _make_event_log()
+        self.log = _make_event_log(self.file_id)
         if not self.log.events():  # fresh file -> seed genesis; else reuse the durable history
             self.log.append_genesis(make_demo_ledger(), actor="system", ts=_TS)
         self.verdict_store = verdict_store
@@ -408,7 +413,14 @@ class SessionState:
     def _make_file(self) -> FileState:
         n = self._next_untitled
         self._next_untitled += 1
-        return FileState(file_id=f"file_{n}", name=f"Untitled {n}",
+        # file_id is the durable-store scoping key (PgVerdictStore.project_id, PgEventStore's
+        # project_id column) — it MUST be globally unique across every session/tenant, not just
+        # within this one. A per-session sequential "file_{n}" (every session's first file was
+        # literally "file_1") let one tenant's cached FS verdict/optimize result satisfy another
+        # tenant's request on a Postgres-backed deployment whenever both held the same default,
+        # untouched geometry (2026-07-15 audit finding). `name` stays the plain sequential display
+        # counter — only the storage-facing id needs the random suffix.
+        return FileState(file_id=f"file_{n}_{secrets.token_urlsafe(6)}", name=f"Untitled {n}",
                          verdict_store=self.verdict_store, strategic=self.strategic)
 
     def active_file(self) -> FileState:
@@ -466,21 +478,177 @@ class SessionState:
         return self.active_file().file_id
 
 
+# --- Session isolation + auth (2026-07-15) ----------------------------------------------------------
+# Before this, ONE global SessionState was shared by every client that ever hit this server — any
+# browser tab, from anyone on the network, read/mutated/exported the SAME ledger, and every endpoint
+# was unauthenticated. `SessionManager` now maps an opaque per-browser cookie to its OWN isolated
+# SessionState; `_current_session` + `_SessionProxy` let every route body below keep referencing the
+# free variable `state` completely UNCHANGED (they still do `state.ledger()`, `state.mutate(req)`, …)
+# while it transparently resolves to THIS request's own session instead of one shared instance.
+
+_current_session: "contextvars.ContextVar[SessionState]" = contextvars.ContextVar("current_session")
+
+
+class _SessionProxy:
+    """Forwards every attribute access to whichever SessionState `_current_session` is bound to for
+    the request/connection currently executing — set by `_require_session` (REST, via a FastAPI
+    dependency) or directly inside the `/ws` handler (WebSocket, which can't use `Depends`)."""
+
+    def __getattr__(self, name):
+        return getattr(_current_session.get(), name)
+
+    def __setattr__(self, name, value):
+        setattr(_current_session.get(), name, value)
+
+
+state = _SessionProxy()
+
+
+def _check_auth_token(headers) -> bool:
+    """True if `headers` (a `Request.headers` or `WebSocket.headers` mapping — same interface) carries
+    the configured shared secret via `Authorization: Bearer <token>`, OR no `AUTH_TOKEN` is configured
+    at all (open — matches this app's pre-auth behavior; an operator opts into gating explicitly by
+    setting the env var). Constant-time comparison against a timing side-channel on the token."""
+    token = os.environ.get("AUTH_TOKEN")
+    if not token:
+        return True
+    auth = headers.get("authorization", "")
+    supplied = auth[7:] if auth.lower().startswith("bearer ") else ""
+    return secrets.compare_digest(supplied, token)
+
+
+class SessionLimitReached(Exception):
+    """Raised by `SessionManager` when MAX_SESSIONS is already reached and a NEW session was
+    requested. The caller (the REST dependency / the /ws handler) turns this into a 503 / a WS close
+    rather than silently evicting a live session out from under whoever currently holds it — an
+    EARLIER version of this class evicted the oldest session FIFO-style instead, which meant any
+    unauthenticated caller (the default when AUTH_TOKEN is unset) could wipe out every other active
+    user's in-memory design by spamming session-minting requests (2026-07-15 audit finding, confirmed
+    live: 300 anonymous requests silently evicted a real victim session with zero error/signal).
+    Failing CLOSED (refuse new sessions) instead of failing OPEN (destroy old ones) is the fix."""
+
+
+class SessionManager:
+    """Owns every browser session's isolated `SessionState`, keyed by an opaque cookie. A NEW session
+    can only be minted by a request that either supplies the configured `AUTH_TOKEN` (when one is
+    set) or — when none is configured — by anyone at all, matching this app's original zero-auth
+    local-dev behavior. An EXISTING session_id that already maps to a live session is trusted without
+    re-checking the token; this is what lets the browser's native WebSocket API (which cannot set
+    custom headers) join an already-authenticated browser session via its cookie alone.
+
+    KNOWN LIMITATION (documented, not fixed here — out of scope for this pass; matches CLAUDE.md's
+    cut-list, which excludes scale-infra): this is a single in-process dict, created fresh per
+    `create_app()` call. It is NOT shared across multiple worker processes (`gunicorn -w N` /
+    multiple uvicorn processes behind a load balancer with no session affinity) — a request routed to
+    a different worker than the one that minted a session will not find it, and will either silently
+    get a fresh empty session (AUTH_TOKEN unset) or a spurious 401/1008 (AUTH_TOKEN set, since a
+    browser's WS can't re-present the token). The documented `docker compose up` deployment runs
+    exactly one backend process today, so this doesn't currently bite — but it means this class
+    cannot be scaled to multiple backend replicas without first moving session storage to Redis
+    (already provisioned in the stack for Dramatiq) or an equivalent shared store."""
+
+    COOKIE_NAME = "gtc_session"
+    # A coarse safeguard against unbounded memory growth (e.g. many clients that never persist the
+    # cookie) — NOT a real LRU/TTL policy. Sized well above any real single-operator or small-team
+    # session count. Reaching it REFUSES new sessions (SessionLimitReached) rather than evicting an
+    # existing one — see SessionLimitReached's docstring for why eviction was actively dangerous.
+    MAX_SESSIONS = 256
+
+    def __init__(self) -> None:
+        self._sessions: dict[str, SessionState] = {}
+
+    def resolve(self, session_id: str | None) -> SessionState | None:
+        return self._sessions.get(session_id) if session_id else None
+
+    def _new_session(self) -> tuple[str, SessionState]:
+        if len(self._sessions) >= self.MAX_SESSIONS:
+            raise SessionLimitReached(
+                f"{self.MAX_SESSIONS} concurrent sessions already open — try again shortly, or set "
+                f"AUTH_TOKEN to restrict who can open new sessions at all"
+            )
+        sid = secrets.token_urlsafe(32)
+        session = SessionState()
+        self._sessions[sid] = session
+        return sid, session
+
+    def get_or_create(self, session_id: str | None) -> tuple[str, SessionState, bool]:
+        """Returns (session_id, session, is_new) — `is_new` tells the caller whether to set the
+        cookie on its response/accept handshake."""
+        existing = self.resolve(session_id)
+        if existing is not None:
+            return session_id, existing, False
+        sid, session = self._new_session()
+        return sid, session, True
+
+    def only(self) -> SessionState:
+        """Test-only escape hatch (mirrors the old `app.state.session` singleton): valid whenever
+        exactly one session exists, true for every test that drives a single TestClient instance —
+        its cookie jar reuses the SAME session across every call it makes."""
+        if len(self._sessions) != 1:
+            raise AssertionError(f"expected exactly one session, found {len(self._sessions)}")
+        return next(iter(self._sessions.values()))
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="Grounded Text-to-CAD (Tier 0)")
-    state = SessionState()
-    app.state.session = state  # test-only escape hatch (e.g. replay-from-log assertions); not read
-                                # by any route above — the route closures all use `state` directly
+    # FastAPI's own auto-generated /docs, /redoc, /openapi.json are registered directly on `app` at
+    # construction time — BEFORE `router`'s auth dependency exists, and never wrapped by it (2026-07-15
+    # audit finding: these leaked the full private route/schema surface, including internal request
+    # models like ProposeRequest.api_key, to an anonymous caller even with AUTH_TOKEN configured).
+    # Disabled here; equivalent routes are re-added on `router` below so they inherit the SAME gate.
+    app = FastAPI(title="Grounded Text-to-CAD (Tier 0)", docs_url=None, redoc_url=None, openapi_url=None)
+    sessions = SessionManager()
+    app.state.sessions = sessions  # test-only escape hatch — see SessionManager.only()
+
+    async def _require_session(request: Request, response: Response) -> None:
+        """FastAPI dependency attached to every REST route below except /healthz (see `router`):
+        resolves THIS request's own session (isolating it from every other client's), enforcing
+        AUTH_TOKEN only for a request with no existing session yet — see SessionManager's docstring.
+        MUST be `async def`, not plain `def`: FastAPI runs a sync dependency via `run_in_threadpool`,
+        which executes it against a COPY of the current context in a worker thread — a contextvar set
+        there (`_current_session.set(...)` below) never propagates back out, so every later sync
+        route handler (also threadpool-offloaded) would see an unset contextvar. An async dependency
+        runs directly on the event loop in the SAME task as the request, so the mutation is visible
+        to everything that runs afterward in that task — including a later threadpool-offloaded sync
+        route handler, whose context copy is taken AFTER this dependency has already set it."""
+        session_id = request.cookies.get(SessionManager.COOKIE_NAME)
+        existing = sessions.resolve(session_id)
+        if existing is None and not _check_auth_token(request.headers):
+            raise HTTPException(status_code=401, detail="unauthorized — set Authorization: Bearer <AUTH_TOKEN>")
+        try:
+            sid, session, is_new = sessions.get_or_create(session_id)
+        except SessionLimitReached as e:
+            raise HTTPException(status_code=503, detail=str(e)) from e
+        _current_session.set(session)
+        if is_new:
+            response.set_cookie(SessionManager.COOKIE_NAME, sid, httponly=True, samesite="lax")
+
+    router = APIRouter(dependencies=[Depends(_require_session)])
+
+    # Gated re-implementations of FastAPI's disabled default docs routes (see the docs_url=None note
+    # above) — same auth dependency as every other route, since they exist ONLY on `router` too.
+    @router.get("/openapi.json", include_in_schema=False)
+    def openapi_schema():
+        return JSONResponse(app.openapi())
+
+    @router.get("/docs", include_in_schema=False)
+    def swagger_docs():
+        from fastapi.openapi.docs import get_swagger_ui_html
+        return get_swagger_ui_html(openapi_url="/openapi.json", title=f"{app.title} - Swagger UI")
+
+    @router.get("/redoc", include_in_schema=False)
+    def redoc_docs():
+        from fastapi.openapi.docs import get_redoc_html
+        return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} - ReDoc")
 
     @app.get("/healthz")
     def healthz():
         return {"ok": True}
 
-    @app.get("/ledger")
+    @router.get("/ledger")
     def get_ledger():
         return state.ledger().model_dump(mode="json")
 
-    @app.get("/params")
+    @router.get("/params")
     def params():
         # the tunable sliders for the ACTIVE INSTANCE's subsystem (its geometry params + cross-cutting
         # params) — so the UI renders the right controls for whichever part is currently selected in
@@ -505,7 +673,7 @@ def create_app() -> FastAPI:
                          "locked": pd.is_locked, "label": _param_label(path)})
         return {"subsystem": sub.name, "instance_id": inst.id, "params": rows}
 
-    @app.get("/subsystems")
+    @router.get("/subsystems")
     def list_subsystems():
         # what part types the design engine can build, + which is active now (None on an empty
         # file, or the ACTIVE instance's own type — 2026-07-04: parts are a flat set, no root to
@@ -522,16 +690,16 @@ def create_app() -> FastAPI:
     # instance_ops/`POST /instances` against whichever file is open), and "start completely over"
     # is now literally "open a new file" rather than silently wiping the one you had.
 
-    @app.get("/files")
+    @router.get("/files")
     def list_files():
         return {"files": state.list_files()}
 
-    @app.post("/files")
+    @router.post("/files")
     def create_file():
         f = state.create_file()
         return {"ok": True, "id": f.file_id, "name": f.name}
 
-    @app.post("/files/{file_id}/open")
+    @router.post("/files/{file_id}/open")
     def open_file(file_id: str):
         try:
             state.open_file(file_id)
@@ -546,7 +714,7 @@ def create_app() -> FastAPI:
     # deferred next increment — this gives real independent-part editing (a bracket AND a standoff in
     # one project, each with its own params) without that larger lift.
 
-    @app.get("/instances")
+    @router.get("/instances")
     def list_instances():
         # cut_feature_count + world_offset are for the outliner's detail panel (feature count) and
         # its hover-highlight marker (an anchor point in the SAME raw backend coordinate space as
@@ -562,7 +730,7 @@ def create_app() -> FastAPI:
                                "world_offset": list(offsets.get(iid, (0.0, 0.0, 0.0)))}
                               for iid, inst in led.instances.items()]}
 
-    @app.post("/instances")
+    @router.post("/instances")
     def create_instance(req: AddInstanceRequest):
         led = state.ledger()
         instance_id = req.instance_id
@@ -582,7 +750,7 @@ def create_app() -> FastAPI:
         state.active_instance_id = instance_id  # the newly-added part becomes the one being edited
         return {"ok": True, "instance_id": instance_id}
 
-    @app.delete("/instances/{instance_id}")
+    @router.delete("/instances/{instance_id}")
     def delete_instance(instance_id: str):
         led = state.ledger()
         try:
@@ -597,7 +765,7 @@ def create_app() -> FastAPI:
             state.active_instance_id = next(iter(state.ledger().instances), None)
         return {"ok": True}
 
-    @app.post("/instances/{instance_id}/activate")
+    @router.post("/instances/{instance_id}/activate")
     def activate_instance(instance_id: str):
         try:
             state.activate_instance(instance_id)
@@ -613,7 +781,7 @@ def create_app() -> FastAPI:
     # protocol. The client re-POSTs the EXACT FeatureOp object it received in the /chat "proposal"
     # SSE event (see packages/ledger/deltas.py::FeatureOp) once the user clicks accept.
 
-    @app.post("/feature_ops")
+    @router.post("/feature_ops")
     def create_feature_op(op: FeatureOp):
         led = state.ledger()  # already reconciled — assembly-template children (e.g. "table_1_top")
                               # exist as real instance ids here even though they aren't INSTANCE_ADDED facts
@@ -649,7 +817,7 @@ def create_app() -> FastAPI:
     # effect — one event type per real ledger mutation. `move_instance` (2026-07-05) is a third sibling
     # branch: repositioning/reorienting an ALREADY-PLACED instance, logged via `append_instance_moved`.
 
-    @app.post("/instance_ops")
+    @router.post("/instance_ops")
     def create_instance_op(op: InstanceOp):
         led = state.ledger()
 
@@ -686,7 +854,7 @@ def create_app() -> FastAPI:
             "message": outcome.message,
         }
 
-    @app.post("/export/check")
+    @router.post("/export/check")
     def export_check():
         # derived is resolved from the latest matching analysis verdict (stale -> unknown -> blocked);
         # discipline gates (thermal, …) are injected so a thermal-limited part also blocks honestly.
@@ -714,17 +882,17 @@ def create_app() -> FastAPI:
             ],
         }
 
-    @app.post("/requirements")
+    @router.post("/requirements")
     def set_requirements(req: GoalRequest):
         # fed from the chat: extract any stated TARGETS and fold them into the goal (never a safety value)
         state.note_message(req.goal)
         return _requirements_payload()
 
-    @app.get("/requirements")
+    @router.get("/requirements")
     def get_requirements():
         return _requirements_payload()
 
-    @app.post("/analyze")
+    @router.post("/analyze")
     async def analyze(material: str = "PLA", load_n: float = 40.0):
         # generalized (2026-07-03): runs against whichever subsystem the ACTIVE instance is. Real FS
         # only comes back for `fea_eligible` parts (analyze_geometry itself gates this) — every other
@@ -764,7 +932,7 @@ def create_app() -> FastAPI:
         state.verdict_store.put_verdict(state.project_id, verdict)
         return {"status": "done", "verdict": dataclasses.asdict(verdict)}
 
-    @app.post("/optimize")
+    @router.post("/optimize")
     async def optimize(load_n: float = 25.0):
         # the sanctioned 3-variant sweep: find the lightest design that passes FS. Generalized
         # (2026-07-03) past bracket-only: discovers the ACTIVE subsystem's own thickness-like param
@@ -818,11 +986,11 @@ def create_app() -> FastAPI:
                 "param_name": thickness_name, "target_node": target_node,
                 "best_mass_g": result["best_mass_g"], "fs_floor": fs_floor}
 
-    @app.get("/optimize/status")
+    @router.get("/optimize/status")
     def optimize_status():
         return {"result": state.verdict_store.get_optimize(state.project_id)}
 
-    @app.get("/analyze/status")
+    @router.get("/analyze/status")
     def analyze_status(material: str = "PLA", load_n: float = 40.0):
         # material/load_n default to match POST /analyze's own defaults — a poller must ask about the
         # SAME case it queued, not just "any verdict for this geometry" (see /analyze's own comment).
@@ -834,12 +1002,12 @@ def create_app() -> FastAPI:
                            material=material, load_n=load_n)
         return {"current": dataclasses.asdict(v) if v else None}
 
-    @app.post("/signoff")
+    @router.post("/signoff")
     def signoff(reviewer: str = "engineer"):
         state.signoff(reviewer)
         return {"ok": True}
 
-    @app.get("/export/step")
+    @router.get("/export/step")
     def export_step():
         # Inversion #1's enforcement point: a missing/failing safety gate BLOCKS export, here — not
         # just in the advisory POST /export/check that a client can choose not to call. Same gate
@@ -866,7 +1034,7 @@ def create_app() -> FastAPI:
         return FileResponse(path, media_type="application/step", filename=f"{name}.step",
                             background=BackgroundTask(os.remove, path))
 
-    @app.get("/telemetry")
+    @router.get("/telemetry")
     def telemetry():
         # REST-fetchable telemetry (2026-07-04) — the WS `/ws` path already pushes a
         # `telemetry_delta` on every PARAMETER_CASCADE_UPDATE, but adding/removing a part via REST
@@ -876,7 +1044,7 @@ def create_app() -> FastAPI:
         # zero structural mass) — safe to call unconditionally.
         return _telemetry(state.ledger(), state.active_instance_id).model_dump(mode="json")
 
-    @app.post("/propose")
+    @router.post("/propose")
     def propose(req: ProposeRequest):
         # OpenRouter only — no mock. No key -> no LLM (the caller must say so, not fake a result).
         from packages.agents.provider_factory import get_provider
@@ -894,7 +1062,7 @@ def create_app() -> FastAPI:
                 "clarification": proposal.request_clarification,
                 "provider": "openrouter", "no_llm": False}
 
-    @app.post("/chat")
+    @router.post("/chat")
     def chat(req: ChatRequest):
         # Streams a conversational reply (prose) + an optional delta proposal. Mutates nothing —
         # the client applies any deltas via the rules-validated WS path.
@@ -923,7 +1091,7 @@ def create_app() -> FastAPI:
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    @app.get("/mesh")
+    @router.get("/mesh")
     def mesh():
         # the REAL build123d geometry, tessellated from the current ledger — the whole assembly once
         # a project holds more than one instance, else exactly the active instance (see
@@ -949,7 +1117,7 @@ def create_app() -> FastAPI:
             indices.extend(int(i) + base for t in tris for i in t)
         return {"positions": positions, "indices": indices}
 
-    @app.get("/mesh/features")
+    @router.get("/mesh/features")
     def mesh_features():
         # rough click-to-select groundwork (prd4.md Phase 3's "context-aware floating HUD" —
         # precise version needs OCCT topological identity, specialist-gated; this reuses the
@@ -958,9 +1126,37 @@ def create_app() -> FastAPI:
         from packages.subsystems.features import list_pickable_features
         return {"features": list_pickable_features(state.ledger())}
 
+    app.include_router(router)
+
     @app.websocket("/ws")
     async def ws(socket: WebSocket):
-        await socket.accept()
+        # Can't use the `_require_session` dependency here — a browser's native WebSocket API cannot
+        # set custom headers, so the ONLY way a real browser client authenticates is by already
+        # holding a session cookie minted by an earlier authenticated REST call (every page load does
+        # at least one before opening this socket — packages/frontend/src/useCadSocket.ts relies on
+        # exactly this, never the path below). A non-browser client (tests, scripts) CAN set an
+        # Authorization header on the handshake to mint a session directly — but note that mint is
+        # NOT reliably reusable across separate connections: this accept()'s Set-Cookie header is
+        # only ever readable by a REAL browser's cookie jar, not by Starlette's WebSocketTestSession
+        # or most raw WS client libraries (2026-07-15 audit finding) — a script relying on this path
+        # for anything beyond a single connection's own lifetime should authenticate via REST first,
+        # exactly like a browser does, and carry that cookie into the WS handshake instead.
+        session_id = socket.cookies.get(SessionManager.COOKIE_NAME)
+        existing = sessions.resolve(session_id)
+        if existing is None and not _check_auth_token(socket.headers):
+            await socket.close(code=1008)  # policy violation
+            return
+        try:
+            sid, session, is_new = sessions.get_or_create(session_id)
+        except SessionLimitReached:
+            await socket.close(code=1013)  # try again later
+            return
+        accept_headers = []
+        if is_new:
+            cookie = f"{SessionManager.COOKIE_NAME}={sid}; HttpOnly; SameSite=lax; Path=/"
+            accept_headers.append((b"set-cookie", cookie.encode()))
+        await socket.accept(headers=accept_headers or None)
+        session_ctx = _current_session.set(session)
         try:
             while True:
                 raw = None
@@ -984,9 +1180,13 @@ def create_app() -> FastAPI:
                 await socket.send_json(state.mutate(req).model_dump(mode="json"))
         except WebSocketDisconnect:
             return
+        finally:
+            _current_session.reset(session_ctx)
 
     # serve the built SPA (compose deployment) from the same origin as the API — added LAST so API
-    # routes win. In dev the frontend runs under Vite instead; this dir simply won't exist.
+    # routes win. In dev the frontend runs under Vite instead; this dir simply won't exist. Public —
+    # a browser's top-level navigation to this origin can't carry a Bearer token, so the SPA shell
+    # itself is always servable; every actual API call it then makes still goes through `router`.
     dist = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "dist"))
     if os.path.isdir(dist):
         from fastapi.staticfiles import StaticFiles

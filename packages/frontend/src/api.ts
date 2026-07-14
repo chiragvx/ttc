@@ -1,18 +1,31 @@
 import type { ChatEvent, CutFeature, FeatureOp, InstanceOp, InstanceSnapshot, MeshData, PickableFeature, TelemetryDelta } from "./types";
-import type { LlmSettings } from "./settings";
+import { loadSettings, type LlmSettings } from "./settings";
 
 // REST + SSE calls to the FastAPI backend (proxied by Vite in dev).
 
+// Attaches `Authorization: Bearer <authToken>` (2026-07-15) when the operator's backend has
+// AUTH_TOKEN configured and the user has entered it in settings — a no-op (empty header value is
+// simply omitted) against the default, unauthenticated backend. The session cookie itself (set by
+// the backend on the first authenticated call) rides along automatically on every same-origin
+// fetch; this header is only what lets the FIRST call ever succeed when auth is configured.
+function apiFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const { authToken } = loadSettings();
+  const headers = authToken
+    ? { ...(init.headers ?? {}), Authorization: `Bearer ${authToken}` }
+    : init.headers;
+  return fetch(url, { ...init, headers });
+}
+
 // the ACTIVE subsystem's geometry, tessellated from the current ledger (registry-driven backend)
 export async function fetchMesh(): Promise<MeshData> {
-  const res = await fetch(`/mesh`);
+  const res = await apiFetch(`/mesh`);
   if (!res.ok) throw new Error(`mesh failed: ${res.status}`);
   return res.json();
 }
 
 // rough click-to-select groundwork: every tagged geometric feature with a world-space point
 export async function fetchMeshFeatures(): Promise<PickableFeature[]> {
-  const res = await fetch(`/mesh/features`);
+  const res = await apiFetch(`/mesh/features`);
   if (!res.ok) throw new Error(`mesh features failed: ${res.status}`);
   return (await res.json()).features;
 }
@@ -25,11 +38,11 @@ export interface ParamSpec {
 export interface SubsystemInfo { name: string; description: string; disciplines: string[]; }
 
 export async function getParams(): Promise<{ subsystem: string | null; instance_id: string | null; params: ParamSpec[] }> {
-  return (await fetch("/params")).json();
+  return (await apiFetch("/params")).json();
 }
 // `active` is null on an empty file — no parts yet (see packages/transport/app.py::make_demo_ledger).
 export async function getSubsystems(): Promise<{ active: string | null; available: SubsystemInfo[] }> {
-  return (await fetch("/subsystems")).json();
+  return (await apiFetch("/subsystems")).json();
 }
 
 // --- Files (2026-07-04): a session can hold several independent design files (think browser tabs),
@@ -37,13 +50,13 @@ export async function getSubsystems(): Promise<{ active: string | null; availabl
 // — "start completely over" is just opening a new file.
 export interface FileRow { id: string; name: string; part_count: number; is_active: boolean; }
 export async function listFiles(): Promise<{ files: FileRow[] }> {
-  return (await fetch("/files")).json();
+  return (await apiFetch("/files")).json();
 }
 export async function createFile(): Promise<{ ok: boolean; id: string; name: string }> {
-  return (await fetch("/files", { method: "POST" })).json();
+  return (await apiFetch("/files", { method: "POST" })).json();
 }
 export async function openFile(id: string): Promise<{ ok: boolean; id?: string; error?: string }> {
-  return (await fetch(`/files/${encodeURIComponent(id)}/open`, { method: "POST" })).json();
+  return (await apiFetch(`/files/${encodeURIComponent(id)}/open`, { method: "POST" })).json();
 }
 
 // --- Item 3: the multi-instance outliner (add/remove/activate a second independent part) ---
@@ -53,21 +66,21 @@ export interface InstanceRow {
   world_offset: [number, number, number];  // raw backend mm coords — same space as MeshData.positions
 }
 export async function listInstances(): Promise<{ instances: InstanceRow[] }> {
-  return (await fetch("/instances")).json();
+  return (await apiFetch("/instances")).json();
 }
 export async function addInstance(
   subsystemType: string, parentId?: string | null,
 ): Promise<{ ok: boolean; instance_id?: string; error?: string }> {
-  return (await fetch("/instances", {
+  return (await apiFetch("/instances", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ subsystem_type: subsystemType, parent_id: parentId ?? null }),
   })).json();
 }
 export async function removeInstance(id: string): Promise<{ ok: boolean; error?: string }> {
-  return (await fetch(`/instances/${encodeURIComponent(id)}`, { method: "DELETE" })).json();
+  return (await apiFetch(`/instances/${encodeURIComponent(id)}`, { method: "DELETE" })).json();
 }
 export async function activateInstance(id: string): Promise<{ ok: boolean; instance_id?: string; error?: string }> {
-  return (await fetch(`/instances/${encodeURIComponent(id)}/activate`, { method: "POST" })).json();
+  return (await apiFetch(`/instances/${encodeURIComponent(id)}/activate`, { method: "POST" })).json();
 }
 
 // --- FeatureOp: human-accepted hole/pocket/slot cuts (mirrors POST /instances, not the WS path — a
@@ -81,7 +94,7 @@ export interface FeatureOpApplyResponse {
   message: string;
 }
 export async function applyFeatureOp(op: FeatureOp): Promise<FeatureOpApplyResponse> {
-  return (await fetch("/feature_ops", {
+  return (await apiFetch("/feature_ops", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(op),
   })).json();
 }
@@ -101,35 +114,35 @@ export interface InstanceOpApplyResponse {
   message: string;
 }
 export async function applyInstanceOp(op: InstanceOp): Promise<InstanceOpApplyResponse> {
-  return (await fetch("/instance_ops", {
+  return (await apiFetch("/instance_ops", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(op),
   })).json();
 }
 
 // --- truth-plane analysis loop ---
 export async function analyze(loadN = 40): Promise<any> {
-  return (await fetch(`/analyze?load_n=${loadN}`, { method: "POST" })).json();
+  return (await apiFetch(`/analyze?load_n=${loadN}`, { method: "POST" })).json();
 }
 export async function analyzeStatus(loadN = 40): Promise<any> {
   // must match the load_n passed to analyze() above — the backend only reports a verdict "current"
   // if it was solved for this exact case, not just any verdict for the current geometry.
-  return (await fetch(`/analyze/status?load_n=${loadN}`)).json();
+  return (await apiFetch(`/analyze/status?load_n=${loadN}`)).json();
 }
 export async function optimize(loadN = 25): Promise<any> {
-  return (await fetch(`/optimize?load_n=${loadN}`, { method: "POST" })).json();
+  return (await apiFetch(`/optimize?load_n=${loadN}`, { method: "POST" })).json();
 }
 export async function optimizeStatus(): Promise<any> {
-  return (await fetch("/optimize/status")).json();
+  return (await apiFetch("/optimize/status")).json();
 }
 export async function exportCheck(): Promise<{ status: string; reasons: string[]; unknowns: string[] }> {
-  return (await fetch("/export/check", { method: "POST" })).json();
+  return (await apiFetch("/export/check", { method: "POST" })).json();
 }
 
 // REST-fetchable telemetry (2026-07-04) — the WS path already pushes this on every parameter
 // mutation, but adding/removing a part via REST (instance_ops / the outliner) never touches that
 // socket, so this lets the UI refresh Mass/CG/Print/Cost right after a part change too.
 export async function fetchTelemetry(): Promise<TelemetryDelta> {
-  return (await fetch("/telemetry")).json();
+  return (await apiFetch("/telemetry")).json();
 }
 
 // --- goal-grounded requirements (the design agent's targets, judged vs live metrics) ---
@@ -143,15 +156,15 @@ export interface RequirementsData {
   metrics: Record<string, number | null>;
 }
 export async function setGoal(goal: string): Promise<RequirementsData> {
-  return (await fetch("/requirements", {
+  return (await apiFetch("/requirements", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ goal }),
   })).json();
 }
 export async function getRequirements(): Promise<RequirementsData> {
-  return (await fetch("/requirements")).json();
+  return (await apiFetch("/requirements")).json();
 }
 export async function signoff(): Promise<void> {
-  await fetch("/signoff?reviewer=engineer", { method: "POST" });
+  await apiFetch("/signoff?reviewer=engineer", { method: "POST" });
 }
 
 // Stream a conversational reply. Calls onEvent for each SSE event; abortable via signal.
@@ -161,7 +174,7 @@ export async function streamChat(
   onEvent: (e: ChatEvent) => void | Promise<void>,
   signal: AbortSignal,
 ): Promise<void> {
-  const res = await fetch("/chat", {
+  const res = await apiFetch("/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ messages, api_key: settings.apiKey || null, model: settings.model || null }),

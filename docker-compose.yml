@@ -28,6 +28,10 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:cad@postgres:5432/cad
       REDIS_URL: redis://redis:6379/0
+      # Unset by default = every session/endpoint is open to anyone who can reach :8000 (this compose
+      # file binds 0.0.0.0). Set AUTH_TOKEN in a `.env` file next to this one (see .env.example) before
+      # exposing this beyond localhost. Docker Compose reads `.env` automatically for this substitution.
+      AUTH_TOKEN: ${AUTH_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy

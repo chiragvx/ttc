@@ -12,9 +12,10 @@ export function SettingsModal({
 }) {
   const [key, setKey] = useState(value.apiKey);
   const [model, setModel] = useState(value.model);
+  const [authToken, setAuthToken] = useState(value.authToken);
 
   const save = () => {
-    const s = { apiKey: key, model: model || DEFAULT_MODEL };
+    const s = { apiKey: key, model: model || DEFAULT_MODEL, authToken };
     saveSettings(s);
     onChange(s);
     onClose();
@@ -28,6 +29,9 @@ export function SettingsModal({
         <input type="password" placeholder="sk-or-…" value={key} onChange={(e) => setKey(e.target.value)} style={input} />
         <label style={lbl}>Model</label>
         <input value={model} onChange={(e) => setModel(e.target.value)} style={input} />
+        <label style={lbl}>Server auth token (only if the operator configured AUTH_TOKEN)</label>
+        <input type="password" placeholder="leave blank if unset" value={authToken}
+               onChange={(e) => setAuthToken(e.target.value)} style={input} />
         <p style={{ fontSize: 11, color: "#8b949e" }}>
           Stored only in your browser, sent per-request. Without a key <b>there is no LLM</b>.
         </p>
@@ -36,7 +40,7 @@ export function SettingsModal({
             onClick={() => {
               setKey("");
               clearKey();
-              onChange({ apiKey: "", model: model || DEFAULT_MODEL });
+              onChange({ apiKey: "", model: model || DEFAULT_MODEL, authToken });
             }}
             style={btn}
           >

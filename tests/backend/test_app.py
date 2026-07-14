@@ -269,7 +269,7 @@ def test_feature_op_replay_from_log_reconstructs_cut_feature():
     assert res["ok"] is True
     fid = res["feature"]["id"]
 
-    session = app.state.session
+    session = app.state.sessions.only()
     replayed = session.log.fold()  # re-runs `replay()` over the raw fact log from scratch
     assert any(f.id == fid for f in replayed.instances["root"].cut_features)
 
@@ -425,7 +425,7 @@ def test_instance_op_move_replay_from_log_reconstructs_new_transform():
     }).json()
     assert moved["ok"] is True
 
-    session = app.state.session
+    session = app.state.sessions.only()
     replayed = session.log.fold()
     assert replayed.instances[iid].transform.x_mm == 11.0
     assert replayed.instances[iid].transform.y_mm == 22.0
@@ -441,7 +441,7 @@ def test_instance_op_replay_from_log_reconstructs_instance():
     assert res["ok"] is True
     iid = res["instance_id"]
 
-    session = app.state.session
+    session = app.state.sessions.only()
     replayed = session.log.fold()  # re-runs `replay()` over the raw fact log from scratch
     assert iid in replayed.instances
     assert replayed.instances[iid].subsystem_type == "enclosure"
