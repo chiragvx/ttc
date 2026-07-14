@@ -3,33 +3,77 @@
 Master index for turning the `prd-27-8.14` vision into a real product, engineered with Claude
 (dev-time) and powered by Claude (runtime).
 
-**Last updated:** 2026-07-03
-**Current phase:** Phases 0–4 implemented & green (**92 backend tests pass on Windows**, more in the
-container) and the **full wedge stack runs end-to-end on `docker compose up`**. Spike 4 fully PASSES
-(deflection-validated FS + 19/19 auto-mesh). Built across the phases: ledger + rules validator + event
-store/replay (in-mem + SQL + **Postgres**), hero-bracket end-to-end, sandbox kill-primitives,
-**strategic macro agent**, **OpenRouter/DeepSeek delta-emitter** + runtime **CLI**, **derived-resolution
-+ Dramatiq FS jobs**, **live `/optimize` 3-variant sweep**, **project/branch service**, **neutral
-STEP/STL export**, **cost accounting**, and a **React + react-three-fiber chat frontend** (builds clean).
-The live loop — chat/slider → real CalculiX FS / optimize → export gate flips ELIGIBLE → STEP — is
-verified on compose. Gated/remaining: live keys (CI secret), microVM isolation, PG **RLS**/multi-tenant
-auth, real slicer cost, WS status push (currently polling), scale-infra, and the specialist spikes
-(OCAF identity, FEA methodology, legal).
+**Last updated:** 2026-07-14
+**Current phase:** Phases 0–4 implemented & green (**502 backend tests pass on Windows** — `python -m
+pytest tests -q`, 26 skip on dependency-gated markers, more in the Linux container) and the **full
+wedge stack runs end-to-end on `docker compose up`**. Spike 4 fully PASSES (deflection-validated FS +
+19/19 auto-mesh). Built across the phases: ledger + rules validator + event store/replay (in-mem + SQL
++ **Postgres**, though only the in-mem/sqlite paths are test-covered — see below), hero-bracket
+end-to-end, sandbox kill-primitives, **strategic macro agent**, **OpenRouter/DeepSeek delta-emitter** +
+runtime **CLI**, **derived-resolution + Dramatiq FS jobs**, **live `/optimize` 3-variant sweep**,
+**project/branch service**, **neutral STEP/STL export**, **cost accounting**, and a **React +
+react-three-fiber chat frontend** (builds clean). The live loop — chat/slider → real CalculiX FS /
+optimize → export gate flips ELIGIBLE → STEP — is verified on compose. Gated/remaining: live keys (CI
+secret), microVM isolation, PG **RLS**/multi-tenant auth, real slicer cost, WS status push (currently
+polling), scale-infra, and the specialist spikes (OCAF identity, FEA methodology, legal).
 
-**Post-2026-06-28 catalog/architecture work** (not yet reflected in the phase ladder below — tracked
-here until the next phase-doc pass):
+**2026-07-14 — safety-gate hardening pass:** a full audit turned up two bugs directly against
+Inversion #1 (a missing safety input must block export, never a fabricated green light), both fixed
+and tested this session:
+- `GET /export/step` exported geometry **unconditionally** — the export gate was only evaluated in
+  the advisory `POST /export/check`, which a client could skip entirely. It now calls
+  `evaluate_export_gates` itself and returns 409 with the blocking reasons when ineligible.
+- The FS verdict cache ignored **load/material** — a verdict solved at one `(material, load_n)` (e.g.
+  `/optimize`'s 25 N sweep) could be served back as "grounded" for a differently-requested case
+  (`/analyze`'s 40 N default). `Verdict` now carries the case it was solved for, and the cache lookup
+  matches on it.
+
+Also fixed: a malformed WS frame (bad JSON, missing/extra/wrong-type field) killed the whole socket
+with no NACK instead of just rejecting that one message; and engineer sign-off never reset after a
+later geometry-class change (mutation/cut/instance add-remove-move), so one `ENGINEER_REVIEWED` could
+silently cover every subsequent design change for the rest of a session. See
+`packages/ledger/events.py`'s `GEOMETRY_CLASS_KINDS` reset and `packages/transport/app.py`'s `/ws`
+handler.
+
+**Not yet fixed** (found in the same audit, tracked here, ranked roughly by severity): no auth on any
+endpoint + one global session shared by every client + anonymous callers can spend the operator's
+OpenRouter budget; `PgEventStore` has no per-file/stream scoping (multi-file sessions corrupt each
+other's history under the Postgres/compose path — only in-mem/sqlite are test-covered); Dramatiq jobs
+are at-most-once with invisible failure (no retry, no failure surfaced to the poller); a user-added
+cut feature can silently fragment the FS solver's boundary-condition face on a `fea_eligible` part,
+producing a confident-but-wrong FS; the stated goal's load (e.g. "holds 200 N") never reaches the
+solver — `HeuristicStrategicProvider` only parses FS/mass/hours tokens, so the enforced FS floor can
+diverge from what the user actually asked for even though the verdict-cache fix above at least stops
+the WRONG case's verdict from satisfying the request; full event-log refold + per-event deep-copy on
+every read (no snapshotting) will not scale past a demo-length session; zero frontend tests.
+
+**Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
+sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
+validated none of it. It's now split across 7 logical commits (ledger → truth-plane →
+subsystems/disciplines → agents → transport → frontend → docs) plus the safety-fix commits above,
+tree is green throughout. One real bug was caught and fixed in the process: `ogive_fuselage` dropped
+its `wall_thickness_mm` param when it became a solid body, but `winged_fuselage` still forwarded it,
+breaking every build of that composite part — fixed, with the stale "hollow shell" docstring language
+and a geometry-level test assertion updated to match the solid-body behavior.
+
+**Catalog/architecture work landed 2026-06-28 through 2026-07-06** (kept here as the durable "how we
+got here" narrative — no longer "uncommitted", see above):
 
 - **Scalable subsystem model** (`ParamSpec`/`Subsystem`): adding a part = one file, zero central
   edits. See [`reference/SCALABLE_SUBSYSTEM_REFACTOR.md`](reference/SCALABLE_SUBSYSTEM_REFACTOR.md).
 - **Instance-tree ledger** (Phase G): `instances[<id>].params` — no single-active-part lock-in.
   See [`reference/INSTANCE_GRAPH_REFACTOR.md`](reference/INSTANCE_GRAPH_REFACTOR.md).
-- **Catalog: 25 registered subsystems** — bracket, enclosure, standoff, lbracket, uchannel, panel,
+- **Catalog: 32 registered subsystems** — bracket, enclosure, standoff, lbracket, uchannel, panel,
   washer, table, flat_bar, square_tube, dowel_pin, cover_plate, t_bar, z_bracket, mounting_plate_grid,
   shaft_collar, hub, threaded_boss, motor_mount, hex_nut, hex_bar, hex_standoff, standoff_frame,
-  round_post (solid cylinder primitive needed by `table` legs), **saddle_clamp** (2026-07-03 — an
-  open semi-circular P-clamp cradling a cylindrical item, e.g. an EDF fan housing, pipe, or tube +
-  two mounting bolts; grew directly out of a real "make an EDF holder" chat conversation the catalog
-  couldn't satisfy).
+  round_post (solid cylinder primitive needed by `table` legs), saddle_clamp (an open semi-circular
+  P-clamp cradling a cylindrical item, e.g. an EDF fan housing, pipe, or tube + two mounting bolts;
+  grew directly out of a real "make an EDF holder" chat conversation the catalog couldn't satisfy),
+  and 7 more added since (2026-07-04 through 07-06) reaching into aerospace-shaped geometry —
+  **lofted_spindle**, **lofted_hull**, **naca_wing**, **ogive_fuselage**, **winged_fuselage**
+  (ogive fuselage + NACA wing, boolean-fused into one printable body), **bulkhead_frame**,
+  **longeron** — pure geometry only, no aero/propulsion/flutter analysis, per the `CLAUDE.md`
+  cut-list.
 - **Soft / advisory bounds** (2026-07-03): `ParameterDef.bounds` is now a recommended range, not a
   hard cap. Values outside range get `APPLIED_ADVISORY` status — the copilot judges context, not a
   clamp (`packages/ledger/{parameter,apply}.py`).
@@ -42,12 +86,16 @@ here until the next phase-doc pass):
   - **`packages/subsystems/assembly.py`** (2026-07-03) generalizes this from "one subsystem composing
     its own children" to "the whole PROJECT composing every instance in the tree" — see the outliner
     bullet below.
-- **FEA + optimize coverage expanded** (2026-07-03): the Gmsh+CalculiX FS pipeline (`/analyze`) covers
-  **6 single-solid plate/bar subsystems** sharing the validated cantilever methodology
-  (`fea_eligible=True` on bracket, flat_bar, cover_plate, motor_mount, panel, mounting_plate_grid).
-  The 3-variant sweep (`/optimize`) is now generalized the same way — it discovers and sweeps ANY
-  `fea_eligible` subsystem's own `*_thickness_mm` param instead of a hardcoded bracket-only
-  `skin_thickness_mm`. Every OTHER subsystem (compounds, cylinders, assemblies, or anything not
+- **FEA + optimize coverage expanded** (2026-07-03, +`longeron` 2026-07-06): the Gmsh+CalculiX FS
+  pipeline (`/analyze`) covers **7 single-solid plate/bar subsystems** sharing the validated
+  cantilever methodology (`fea_eligible=True` on bracket, flat_bar, cover_plate, motor_mount, panel,
+  mounting_plate_grid, longeron). One caveat found in the 2026-07-14 audit: `longeron`'s own
+  load-bearing dimension is `height_mm`, not a `*_thickness_mm` param, so the generic min-wall floor
+  check (`packages/truth_plane/analysis.py::_min_wall_ok`) is trivially satisfied for it — not yet
+  fixed, tracked above. The 3-variant sweep (`/optimize`) is now generalized the same way — it
+  discovers and sweeps ANY `fea_eligible` subsystem's own `*_thickness_mm` param instead of a
+  hardcoded bracket-only `skin_thickness_mm`. Every OTHER subsystem (compounds, cylinders,
+  assemblies, or anything not
   explicitly vetted) returns FS = `None` from `/analyze` and `"unsupported"` from `/optimize` —
   never a fabricated load case or a silently-wrong sweep.
 - **Multi-instance outliner, now with real assembly composition** (2026-07-03): a project can hold
