@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 pytestmark = [pytest.mark.needs_kernel, pytest.mark.needs_solver]
 
 _HAS = importlib.util.find_spec("build123d") is not None and shutil.which("ccx") is not None
-SKIN = "domains.structure.skin_thickness_mm"
+SKIN = "instances.root.params.skin_thickness_mm"
 
 
 @pytest.fixture

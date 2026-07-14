@@ -54,7 +54,7 @@ def run_hero_pipeline(demo_ledger: MasterParametricLedger, *, load_n: float = 40
     # 3) event log: genesis -> a mutation -> sign-off
     log = EventLog()
     log.append_genesis(demo_ledger, actor="system", ts=_TS)
-    log.append_mutation(ParameterDelta(target_node="domains.structure.skin_thickness_mm",
+    log.append_mutation(ParameterDelta(target_node="instances.root.params.skin_thickness_mm",
                                        requested_value=3.0), actor="user", ts=_TS)
     log.append_signoff("pe@example.com", ts=_TS)
 

@@ -44,11 +44,12 @@ def configure(*, store: Optional[VerdictStore] = None,
 
 
 @dramatiq.actor(max_retries=0, time_limit=600_000)
-def run_fs_analysis(project_id: str, params: dict, material_name: str, load_n: float) -> None:
+def run_fs_analysis(project_id: str, params: dict, material_name: str, load_n: float,
+                    subsystem_name: str = "bracket", cut_features: list | None = None) -> None:
     if _publish:
         _publish(project_id, "running", None)
     try:
-        verdict = analyze_in_subprocess(params, material_name, load_n)
+        verdict = analyze_in_subprocess(params, material_name, load_n, subsystem_name, cut_features=cut_features)
     except Exception:
         if _publish:
             _publish(project_id, "failed", None)
@@ -61,11 +62,13 @@ def run_fs_analysis(project_id: str, params: dict, material_name: str, load_n: f
 
 @dramatiq.actor(max_retries=0, time_limit=900_000)
 def run_optimization(project_id: str, candidates: list, base_params: dict, material_name: str,
-                     load_n: float, fs_floor: float) -> None:
+                     load_n: float, fs_floor: float, subsystem_name: str = "bracket",
+                     cut_features: list | None = None) -> None:
     if _publish:
         _publish(project_id, "optimizing", None)
     try:
-        result = optimize_in_subprocess(candidates, base_params, material_name, load_n, fs_floor)
+        result = optimize_in_subprocess(candidates, base_params, material_name, load_n, fs_floor,
+                                        subsystem_name=subsystem_name, cut_features=cut_features)
     except Exception:
         if _publish:
             _publish(project_id, "failed", None)
@@ -73,7 +76,7 @@ def run_optimization(project_id: str, candidates: list, base_params: dict, mater
     if _store:
         if result.get("best_verdict") is not None:
             _store.put_verdict(project_id, result["best_verdict"])
-        _store.put_optimize(project_id, {"variants": result["variants"], "best_skin": result["best_skin"],
-                                         "best_mass_g": result["best_mass_g"]})
+        _store.put_optimize(project_id, {"variants": result["variants"], "best_value": result["best_value"],
+                                         "best_mass_g": result["best_mass_g"], "param_name": result["param_name"]})
     if _publish:
         _publish(project_id, "done", None)
