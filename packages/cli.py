@@ -19,14 +19,20 @@ from packages.agents.runtime import CoModelingSession, ProposeResult
 from packages.ledger.branch import iter_parameters
 from packages.ledger.events import EventLog
 from packages.ledger.gates import evaluate_export_gates
+from packages.subsystems import add_instance
 from packages.transport.app import make_demo_ledger
 
 _TS = "2026-06-28T00:00:00Z"
 
 
 def _new_session(provider: LLMProvider | None = None) -> CoModelingSession:
+    # The web app's genesis (packages.transport.app.make_demo_ledger) is an empty workspace
+    # (2026-07-04) — the copilot populates it via instance_ops. This single-shot CLI has no
+    # instance_ops-aware provider wired to it (get_provider() is the plain delta-only emitter), so
+    # unlike the web chat it has no way to add a part to an empty project — keep seeding a default
+    # bracket here so `propose "make the skin 3 mm"` still has something to target.
     log = EventLog()
-    log.append_genesis(make_demo_ledger(), actor="system", ts=_TS)
+    log.append_genesis(add_instance(make_demo_ledger(), "bracket", "root"), actor="system", ts=_TS)
     return CoModelingSession(provider or get_provider(), log)
 
 

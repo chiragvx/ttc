@@ -12,14 +12,26 @@ callable can be injected for tests so this is exercised with no key / no network
 from __future__ import annotations
 
 import json
+import logging
 import os
 
 from packages.agents.llm_provider import LLMProvider
+from packages.agents.prompt_builder import build_system_prompt_from_json
 from packages.ledger.deltas import DeltaProposal, parameter_delta_tool_schema
+
+logger = logging.getLogger(__name__)
 
 _FN_NAME = "propose_parameter_delta"
 _DEFAULT_MODEL = "deepseek/deepseek-chat"
 _DEFAULT_BASE = "https://openrouter.ai/api/v1"
+# The streaming/conversational path (`stream_chat`, used by POST /chat) gets a higher cap than the
+# single-shot delta-emitter path (`propose_delta`, used by POST /propose): a multi-part assembly
+# reply can plausibly need prose PLUS several add_instance entries PLUS deltas PLUS a rationale, all
+# in one completion, and the old shared 1024 cap could truncate that mid-tool-call-JSON with no
+# signal (see FIX 1 in the investigation this responds to). 3072 is a deliberate middle ground: high
+# enough that a real multi-op proposal has headroom, not so high that a stuck/rambling completion
+# burns an outsized latency+cost tax before the cap kicks in.
+_DEFAULT_CHAT_MAX_TOKENS = 3072
 _SYSTEM = (
     "You are the geometric delta-emitter. Translate the user's intent into parameter deltas using the "
     "propose_parameter_delta function ONLY. Never write code or safety numbers. If the intent is "
@@ -27,26 +39,16 @@ _SYSTEM = (
     "request_clarification set and no deltas."
 )
 
-_CHAT_SYSTEM = (
-    "You are a CAD copilot for a parametric mounting bracket. Reply conversationally in **Markdown** — "
-    "briefly explain what you're doing or answer the question. When the user wants a parameter change, "
-    "ALSO call the propose_parameter_delta function with the deltas. If the request is ambiguous "
-    "(missing value/units or vague), call the function with request_clarification set plus 2-4 short "
-    "`suggestions`, and ask the question in your reply. Never write code or safety numbers — proposed "
-    "deltas are validated and applied by the system, and export stays blocked until a real FS exists.\n"
-    "Tunable parameters (use these exact target_node paths):\n"
-    "- domains.structure.skin_thickness_mm (1-5 mm)\n"
-    "- domains.structure.internal_rib_spacing_mm (10-50 mm)"
-)
-
 
 class OpenRouterDeltaProvider(LLMProvider):
     def __init__(self, *, model: str | None = None, api_key: str | None = None,
-                 base_url: str | None = None, max_tokens: int = 1024, post=None, stream_post=None) -> None:
+                 base_url: str | None = None, max_tokens: int = 1024,
+                 chat_max_tokens: int = _DEFAULT_CHAT_MAX_TOKENS, post=None, stream_post=None) -> None:
         self.model = model or os.environ.get("OPENROUTER_MODEL", _DEFAULT_MODEL)
         self.api_key = api_key if api_key is not None else os.environ.get("OPENROUTER_API_KEY", "")
         self.base_url = base_url or os.environ.get("OPENROUTER_BASE_URL", _DEFAULT_BASE)
-        self.max_tokens = max_tokens
+        self.max_tokens = max_tokens              # propose_delta (single-shot delta-emitter) cap
+        self.chat_max_tokens = chat_max_tokens     # stream_chat (conversational) cap — see default above
         self._post = post  # injectable (url=, headers=, json=) -> dict, for tests
         self._stream_post = stream_post  # injectable (url=, headers=, json=) -> iterator[chunk dict]
 
@@ -107,39 +109,75 @@ class OpenRouterDeltaProvider(LLMProvider):
 
     def stream_chat(self, *, messages: list[dict], ledger_json: str):
         """Yield ('token', text), then ('proposal', DeltaProposal), then ('done', None) — or
-        ('error', msg). The model produces prose AND an optional propose_parameter_delta call."""
+        ('error', msg). The model produces prose AND an optional propose_parameter_delta call.
+
+        Never silently empty end-to-end (see FIX 1 in the investigation this responds to): a
+        malformed tool-call JSON, a truncated completion, or a turn that produced neither prose nor
+        a usable proposal all yield an explicit ('error', ...) before the final ('done', None) —
+        never just a bare done with nothing else."""
         if not self.api_key and self._stream_post is None:
             yield ("error", "OPENROUTER_API_KEY is not set")
             return
         tool = {"type": "function", "function": {
             "name": _FN_NAME, "description": "Emit parameter deltas or request clarification.",
             "parameters": parameter_delta_tool_schema()}}
+        stable_prompt = build_system_prompt_from_json(ledger_json)
         payload = {
-            "model": self.model, "max_tokens": self.max_tokens, "stream": True,
-            "messages": [{"role": "system", "content": f"{_CHAT_SYSTEM}\n\nCurrent ledger: {ledger_json}"}]
+            "model": self.model, "max_tokens": self.chat_max_tokens, "stream": True,
+            "messages": [{"role": "system", "content": f"{stable_prompt}\n\n## Current ledger\n{ledger_json}"}]
                         + messages,
             "tools": [tool], "tool_choice": "auto",
         }
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         tool_args: dict[int, str] = {}
+        saw_token = False
+        finish_reason: str | None = None
         try:
             for chunk in self._do_stream(f"{self.base_url}/chat/completions", headers, payload):
                 choices = chunk.get("choices") or []
                 if not choices:
                     continue
-                delta = choices[0].get("delta") or {}
+                choice = choices[0]
+                delta = choice.get("delta") or {}
                 if delta.get("content"):
+                    saw_token = True
                     yield ("token", delta["content"])
                 for tc in delta.get("tool_calls") or []:
                     idx = tc.get("index", 0)
                     args = (tc.get("function") or {}).get("arguments") or ""
                     tool_args[idx] = tool_args.get(idx, "") + args
+                # some providers report finish_reason only on the final (often content-less) chunk —
+                # keep the last non-null one seen, rather than requiring it ride with content/tool_calls.
+                fr = choice.get("finish_reason")
+                if fr:
+                    finish_reason = fr
         except Exception as e:  # network / bad key / stream error
             yield ("error", str(e))
+            yield ("done", None)  # keep the ('error', ...) then ('done', None) contract even here
             return
+        saw_proposal = False
         for args in tool_args.values():
             try:
-                yield ("proposal", DeltaProposal.model_validate(json.loads(args)))
-            except Exception:
+                proposal = DeltaProposal.model_validate(json.loads(args))
+            except Exception as e:
+                # a truncated/malformed tool-call arg string used to be dropped here with zero
+                # signal (bare `except Exception: continue`) — that's the direct mechanism behind a
+                # permanently-blank assistant bubble even though the request returned 200 OK. Log the
+                # real parse exception for debugging, but don't leak it verbatim to the user.
+                logger.warning("stream_chat: failed to parse tool-call arguments (%s)", e)
+                yield ("error", "the model's proposal could not be parsed — try rephrasing or asking again")
                 continue
+            if proposal.deltas or proposal.feature_ops or proposal.instance_ops \
+                    or proposal.request_clarification or proposal.suggestions:
+                saw_proposal = True
+                yield ("proposal", proposal)
+            # else: a tool call that resolved to a fully empty DeltaProposal contributes nothing —
+            # don't yield it (the frontend would no-op on it anyway) and don't count it as having
+            # "seen" a proposal, so the no-response check below still fires for this genuinely
+            # empty case instead of also emitting a redundant, contradictory empty-proposal event.
+        if finish_reason not in (None, "stop", "tool_calls"):
+            # e.g. "length" — cut off by the max_tokens cap; "content_filter" etc. also land here.
+            yield ("error", "the response was cut off before finishing — try a shorter or simpler request")
+        if not saw_token and not saw_proposal:
+            yield ("error", "no response was generated for that message — try rephrasing or asking again")
         yield ("done", None)
