@@ -13,6 +13,8 @@ import importlib.util
 import pytest
 from fastapi.testclient import TestClient
 
+import packages.transport.app as app_module
+from packages.ledger.gates import ExportStatus, GateResult
 from packages.transport.app import create_app
 
 
@@ -58,7 +60,12 @@ def test_unknown_subsystem_type_is_rejected():
 
 
 @pytest.mark.skipif(importlib.util.find_spec("build123d") is None, reason="needs build123d")
-def test_export_step_follows_the_active_part():
+def test_export_step_follows_the_active_part(monkeypatch):
+    # this test is about filename derivation from the active instance, not gate enforcement (covered
+    # in tests/backend/test_app.py / test_analysis_api.py) — enclosure isn't fea_eligible, so its FS
+    # can never resolve; stub the gate check eligible so the export itself is reached.
+    monkeypatch.setattr(app_module, "evaluate_export_gates",
+                        lambda *a, **k: GateResult(status=ExportStatus.EXPORT_ELIGIBLE, reasons=[], unknowns=[]))
     c = _client()
     c.post("/instances", json={"subsystem_type": "enclosure"})
     res = c.get("/export/step")

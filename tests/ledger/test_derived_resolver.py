@@ -92,6 +92,26 @@ def test_fingerprint_mismatch_invalidates(base_ledger):
     assert latest_verdict(base_ledger, [_verdict(sig)], fingerprint="different") is None
 
 
+def test_verdict_from_a_different_load_case_does_not_satisfy_a_specific_request(base_ledger):
+    """The confirmed cache-poisoning bug: a verdict solved at 25 N must not be served back as
+    'grounded' for a 40 N request just because the geometry+fingerprint still match. Callers that
+    care about a specific case (e.g. POST /analyze) must pass material/load_n; callers that don't
+    (e.g. the pre-existing export-gate check) keep matching ANY case, unchanged."""
+    sig = geometry_signature(base_ledger)
+    verdict_25n = Verdict(geometry_signature=sig, fingerprint=FP, factor_of_safety=4.0,
+                          mesh_converged=True, watertight=True, min_wall_ok=True,
+                          material="PLA", load_n=25.0)
+    verdicts = [verdict_25n]
+
+    # a caller asking specifically about 40 N does NOT get the 25 N verdict back
+    assert latest_verdict(base_ledger, verdicts, fingerprint=FP, material="PLA", load_n=40.0) is None
+    # the same caller asking about the case that was actually solved DOES get it
+    assert latest_verdict(base_ledger, verdicts, fingerprint=FP, material="PLA", load_n=25.0) is verdict_25n
+    # a caller that doesn't specify a case (material=None, load_n=None) still matches ANY case —
+    # unchanged default behavior for pre-existing callers like the export gate
+    assert latest_verdict(base_ledger, verdicts, fingerprint=FP) is verdict_25n
+
+
 def test_export_gate_flips_with_verdict_and_signoff(base_ledger):
     sig = geometry_signature(base_ledger)
     verdicts = [_verdict(sig, fs=4.0)]

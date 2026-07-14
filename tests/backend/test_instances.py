@@ -10,6 +10,8 @@ import importlib.util
 import pytest
 from fastapi.testclient import TestClient
 
+import packages.transport.app as app_module
+from packages.ledger.gates import ExportStatus, GateResult
 from packages.transport.app import create_app
 
 HAS_B123D = importlib.util.find_spec("build123d") is not None
@@ -200,10 +202,15 @@ def test_mesh_renders_the_active_instance_geometry():
 
 
 @pytest.mark.skipif(not HAS_B123D, reason="needs build123d")
-def test_mesh_and_export_compose_the_whole_assembly_once_multi_instance():
+def test_mesh_and_export_compose_the_whole_assembly_once_multi_instance(monkeypatch):
     """The 'next increment' from the Item 3 MVP, now built: /mesh and /export/step show EVERY
     instance (not just the active one) once a project holds more than one, positioned via
     assembly.py's auto-layout."""
+    # this test is about assembly composition, not gate enforcement (covered in test_app.py /
+    # test_analysis_api.py) — the standoff leg isn't fea_eligible, so FS can never resolve for this
+    # assembly; stub the gate check eligible so /export/step is actually reached.
+    monkeypatch.setattr(app_module, "evaluate_export_gates",
+                        lambda *a, **k: GateResult(status=ExportStatus.EXPORT_ELIGIBLE, reasons=[], unknowns=[]))
     c = _client()
     single_mesh = c.get("/mesh").json()  # root (bracket) alone
 

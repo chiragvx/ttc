@@ -88,6 +88,13 @@ class Verdict:
     mesh_converged: bool
     watertight: bool
     min_wall_ok: bool
+    # The LOAD CASE this verdict was actually solved against. Without these, a verdict cache keyed
+    # only on geometry+toolchain can be served back for a different (material, load_n) request than
+    # the one that produced it — a grounded-LOOKING FS for a case the solver never actually ran
+    # (e.g. /optimize's 25 N verdict silently satisfying a later /analyze at 40 N). `latest_verdict`
+    # below requires an exact match on both before treating a cached verdict as current.
+    material: str = "PLA"
+    load_n: float = 40.0
     solver_seconds: float = 0.0
 
     def to_derived(self) -> DerivedSafety:
@@ -104,13 +111,26 @@ def latest_verdict(
     fingerprint: str,
     geometry_params: tuple[str, ...] | None = None,
     instance_id: str | None = None,
+    material: str | None = None,
+    load_n: float | None = None,
 ) -> Verdict | None:
     """The newest verdict matching the CURRENT geometry (INCLUDING any cut_features on `instance_id`,
-    default the root instance) + toolchain, or None (stale / never analyzed)."""
+    default the root instance) + toolchain, or None (stale / never analyzed).
+
+    `material`/`load_n` (default None -> match ANY case, preserving pre-existing callers that don't
+    yet track a specific load case) restrict this to a verdict solved against THAT exact load case.
+    Pass the case being asked about whenever one is known — omitting it is what let a verdict solved
+    at one (material, load_n) get served back as "grounded" for a different requested case (e.g.
+    /optimize's 25 N verdict silently satisfying a later /analyze at 40 N)."""
     sig = geometry_signature(ledger, geometry_params=geometry_params, instance_id=instance_id)
     for v in reversed(verdicts):
-        if v.geometry_signature == sig and v.fingerprint == fingerprint:
-            return v
+        if v.geometry_signature != sig or v.fingerprint != fingerprint:
+            continue
+        if material is not None and v.material != material:
+            continue
+        if load_n is not None and v.load_n != load_n:
+            continue
+        return v
     return None
 
 
@@ -121,9 +141,11 @@ def resolve_derived(
     fingerprint: str,
     geometry_params: tuple[str, ...] | None = None,
     instance_id: str | None = None,
+    material: str | None = None,
+    load_n: float | None = None,
 ) -> DerivedSafety:
     v = latest_verdict(ledger, verdicts, fingerprint=fingerprint, geometry_params=geometry_params,
-                       instance_id=instance_id)
+                       instance_id=instance_id, material=material, load_n=load_n)
     return v.to_derived() if v else DerivedSafety()  # empty -> all None -> unknown -> blocked
 
 
@@ -134,7 +156,9 @@ def ledger_with_derived(
     fingerprint: str,
     geometry_params: tuple[str, ...] | None = None,
     instance_id: str | None = None,
+    material: str | None = None,
+    load_n: float | None = None,
 ) -> MasterParametricLedger:
     derived = resolve_derived(ledger, verdicts, fingerprint=fingerprint, geometry_params=geometry_params,
-                              instance_id=instance_id)
+                              instance_id=instance_id, material=material, load_n=load_n)
     return ledger.model_copy(update={"derived": derived})

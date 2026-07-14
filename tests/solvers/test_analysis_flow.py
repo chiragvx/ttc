@@ -59,5 +59,15 @@ def test_export_gate_flips_then_goes_stale(client):
         ws.receive_json()
     assert client.post("/export/check").json()["status"] == "EXPORT_BLOCKED"
 
-    # neutral STEP export works
+    # the real export endpoint enforces the SAME gate itself -- a stale verdict blocks it too, not
+    # just the advisory /export/check a client could choose to skip
+    assert client.get("/export/step").status_code == 409
+
+    # back to the known-passing 8 mm design, re-analyze + sign off -> neutral STEP export now works
+    with client.websocket_connect("/ws") as ws:
+        ws.send_json({"target_node": SKIN, "requested_value": 8.0})
+        ws.receive_json()
+    r2 = client.post("/analyze", params={"load_n": 40.0}).json()
+    assert r2["status"] == "done" and r2["verdict"]["factor_of_safety"] > 1.5
+    client.post("/signoff", params={"reviewer": "pe@example.com"})
     assert client.get("/export/step").status_code == 200

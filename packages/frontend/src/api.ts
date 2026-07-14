@@ -110,8 +110,10 @@ export async function applyInstanceOp(op: InstanceOp): Promise<InstanceOpApplyRe
 export async function analyze(loadN = 40): Promise<any> {
   return (await fetch(`/analyze?load_n=${loadN}`, { method: "POST" })).json();
 }
-export async function analyzeStatus(): Promise<any> {
-  return (await fetch("/analyze/status")).json();
+export async function analyzeStatus(loadN = 40): Promise<any> {
+  // must match the load_n passed to analyze() above — the backend only reports a verdict "current"
+  // if it was solved for this exact case, not just any verdict for the current geometry.
+  return (await fetch(`/analyze/status?load_n=${loadN}`)).json();
 }
 export async function optimize(loadN = 25): Promise<any> {
   return (await fetch(`/optimize?load_n=${loadN}`, { method: "POST" })).json();

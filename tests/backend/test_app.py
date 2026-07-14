@@ -99,6 +99,19 @@ def test_export_check_blocks_on_unknown_safety():
     assert "factor_of_safety" in res["unknowns"]
 
 
+def test_export_step_enforces_gates_server_side():
+    """The actual export endpoint must never hand back geometry when the gates are blocked — the
+    advisory POST /export/check is voluntary, this is the real enforcement point for Inversion #1
+    ('a missing safety input BLOCKS export, never a fabricated green light')."""
+    c = _client()
+    res = c.get("/export/step")
+    assert res.status_code == 409
+    body = res.json()
+    assert body["status"] == "error"
+    assert "factor_of_safety" in body["unknowns"]
+    assert any("not engineer-reviewed" in r for r in body["reasons"])
+
+
 def test_propose_without_key_returns_no_llm(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     res = _client().post("/propose", json={"intent": "make the skin 3 mm"}).json()

@@ -14,7 +14,7 @@ import tempfile
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from starlette.background import BackgroundTask
 
@@ -742,8 +742,12 @@ def create_app() -> FastAPI:
         cut_features = [f.model_dump(mode="json") for f in inst.cut_features]
         fp = fingerprint()
         gp = geometry_paths(get_subsystem_model(subsystem_name), inst.id)
+        # material/load_n must match the CASE actually requested here — otherwise a verdict solved
+        # for a different load (e.g. /optimize's 25 N sweep) could be served back as "grounded" for
+        # this request (the exact fabricated-green-light failure Inversion #1 exists to prevent).
         cached = latest_verdict(state.ledger(), state.verdict_store.verdicts(state.project_id),
-                                fingerprint=fp, geometry_params=gp, instance_id=inst.id)
+                                fingerprint=fp, geometry_params=gp, instance_id=inst.id,
+                                material=material, load_n=load_n)
         if cached:
             return {"status": "done", "cached": True, "verdict": dataclasses.asdict(cached)}
         if os.environ.get("REDIS_URL"):  # durable queued path (worker + Postgres) — poll /analyze/status
@@ -819,12 +823,15 @@ def create_app() -> FastAPI:
         return {"result": state.verdict_store.get_optimize(state.project_id)}
 
     @app.get("/analyze/status")
-    def analyze_status():
+    def analyze_status(material: str = "PLA", load_n: float = 40.0):
+        # material/load_n default to match POST /analyze's own defaults — a poller must ask about the
+        # SAME case it queued, not just "any verdict for this geometry" (see /analyze's own comment).
         inst = state.active_instance()
         gp = geometry_paths(get_subsystem_model(inst.subsystem_type), inst.id) if inst is not None else None
         v = latest_verdict(state.ledger(), state.verdict_store.verdicts(state.project_id),
                            fingerprint=fingerprint(), geometry_params=gp,
-                           instance_id=inst.id if inst is not None else None)
+                           instance_id=inst.id if inst is not None else None,
+                           material=material, load_n=load_n)
         return {"current": dataclasses.asdict(v) if v else None}
 
     @app.post("/signoff")
@@ -834,6 +841,16 @@ def create_app() -> FastAPI:
 
     @app.get("/export/step")
     def export_step():
+        # Inversion #1's enforcement point: a missing/failing safety gate BLOCKS export, here — not
+        # just in the advisory POST /export/check that a client can choose not to call. Same gate
+        # evaluation export_check uses, so "checked eligible" and "will actually export" never diverge.
+        gate = evaluate_export_gates(state.resolved_ledger(), extra_findings=all_discipline_findings)
+        if not gate.eligible:
+            return JSONResponse(
+                status_code=409,
+                content={"status": "error", "message": "export blocked by gates",
+                         "reasons": gate.reasons, "unknowns": gate.unknowns},
+            )
         # geometry is resolved from the WHOLE assembly once a project holds more than one instance
         # (packages/subsystems/assembly.py::render_assembly), else exactly the active instance's own
         # geometry — see _render_geometry.

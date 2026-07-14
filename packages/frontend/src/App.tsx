@@ -295,7 +295,7 @@ export default function App() {
       let verdict = r.verdict ?? null;
       for (let i = 0; r.status === "queued" && !verdict && i < 60; i++) {
         await sleep(1500);
-        verdict = (await analyzeStatus()).current;
+        verdict = (await analyzeStatus(40)).current;
       }
       const e = await exportCheck();
       setAnalysis({

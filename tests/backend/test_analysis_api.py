@@ -137,6 +137,24 @@ def test_optimize_works_for_a_newly_eligible_non_bracket_subsystem(monkeypatch):
 @pytest.mark.skipif(not _HAS_KERNEL, reason="needs build123d for STEP export")
 def test_export_step_streams_real_brep(monkeypatch):
     c = _client(monkeypatch)
+    # gates are now enforced server-side at the export endpoint itself — must actually analyze +
+    # sign off first, the same sequence the frontend's voluntary check-then-export used to be the
+    # ONLY thing enforcing.
+    c.post("/analyze")
+    c.post("/signoff", params={"reviewer": "pe@example.com"})
     resp = c.get("/export/step")
     assert resp.status_code == 200
     assert resp.content[:13].decode("ascii", "ignore").startswith("ISO-10303-21")
+
+
+@pytest.mark.skipif(not _HAS_KERNEL, reason="needs build123d for STEP export")
+def test_export_step_blocked_without_signoff_even_with_a_passing_fs(monkeypatch):
+    """The bug this fix closes: a passing FS alone must not be enough — GET /export/step must
+    enforce EVERY gate itself (including sign-off), not just hand back geometry because the client
+    skipped the advisory POST /export/check step."""
+    c = _client(monkeypatch)
+    c.post("/analyze")  # FS now passes, but no sign-off yet
+    resp = c.get("/export/step")
+    assert resp.status_code == 409
+    body = resp.json()
+    assert any("not engineer-reviewed" in r for r in body["reasons"])

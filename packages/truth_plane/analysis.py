@@ -105,7 +105,8 @@ def analyze_geometry(params: dict[str, float], material_name: str, load_n: float
         return Verdict(
             geometry_signature=sig, fingerprint=fingerprint(),
             factor_of_safety=None, mesh_converged=False, watertight=True,
-            min_wall_ok=_min_wall_ok(resolved_plain), solver_seconds=0.0,
+            min_wall_ok=_min_wall_ok(resolved_plain), material=material_name, load_n=load_n,
+            solver_seconds=0.0,
         )
 
     part = sub.build(Namespace(resolved))
@@ -125,7 +126,8 @@ def analyze_geometry(params: dict[str, float], material_name: str, load_n: float
             return Verdict(
                 geometry_signature=sig, fingerprint=fingerprint(),
                 factor_of_safety=None, mesh_converged=False, watertight=False,
-                min_wall_ok=min_wall_ok, solver_seconds=0.0,
+                min_wall_ok=min_wall_ok, material=material_name, load_n=load_n,
+                solver_seconds=0.0,
             )
 
     watertight = bool(part.solid.is_valid)  # build123d exposes is_valid as a property, not a method
@@ -135,7 +137,8 @@ def analyze_geometry(params: dict[str, float], material_name: str, load_n: float
         return Verdict(
             geometry_signature=sig, fingerprint=fingerprint(),
             factor_of_safety=None, mesh_converged=False, watertight=watertight,
-            min_wall_ok=min_wall_ok, solver_seconds=0.0,
+            min_wall_ok=min_wall_ok, material=material_name, load_n=load_n,
+            solver_seconds=0.0,
         )
 
     from packages.truth_plane.solvers.fs import evaluate_fs
@@ -161,6 +164,8 @@ def analyze_geometry(params: dict[str, float], material_name: str, load_n: float
         mesh_converged=ok,
         watertight=watertight,
         min_wall_ok=min_wall_ok,
+        material=material_name,
+        load_n=load_n,
         solver_seconds=round(dt, 2),
     )
 
