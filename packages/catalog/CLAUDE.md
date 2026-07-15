@@ -60,9 +60,14 @@ Callable[[], str]`), resolved at PROMPT-BUILD time by
 *advisory* recommended wall thickness are catalog-sourced this way; the *hard* min-wall floor quoted
 in the same sentence deliberately is NOT — it reads `packages.ledger.apply.MIN_WALL_MM` directly (the
 actually-enforced constant), so the prompt can never claim a floor that doesn't match real
-export-gate enforcement. `structures.py`/`thermal.py`'s own fragments are still static strings —
-not yet wired to the catalog (same "separate, larger scope" reasoning; nothing structural blocks it,
-just not done yet).
+export-gate enforcement.
+
+`structures.py` (its "suggest a stiffer material" callout) and `thermal.py` (its service-temp ladder
+and the gate's "upgrade material" suggestion) are callables too now, reading live
+`packages.ledger.bom.MATERIAL_DB` directly — no separate dataset needed for these two, since
+`_apply_materials()` above already keeps that dict itself catalog-sourced. `cost.py`'s fragment (its
+hand-typed "$22-25 / $8 / $2" per-material price ranges) is the one knowledge fragment still a frozen
+string — not yet wired, same "separate, larger scope" reasoning.
 
 ## Adding a new category of reference data
 

@@ -135,16 +135,27 @@ doesn't match what the export gate actually checks. Verified live: overriding th
 clearance-hole dataset changes what `active_discipline_fragments()` (the real prompt-consumption
 path) returns, while the min-wall sentence stays pinned regardless of what the catalog says.
 
+**2026-07-15 — `structures.py`/`thermal.py` wired to the catalog too:** both fragments hand-typed
+material names/temperatures frozen at import time — `structures.py`'s "suggest a stiffer material
+(AL6061/STEEL)" and `thermal.py`'s "PLA ~55°C < PETG ~70°C < ABS ~90°C < AL6061 ~200°C < STEEL
+~400°C" ladder. Unlike the DFM fragment, neither needed a NEW catalog dataset: `bom.py::MATERIAL_DB`
+is already catalog-sourced (`_apply_materials()` above), so both fragments just became callables
+that read it live — `structures.py` names whichever materials are actually stiffest
+(`youngs_mod_mpa`), `thermal.py` rebuilds its ladder sorted by `service_temp_c`. The thermal gate's
+"upgrade material" suggestion is now live-computed too (materials at/above the failing operating
+temp, excluding the current one) rather than a fixed "PETG/ABS/AL6061" list that could recommend a
+material too cold for the actual failure. Only `cost.py`'s fragment (hand-typed "$22-25 / $8 / $2"
+per-material price ranges) remains a frozen string.
+
 **Still not fixed** (ranked roughly by severity): the stated goal's load (e.g. "holds 200 N") never
 reaches the solver — `HeuristicStrategicProvider` only parses FS/mass/hours tokens, so the enforced FS
 floor can diverge from what the user actually asked for even though the verdict-cache fix above at
 least stops the WRONG case's verdict from satisfying the request; zero frontend tests; no TLS anywhere
 in the stack, so the session cookie has no `Secure` flag (matches existing
 deployment posture — add both together when TLS termination lands); no external-standards sourcing
-yet for the new catalog (deliberately deferred per this session's own scope); structures.py/thermal.py's
-own knowledge fragments still hand-type their numbers (e.g. structures.py's stiffness-lever param
-names, thermal.py's PLA/PETG/ABS/AL6061/STEEL service-temp ladder) — only manufacturing's fragment
-is catalog-wired so far.
+yet for the new catalog (deliberately deferred per this session's own scope); `cost.py`'s knowledge
+fragment still hand-types its per-material price ranges — the one discipline fragment not yet
+catalog-wired.
 
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
