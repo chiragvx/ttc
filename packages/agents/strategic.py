@@ -8,6 +8,16 @@ originates a safety scalar — it sets TARGETS (requirements); the solvers later
 Vendor-agnostic: `StrategicProvider` is the seam; `HeuristicStrategicProvider` is a deterministic
 rule-based parser (an OpenRouter strategic provider would emit the same `RequirementSpec` list via
 tool-use). It is a real heuristic, not a fake LLM — the product uses no mock providers.
+
+2026-07-15 — `extract_load_n` closes the gap where a stated load (e.g. "holds 200 N") never reached
+the solver: `packages/truth_plane/analysis.py::analyze_geometry`'s `tip_load_n` input was always
+whatever the caller's hardcoded default was, regardless of what the goal actually asked for, so the FS
+number came back real but for the WRONG load case. Kept OUTSIDE `RequirementSpec`/`VerificationMatrix`
+deliberately: those model checkable TARGETS (a solved metric vs. an op/target pair via
+`Requirement.check`'s >=/<= semantics); a stated load is a solver INPUT, not a pass/fail check, and
+folding it in would show as a permanently-UNKNOWN requirement (no metric ever reports "load_n" back).
+`packages/transport/app.py::FileState` is the caller that turns this into `effective_load_n`, the same
+"goal accretes across chat messages, last-stated wins" shape `floor_fs`/`merge` already use for FS.
 """
 
 from __future__ import annotations
@@ -35,10 +45,17 @@ class StrategicProvider(ABC):
         when none is stated (full-goal planning); without it, only explicitly-stated targets are
         returned (incremental extraction from a chat message)."""
 
+    @abstractmethod
+    def extract_load_n(self, text: str) -> "float | None":
+        """Parse a stated applied load (e.g. "holds 200 N") -> Newtons, or None if absent. A solver
+        INPUT, not a checkable target — deliberately outside plan_requirements/RequirementSpec (see
+        this module's docstring)."""
+
 
 _FS = re.compile(r"(?:fs|factor of safety)\s*(?:of|=|>=)?\s*([0-9]+(?:\.[0-9]+)?)", re.I)
 _MASS = re.compile(r"(?:under|<=|below|max)?\s*([0-9]+(?:\.[0-9]+)?)\s*g(?:rams)?\b", re.I)
 _HOURS = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*(?:h|hr|hour)", re.I)
+_LOAD = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*(?:n|newtons?)(?![a-zA-Z])", re.I)
 
 
 class HeuristicStrategicProvider(StrategicProvider):
@@ -56,6 +73,10 @@ class HeuristicStrategicProvider(StrategicProvider):
         if inject_default_fs and not any(s.metric == "factor_of_safety" for s in specs):
             specs.append(RequirementSpec("default factor of safety >= 1.5", "factor_of_safety", ">=", 1.5))
         return specs
+
+    def extract_load_n(self, text: str) -> "float | None":
+        m = _LOAD.search(text)
+        return float(m.group(1)) if m else None
 
 
 class StrategicAgent:
@@ -86,3 +107,8 @@ class StrategicAgent:
         """The strictest FS requirement -> the export-gate floor the goal implies."""
         fs = [r.target for r in matrix.requirements if r.metric == "factor_of_safety" and r.op == ">="]
         return max(fs) if fs else None
+
+    def extract_load_n(self, text: str) -> float | None:
+        """Delegates to the provider (the vendor-swap seam) — callers never reach into `.provider`
+        directly, same encapsulation as `plan`/`merge`/`floor_fs` above."""
+        return self.provider.extract_load_n(text)

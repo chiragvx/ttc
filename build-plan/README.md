@@ -154,13 +154,25 @@ it's a callable now, rebuilding the $/kg quick-ref and the "cheapest material" c
 `cost_per_kg_usd`, no more hardcoded thermoplastic/metal split) from the live dict. Every discipline
 fragment (manufacturing, structures, thermal, cost) is catalog-live now.
 
-**Still not fixed** (ranked roughly by severity): the stated goal's load (e.g. "holds 200 N") never
-reaches the solver — `HeuristicStrategicProvider` only parses FS/mass/hours tokens, so the enforced FS
-floor can diverge from what the user actually asked for even though the verdict-cache fix above at
-least stops the WRONG case's verdict from satisfying the request; zero frontend tests; no TLS anywhere
-in the stack, so the session cookie has no `Secure` flag (matches existing
-deployment posture — add both together when TLS termination lands); no external-standards sourcing
-yet for the new catalog (deliberately deferred per this session's own scope).
+**2026-07-15 — the stated goal's load now reaches the solver, closing the top-severity item below:**
+`HeuristicStrategicProvider` only ever parsed FS/mass/hours tokens — a goal like "holds 200 N" was
+silently dropped, so `/analyze`/`/optimize` always solved a hardcoded 40 N / 25 N tip load regardless
+of what was asked; the reported FS was real but for the WRONG load case (and the frontend made it
+worse — `App.tsx` hardcoded `analyze(40)`/`optimize(25)` as literal constants, never reading the goal
+at all). Fixed at all three layers, mirroring the existing `effective_fs_floor` pattern exactly:
+`strategic.py` gained a `_LOAD` regex + `StrategicProvider.extract_load_n()` (deliberately kept OUTSIDE
+`RequirementSpec`/`VerificationMatrix` — a stated load is a solver INPUT, not a checkable pass/fail
+target, so folding it into the matrix would show as a permanently-UNKNOWN requirement); `FileState`
+gained `stated_load_n`/`effective_load_n()` (last-stated-wins, same accretion shape `merge()` already
+used for FS); `/analyze`, `/optimize`, `/analyze/status` resolve `load_n` through it (explicit caller
+override still wins), and `/analyze`'s response now echoes the RESOLVED load back so a status poller
+asks about the exact same case instead of racing a goal that could change mid-poll. The frontend reads
+that echoed value instead of hardcoding 40/25, and `RequirementsCard` surfaces `implied_load_n`.
+
+**Still not fixed** (ranked roughly by severity): zero frontend tests; no TLS anywhere in the stack,
+so the session cookie has no `Secure` flag (matches existing deployment posture — add both together
+when TLS termination lands); no external-standards sourcing yet for the new catalog (deliberately
+deferred per this session's own scope).
 
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had

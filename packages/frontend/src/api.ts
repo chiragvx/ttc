@@ -120,16 +120,24 @@ export async function applyInstanceOp(op: InstanceOp): Promise<InstanceOpApplyRe
 }
 
 // --- truth-plane analysis loop ---
-export async function analyze(loadN = 40): Promise<any> {
-  return (await apiFetch(`/analyze?load_n=${loadN}`, { method: "POST" })).json();
+// loadN is left OMITTED by default (not a hardcoded 40/25) so the backend resolves it itself —
+// FileState.effective_load_n(): whatever the stated goal demands (e.g. "holds 200 N"), else its own
+// historical default. Passing loadN explicitly still overrides that, same as before (2026-07-15 fix
+// — this used to always send a hardcoded constant, which silently overrode any goal-derived load).
+export async function analyze(loadN?: number): Promise<any> {
+  const q = loadN != null ? `?load_n=${loadN}` : "";
+  return (await apiFetch(`/analyze${q}`, { method: "POST" })).json();
 }
-export async function analyzeStatus(loadN = 40): Promise<any> {
-  // must match the load_n passed to analyze() above — the backend only reports a verdict "current"
-  // if it was solved for this exact case, not just any verdict for the current geometry.
-  return (await apiFetch(`/analyze/status?load_n=${loadN}`)).json();
+export async function analyzeStatus(loadN?: number): Promise<any> {
+  // must match the load_n analyze() actually resolved to (its response echoes it back as `load_n`) —
+  // the backend only reports a verdict "current" if it was solved for this exact case, not just any
+  // verdict for the current geometry.
+  const q = loadN != null ? `?load_n=${loadN}` : "";
+  return (await apiFetch(`/analyze/status${q}`)).json();
 }
-export async function optimize(loadN = 25): Promise<any> {
-  return (await apiFetch(`/optimize?load_n=${loadN}`, { method: "POST" })).json();
+export async function optimize(loadN?: number): Promise<any> {
+  const q = loadN != null ? `?load_n=${loadN}` : "";
+  return (await apiFetch(`/optimize${q}`, { method: "POST" })).json();
 }
 export async function optimizeStatus(): Promise<any> {
   return (await apiFetch("/optimize/status")).json();
@@ -152,6 +160,7 @@ export interface RequirementRow {
 }
 export interface RequirementsData {
   goal_set: boolean; implied_fs_floor: number | null; enforced_fs_floor: number;
+  implied_load_n: number | null;  // the applied load the goal stated (e.g. "holds 200 N"), if any
   satisfied: number; total: number; requirements: RequirementRow[];
   metrics: Record<string, number | null>;
 }

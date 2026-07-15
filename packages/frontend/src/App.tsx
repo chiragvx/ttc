@@ -287,17 +287,21 @@ export default function App() {
   const runAnalyze = async () => {
     setAnalysis((a) => ({ ...a, status: "running", errorMessage: null }));
     try {
-      const r = await analyze(40);
+      // no loadN passed -> the backend resolves it (whatever the stated goal demands, else its own
+      // default) and echoes back the resolved value as `load_n`; every poll below must ask about that
+      // SAME case (see analyzeStatus's own comment), not silently re-send a hardcoded constant.
+      const r = await analyze();
       if (r.status === "error") {
         setAnalysis((a) => ({ ...a, status: "error", errorMessage: r.message ?? null }));
         return;
       }
+      const loadN: number = r.load_n;
       let verdict = r.verdict ?? null;
       // job_status/job_message (2026-07-15) let a durably-recorded worker crash stop this loop
       // immediately instead of silently burning the full 90s budget before giving up unexplained.
       for (let i = 0; r.status === "queued" && !verdict && i < 60; i++) {
         await sleep(1500);
-        const s = await analyzeStatus(40);
+        const s = await analyzeStatus(loadN);
         verdict = s.current;
         if (s.job_status === "failed") {
           setAnalysis((a) => ({ ...a, status: "error", errorMessage: s.job_message ?? "analysis failed" }));
@@ -318,7 +322,10 @@ export default function App() {
   const runOptimize = async () => {
     setAnalysis((a) => ({ ...a, status: "optimizing" }));
     try {
-      const r = await optimize(25);
+      // no loadN passed -> same goal-resolution as runAnalyze; /optimize/status needs no load_n since
+      // it just reads back whatever result was stored for this project, not a specific (material,
+      // load_n) case.
+      const r = await optimize();
       if (r.status === "unsupported") {
         // the active subsystem has no fea_eligible thickness param to sweep — not a failure, just
         // not offered for this part type (e.g. a cylindrical/rotational part, or a compound)

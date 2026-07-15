@@ -86,6 +86,20 @@ def test_goal_raises_the_enforced_export_floor(monkeypatch):
     assert any("below floor 3" in reason for reason in r["reasons"])
 
 
+def test_goal_load_is_implied_but_not_a_requirement_row(monkeypatch):
+    # 2026-07-15: a stated load surfaces as implied_load_n (a solver INPUT the UI can show), but never
+    # as one of the checkable "requirements" rows -- there is no metric to solve/report it against.
+    c = _client(monkeypatch)
+    r = c.post("/requirements", json={"goal": "a bracket that holds 200 N at FS 2"}).json()
+    assert r["implied_load_n"] == 200.0
+    assert "load_n" not in {req["metric"] for req in r["requirements"]}
+
+
+def test_no_goal_implies_no_load(monkeypatch):
+    c = _client(monkeypatch)
+    assert c.get("/requirements").json()["implied_load_n"] is None
+
+
 def test_optimize_targets_the_goal_floor(monkeypatch):
     # "Find a passing design" must aim at the STATED goal, not the default 1.5 floor
     captured: dict = {}
@@ -104,3 +118,46 @@ def test_optimize_targets_the_goal_floor(monkeypatch):
     c.post("/requirements", json={"goal": "hold the load at FS 3"})
     c.post("/optimize")
     assert captured["floor"] == 3.0   # the goal raised the sweep's target floor
+
+
+def test_analyze_resolves_load_n_from_the_stated_goal(monkeypatch):
+    # 2026-07-15 fix: the stated load must actually reach the solver -- before this, /analyze always
+    # solved a hardcoded 40 N tip load no matter what the goal asked for, so the reported FS was real
+    # but for the WRONG load case.
+    captured: dict = {}
+
+    def _capture(params, material_name, load_n, subsystem_name="bracket", cut_features=None):
+        captured["load_n"] = load_n
+        return Verdict(geometry_signature=signature_from_params(params, geometry_params=tuple(params.keys())),
+                       fingerprint=fingerprint(), factor_of_safety=4.0, mesh_converged=True,
+                       watertight=True, min_wall_ok=True, solver_seconds=2.5)
+
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(app_module, "analyze_in_subprocess", _capture)
+    c = TestClient(app_module.create_app())
+    c.post("/instances", json={"subsystem_type": "bracket", "instance_id": "root"})
+
+    c.post("/requirements", json={"goal": "a bracket that holds 200 N at FS 2"})
+    r = c.post("/analyze").json()
+    assert captured["load_n"] == 200.0   # not the historical hardcoded 40 N default
+    assert r["load_n"] == 200.0          # echoed back so a poller can ask about the SAME case
+
+
+def test_optimize_resolves_load_n_from_the_stated_goal(monkeypatch):
+    captured: dict = {}
+
+    def _capture(candidates, base_params, material_name, load_n, fs_floor, timeout_s=600.0,
+                subsystem_name="bracket", cut_features=None):
+        captured["load_n"] = load_n
+        return {"variants": [], "best_value": None, "best_mass_g": None, "best_verdict": None,
+               "param_name": "skin_thickness_mm"}
+
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(app_module, "optimize_in_subprocess", _capture)
+    c = TestClient(app_module.create_app())
+    c.post("/instances", json={"subsystem_type": "bracket", "instance_id": "root"})
+    c.post("/requirements", json={"goal": "a bracket that holds 150 N"})
+    c.post("/optimize")
+    assert captured["load_n"] == 150.0   # not the historical hardcoded 25 N default

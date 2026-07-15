@@ -272,6 +272,10 @@ class FileState:
         # the user's GOAL as a verification matrix — the strategic layer sets TARGETS (never values);
         # compliance is judged later against real solver / geometry metrics. Empty until a goal is stated.
         self.matrix: VerificationMatrix = VerificationMatrix()
+        # the stated applied load (e.g. "holds 200 N") — a solver INPUT, not a checkable target, so it
+        # lives outside `matrix` (see packages/agents/strategic.py's module docstring). Last-stated
+        # wins, same accretion shape `merge()` uses for the matrix; None until a load is ever stated.
+        self.stated_load_n: float | None = None
         # Item 3 (2026-07-03): which instance /params, /mesh, /export/step, /analyze target. Parts
         # are a flat set (2026-07-04, no root) — `None` on a fresh/empty file; `active_instance()`
         # picks one as soon as the file has any parts.
@@ -297,6 +301,8 @@ class FileState:
     def note_message(self, message: str) -> None:
         # the chat is the single input: fold any stated TARGETS into the goal (no-op if none stated)
         self.matrix = self.strategic.merge(self.matrix, message)
+        if (n := self.strategic.extract_load_n(message)) is not None:
+            self.stated_load_n = n
 
     def metrics(self) -> dict[str, float | None]:
         """The live, GROUNDED metric snapshot a requirement is judged against. factor_of_safety comes
@@ -338,6 +344,12 @@ class FileState:
         base = self.ledger().global_constraints.factor_of_safety_floor
         goal = self.strategic.floor_fs(self.matrix)
         return max(base, goal) if goal is not None else base
+
+    def effective_load_n(self, default: float) -> float:
+        # mirrors effective_fs_floor: the solver's applied load is whatever the goal stated (2026-07-15
+        # fix — previously every /analyze and /optimize call solved a hardcoded default load no matter
+        # what the user actually asked for, so a "holds 200 N" goal got a real-but-wrong-load FS back).
+        return self.stated_load_n if self.stated_load_n is not None else default
 
     def resolved_ledger(self) -> MasterParametricLedger:
         # the export gate sees `derived` resolved from the latest matching analysis verdict for the
@@ -458,6 +470,7 @@ class SessionState:
     def ledger(self): return self.active_file().ledger()
     def current_params(self): return self.active_file().current_params()
     def effective_fs_floor(self): return self.active_file().effective_fs_floor()
+    def effective_load_n(self, default): return self.active_file().effective_load_n(default)
     def resolved_ledger(self): return self.active_file().resolved_ledger()
     def signoff(self, reviewer): return self.active_file().signoff(reviewer)
     def mutate(self, req): return self.active_file().mutate(req)
@@ -473,6 +486,10 @@ class SessionState:
     @property
     def matrix(self):
         return self.active_file().matrix
+
+    @property
+    def stated_load_n(self):
+        return self.active_file().stated_load_n
 
     @property
     def active_instance_id(self):
@@ -890,6 +907,7 @@ def create_app() -> FastAPI:
             "goal_set": bool(state.matrix.requirements),
             "implied_fs_floor": state.strategic.floor_fs(state.matrix),  # the FS the goal demands
             "enforced_fs_floor": state.effective_fs_floor(),             # what the export gate enforces
+            "implied_load_n": state.stated_load_n,  # the applied load the goal stated, if any
             "metrics": metrics,
             "satisfied": sum(1 for r in results if r.status.value == "SATISFIED"),
             "total": len(results),
@@ -912,10 +930,14 @@ def create_app() -> FastAPI:
         return _requirements_payload()
 
     @router.post("/analyze")
-    async def analyze(material: str = "PLA", load_n: float = 40.0):
+    async def analyze(material: str = "PLA", load_n: float | None = None):
         # generalized (2026-07-03): runs against whichever subsystem the ACTIVE instance is. Real FS
         # only comes back for `fea_eligible` parts (analyze_geometry itself gates this) — every other
         # part gets a well-formed Verdict with factor_of_safety=None, the honest "unknown".
+        # load_n (2026-07-15): an explicit caller value always wins; otherwise resolve to whatever the
+        # stated goal demands (state.effective_load_n), falling back to the historical 40 N default —
+        # see FileState.effective_load_n's docstring for why this must not stay a bare hardcoded value.
+        load_n = load_n if load_n is not None else state.effective_load_n(40.0)
         inst = state.active_instance()
         if inst is None:  # empty workspace — nothing to analyze yet
             return {"status": "error", "message": "no active part to analyze — add one first"}
@@ -936,7 +958,7 @@ def create_app() -> FastAPI:
                                 fingerprint=fp, geometry_params=gp, instance_id=inst.id,
                                 material=material, load_n=load_n)
         if cached:
-            return {"status": "done", "cached": True, "verdict": dataclasses.asdict(cached)}
+            return {"status": "done", "cached": True, "verdict": dataclasses.asdict(cached), "load_n": load_n}
         if os.environ.get("REDIS_URL"):  # durable queued path (worker + Postgres) — poll /analyze/status
             # NOTE: no jobs.configure() here — the actor body runs in the SEPARATE worker process,
             # which already configured its own store/status_store once at startup
@@ -947,7 +969,9 @@ def create_app() -> FastAPI:
             from packages.truth_plane import jobs
             state.status_store.put_status(state.project_id, "queued")
             jobs.run_fs_analysis.send(state.project_id, params, material, load_n, subsystem_name, cut_features)
-            return {"status": "queued"}
+            # echo the RESOLVED load back — the poller must ask /analyze/status about this exact same
+            # (material, load_n) case, not re-derive it (the goal could change mid-poll otherwise).
+            return {"status": "queued", "load_n": load_n}
         # inline path: run the real FS (in a child process via the threadpool) — needs solvers
         try:
             verdict = await run_in_threadpool(analyze_in_subprocess, params, material, load_n, subsystem_name,
@@ -955,19 +979,22 @@ def create_app() -> FastAPI:
         except Exception as e:
             return {"status": "error", "message": str(e)}
         state.verdict_store.put_verdict(state.project_id, verdict)
-        return {"status": "done", "verdict": dataclasses.asdict(verdict)}
+        return {"status": "done", "verdict": dataclasses.asdict(verdict), "load_n": load_n}
 
     @router.post("/optimize")
-    async def optimize(load_n: float = 25.0):
+    async def optimize(load_n: float | None = None):
         # the sanctioned 3-variant sweep: find the lightest design that passes FS. Generalized
         # (2026-07-03) past bracket-only: discovers the ACTIVE subsystem's own thickness-like param
         # (packages/truth_plane/analysis.py::_thickness_param_name) instead of a hardcoded
         # skin_thickness_mm sweep. A subsystem with no such param (e.g. a cylindrical/rotational
         # part, or one that isn't fea_eligible) gets an honest "unsupported" instead of a wrong or
         # no-op sweep — the same "never fabricate" stance as analyze_geometry's own gating.
+        # load_n (2026-07-15): same resolution as /analyze — an explicit caller value wins, else the
+        # stated goal's load, else the historical 25 N default.
         from packages.truth_plane.analysis import _thickness_param_name
         from packages.subsystems import get_subsystem_model
 
+        load_n = load_n if load_n is not None else state.effective_load_n(25.0)
         inst = state.active_instance()
         if inst is None:  # empty workspace — nothing to optimize yet
             return {"status": "unsupported", "message": "no active part to optimize — add one first"}
@@ -993,7 +1020,7 @@ def create_app() -> FastAPI:
             state.status_store.put_status(state.project_id, "queued")
             jobs.run_optimization.send(state.project_id, candidates, base_params, "PLA", load_n, fs_floor,
                                        inst.subsystem_type, cut_features)
-            return {"status": "queued"}
+            return {"status": "queued", "load_n": load_n}
         try:  # inline (dev/tests): run the sweep in a child process
             result = await run_in_threadpool(optimize_in_subprocess, candidates, base_params, "PLA",
                                              load_n, fs_floor, 600.0, inst.subsystem_type, cut_features)
@@ -1011,7 +1038,7 @@ def create_app() -> FastAPI:
             state.verdict_store.put_verdict(state.project_id, result["best_verdict"])
         return {"status": "done", "variants": result["variants"], "best_value": best_value,
                 "param_name": thickness_name, "target_node": target_node,
-                "best_mass_g": result["best_mass_g"], "fs_floor": fs_floor}
+                "best_mass_g": result["best_mass_g"], "fs_floor": fs_floor, "load_n": load_n}
 
     @router.get("/optimize/status")
     def optimize_status():
@@ -1024,9 +1051,12 @@ def create_app() -> FastAPI:
                 "job_message": job_status.message if job_status else None}
 
     @router.get("/analyze/status")
-    def analyze_status(material: str = "PLA", load_n: float = 40.0):
-        # material/load_n default to match POST /analyze's own defaults — a poller must ask about the
+    def analyze_status(material: str = "PLA", load_n: float | None = None):
+        # material/load_n default to match POST /analyze's own resolution — a poller must ask about the
         # SAME case it queued, not just "any verdict for this geometry" (see /analyze's own comment).
+        # Callers should pass back the exact `load_n` POST /analyze's response echoed, rather than rely
+        # on this default recomputing the same value (the stated goal could change mid-poll otherwise).
+        load_n = load_n if load_n is not None else state.effective_load_n(40.0)
         inst = state.active_instance()
         gp = geometry_paths(get_subsystem_model(inst.subsystem_type), inst.id) if inst is not None else None
         v = latest_verdict(state.ledger(), state.verdict_store.verdicts(state.project_id),

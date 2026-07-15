@@ -84,6 +84,36 @@ def test_analyze_status_reflects_current_geometry(monkeypatch):
     assert c.get("/analyze/status").json()["current"]["factor_of_safety"] == 4.0
 
 
+def test_analyze_defaults_to_40n_without_a_stated_load(monkeypatch):
+    # the historical default stands when no goal has ever stated a load -- see
+    # tests/backend/test_requirements_api.py for the goal-resolves-the-load case.
+    c = _client(monkeypatch)
+    assert c.post("/analyze").json()["load_n"] == 40.0
+
+
+def test_analyze_explicit_load_n_overrides_a_stated_goal(monkeypatch):
+    # an explicit caller-supplied load_n always wins over the goal-derived one (2026-07-15) -- the
+    # power-user "solve this one specific case" path stays available.
+    captured: dict = {}
+
+    def _capture(params, material_name, load_n, subsystem_name="bracket", cut_features=None):
+        captured["load_n"] = load_n
+        return Verdict(geometry_signature=signature_from_params(params, geometry_params=tuple(params.keys())),
+                       fingerprint=fingerprint(), factor_of_safety=4.0, mesh_converged=True,
+                       watertight=True, min_wall_ok=True, solver_seconds=2.5)
+
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(app_module, "analyze_in_subprocess", _capture)
+    c = TestClient(app_module.create_app())
+    c.post("/instances", json={"subsystem_type": "bracket", "instance_id": "root"})
+    c.post("/requirements", json={"goal": "a bracket that holds 200 N at FS 2"})
+
+    r = c.post("/analyze", params={"load_n": 75.0}).json()
+    assert captured["load_n"] == 75.0
+    assert r["load_n"] == 75.0
+
+
 def test_queued_analyze_records_status_durably_across_the_process_boundary(monkeypatch):
     """2026-07-15 fix: before this, a queued job's status lived only in a `publish` callback that
     could never reach the web process from the separate worker process — a poller had no way to

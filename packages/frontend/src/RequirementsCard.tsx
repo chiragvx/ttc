@@ -59,6 +59,11 @@ export function RequirementsCard({
               Goal demands FS ≥ {data.implied_fs_floor}; the export gate now enforces FS ≥ {data.enforced_fs_floor}.
             </div>
           )}
+          {data.implied_load_n != null && (
+            <div style={{ fontSize: 11, color: "#8b949e", marginTop: 4 }}>
+              Analysis now runs against the stated {data.implied_load_n} N load.
+            </div>
+          )}
           {fsUnmet && (
             <button onClick={onOptimize} style={fixBtn}>
               Find the lightest design meeting FS ≥ {data.enforced_fs_floor}
