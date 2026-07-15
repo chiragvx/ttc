@@ -356,11 +356,24 @@ class FileState:
         # ACTIVE instance's OWN params (not a hardcoded bracket list), AND the FS floor RAISED to
         # whatever the stated goal demands. Both are resolved at read time on a fresh fold; neither is
         # persisted.
+        #
+        # 2026-07-16 fix: material=/load_n= MUST be threaded into ledger_with_derived(), exactly like
+        # /analyze and /analyze/status already do (see their own comments quoting this same rationale)
+        # — omitting them let latest_verdict() match on geometry_signature+fingerprint ALONE, so a
+        # verdict solved at a lighter default load (e.g. 40 N) could be served back as "grounded" for
+        # export even after the stated goal raised the required load (e.g. to 200 N) and export was
+        # never re-analyzed at the new case. That is the exact fabricated-green-light failure Inversion
+        # #1 exists to prevent — this was the one caller of ledger_with_derived that still had the hole
+        # (caught by an adversarial red-team pass explicitly trying to defeat the export gate, not by
+        # normal testing). "PLA"/40.0 mirror /analyze's OWN literal defaults (material is not yet
+        # threaded from ledger.domains.structure.material_profile into analysis anywhere in this
+        # pipeline — a separate, pre-existing gap, not fixed here to keep this change minimal).
         inst = self.active_instance()
         gp = geometry_paths(get_subsystem_model(inst.subsystem_type), inst.id) if inst is not None else None
         led = ledger_with_derived(self.ledger(), self.verdict_store.verdicts(self.file_id),
                                   fingerprint=fingerprint(), geometry_params=gp,
-                                  instance_id=inst.id if inst is not None else None)
+                                  instance_id=inst.id if inst is not None else None,
+                                  material="PLA", load_n=self.effective_load_n(40.0))
         floor = self.effective_fs_floor()
         if floor > led.global_constraints.factor_of_safety_floor:
             gc = led.global_constraints.model_copy(update={"factor_of_safety_floor": floor})

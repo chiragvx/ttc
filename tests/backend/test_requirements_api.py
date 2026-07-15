@@ -144,6 +144,27 @@ def test_analyze_resolves_load_n_from_the_stated_goal(monkeypatch):
     assert r["load_n"] == 200.0          # echoed back so a poller can ask about the SAME case
 
 
+def test_export_blocked_after_goal_raises_load_without_reanalysis(monkeypatch):
+    """2026-07-16 fix (caught by an adversarial red-team pass explicitly trying to defeat the export
+    gate, not by normal testing): FileState.resolved_ledger() -- the ONE function both /export/check
+    and /export/step share -- didn't thread material=/load_n= into ledger_with_derived(), unlike
+    /analyze which already did. That let a verdict solved at the lighter default load (40 N) be served
+    back as "grounded" for export even after the stated goal demanded a much heavier load and export
+    was never re-analyzed at the new case -- the exact fabricated-green-light failure Inversion #1
+    exists to prevent. Must BLOCK (honest "unknown"), not silently reuse the stale, lighter-case verdict."""
+    c = _client(monkeypatch)
+    c.post("/analyze")  # solves at the default 40 N (fake FS 4.0)
+    c.post("/signoff", params={"reviewer": "pe@example.com"})
+    assert c.post("/export/check").json()["status"] == "EXPORT_ELIGIBLE"  # baseline: passes at 40 N
+
+    # goal raises the REQUIRED LOAD without touching FS itself and without ever re-analyzing
+    c.post("/requirements", json={"goal": "this bracket must hold 200 N in service"})
+
+    r = c.post("/export/check").json()
+    assert r["status"] == "EXPORT_BLOCKED"                       # no verdict for the NEW (SIG, 200N) case
+    assert "factor_of_safety" in r["unknowns"]                    # honest unknown, not a stale FS reused
+
+
 def test_optimize_resolves_load_n_from_the_stated_goal(monkeypatch):
     captured: dict = {}
 
