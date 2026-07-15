@@ -12,6 +12,14 @@ plus a runtime single-solid check: only parts sharing the SAME validated cantile
 part (compounds, cylindrical/rotational parts, anything not explicitly vetted) returns a well-formed
 Verdict with `factor_of_safety=None` — honestly "unknown", never a fabricated number. This is
 Inversion #1 applied to the whole catalog, not just the original hero part.
+
+2026-07-15 — a cut feature (hole/pocket/slot) that intersects the clamp or load face WITHOUT
+severing the part still passes the single-solid check above, but silently hands the solver a
+FRAGMENT of the true boundary face (`solvers/mesh.py::_axis_extreme_surface` picks exactly ONE face
+by bounding-box centre) — an under-constrained/under-loaded model producing a confident, wrong FS
+with no error. `solvers/bc_check.py::bc_faces_intact` compares the clamp/load face area before vs
+after cutting (pure build123d, no gmsh) and returns the same honest "unknown" as the severed-island
+case when a cut compromised either face.
 """
 
 from __future__ import annotations
@@ -110,6 +118,7 @@ def analyze_geometry(params: dict[str, float], material_name: str, load_n: float
         )
 
     part = sub.build(Namespace(resolved))
+    uncut_solid = part.solid  # kept for the BC-face fragmentation check below, only used if cut
     sig = signature_from_params(params, geometry_params=tuple(params.keys()), cut_features=cuts)
     resolved_plain = {name: pd.value for name, pd in resolved.items()}
     min_wall_ok = _min_wall_ok(resolved_plain)
@@ -140,6 +149,22 @@ def analyze_geometry(params: dict[str, float], material_name: str, load_n: float
             min_wall_ok=min_wall_ok, material=material_name, load_n=load_n,
             solver_seconds=0.0,
         )
+
+    if cuts:
+        from packages.truth_plane.solvers.bc_check import bc_faces_intact
+        if not bc_faces_intact(uncut_solid, part.solid):
+            # a hole/pocket/slot intersected (without severing) the clamp or load face the validated
+            # cantilever methodology's mesh face-selector geometrically pins to
+            # (packages/truth_plane/solvers/mesh.py::_axis_extreme_surface picks exactly ONE face by
+            # bounding-box centre) — the solver would silently see only a FRAGMENT of the true
+            # boundary face, an under-constrained/under-loaded model that produces a confident, wrong
+            # FS with no error at all. Same honest "unknown" as the severed-island case above.
+            return Verdict(
+                geometry_signature=sig, fingerprint=fingerprint(),
+                factor_of_safety=None, mesh_converged=False, watertight=watertight,
+                min_wall_ok=min_wall_ok, material=material_name, load_n=load_n,
+                solver_seconds=0.0,
+            )
 
     from packages.truth_plane.solvers.fs import evaluate_fs
 

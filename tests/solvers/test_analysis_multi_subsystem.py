@@ -70,6 +70,45 @@ def test_non_eligible_subsystem_never_touches_the_solver(name, params):
 
 
 # ------------------------------------------------------------------------------------------------
+# Cut features that compromise the clamp/load face (2026-07-15 fix, packages/truth_plane/solvers/
+# bc_check.py): the block happens BEFORE evaluate_fs/gmsh is ever imported, so this runs everywhere
+# (no needs_gmsh marker) — proving the block is genuinely a pre-solver gate, not a mocked stand-in.
+# ------------------------------------------------------------------------------------------------
+
+@needs_b123d
+def test_cut_feature_through_the_clamp_face_blocks_fs_without_needing_the_solver():
+    """A hole positioned near the clamp (min-X) end of the plate intersects that boundary face
+    without severing the part — passes the existing single-solid check but would silently hand the
+    solver a FRAGMENT of the true clamp face. bc_faces_intact must catch this and return an honest
+    unknown, same as the severed-island case, before evaluate_fs is ever reached."""
+    from packages.ledger.schema import CutFeature
+    # WIDTH=60 -> plate spans x=[-30,30] at defaults; a hole centered at x=-27 with dia=8 spans
+    # x=[-31,-23], crossing the x=-30 clamp face.
+    cut = CutFeature(id="edge_hole", kind="hole", shape="circle", dia_mm=8.0, depth_mm=2.0,
+                     x_mm=-27.0, y_mm=0.0)
+    v = analyze_geometry({SKIN: 3.0, WIDTH: 60.0, DEPTH: 40.0, HOLE_DIA: 6.0}, "PLA", 40.0,
+                         cut_features=[cut])
+    assert v.factor_of_safety is None
+    assert v.mesh_converged is False
+    assert v.solver_seconds == 0.0
+
+
+@needs_b123d
+@needs_gmsh
+def test_cut_feature_away_from_either_end_face_still_reaches_the_solver(monkeypatch):
+    """The bc-face check must not false-positive on an ordinary, safely-inset cut — it should still
+    reach the (mocked) solver exactly as an uncut part would."""
+    calls = _fake_evaluate_fs(monkeypatch, factor_of_safety=5.0)
+    from packages.ledger.schema import CutFeature
+    cut = CutFeature(id="center_hole", kind="hole", shape="circle", dia_mm=8.0, depth_mm=2.0,
+                     x_mm=0.0, y_mm=0.0)  # dead center — nowhere near either end face
+    v = analyze_geometry({SKIN: 3.0, WIDTH: 60.0, DEPTH: 40.0, HOLE_DIA: 6.0}, "PLA", 40.0,
+                         cut_features=[cut])
+    assert len(calls) == 1  # the bc-face check passed -- reached the (mocked) solver
+    assert v.factor_of_safety == 5.0
+
+
+# ------------------------------------------------------------------------------------------------
 # Eligible path — needs gmsh importable so the mock has something to patch onto.
 # ------------------------------------------------------------------------------------------------
 

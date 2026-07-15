@@ -4,8 +4,8 @@ Master index for turning the `prd-27-8.14` vision into a real product, engineere
 (dev-time) and powered by Claude (runtime).
 
 **Last updated:** 2026-07-15
-**Current phase:** Phases 0–4 implemented & green (**520 backend tests pass on Windows** — `python -m
-pytest tests -q`, 26 skip on dependency-gated markers, more in the Linux container) and the **full
+**Current phase:** Phases 0–4 implemented & green (**526 backend tests pass on Windows** — `python -m
+pytest tests -q`, 27 skip on dependency-gated markers, more in the Linux container) and the **full
 wedge stack runs end-to-end on `docker compose up`**. Spike 4 fully PASSES (deflection-validated FS +
 19/19 auto-mesh). Built across the phases: ledger + rules validator + event store/replay (in-mem + SQL
 + **Postgres**, though only the in-mem/sqlite paths are test-covered — see below), hero-bracket
@@ -57,16 +57,26 @@ across separate connections; and `SessionManager`'s in-memory dict doesn't exten
 worker processes without a shared store (Redis is already provisioned for Dramatiq; not wired up for
 this).
 
+**2026-07-15 — cut-feature boundary-condition fragmentation, closed:** a hole/pocket/slot that
+intersects (without severing) the validated cantilever methodology's clamp (min-X) or load (max-X)
+face used to pass the existing single-solid check and silently hand the solver a FRAGMENT of the
+true boundary face — `solvers/mesh.py::_axis_extreme_surface` picks exactly ONE face by bounding-box
+centre, so a cut that splits that face into two ~60mm² pieces (confirmed live against a 200mm² face)
+would have the clamp/load applied to only ONE fragment, an under-constrained/under-loaded model
+producing a confident, wrong FS with zero error. New `packages/truth_plane/solvers/bc_check.py`
+(pure build123d, no gmsh — unit-testable on Windows) compares the clamp/load face area before vs
+after cutting and returns the honest "unknown" `analyze_geometry` already gives the severed-island
+case whenever a cut compromises either face. Verified end-to-end with a real bracket + an
+edge-intersecting cut feature that the block happens BEFORE `evaluate_fs`/gmsh is ever imported.
+
 **Still not fixed** (ranked roughly by severity): Dramatiq jobs are at-most-once with invisible
-failure (no retry, no failure surfaced to the poller); a user-added cut feature can silently fragment
-the FS solver's boundary-condition face on a `fea_eligible` part, producing a confident-but-wrong FS;
-the stated goal's load (e.g. "holds 200 N") never reaches the solver — `HeuristicStrategicProvider`
-only parses FS/mass/hours tokens, so the enforced FS floor can diverge from what the user actually
-asked for even though the verdict-cache fix above at least stops the WRONG case's verdict from
-satisfying the request; full event-log refold + per-event deep-copy on every read (no snapshotting)
-will not scale past a demo-length session; zero frontend tests; no TLS anywhere in the stack, so the
-new session cookie has no `Secure` flag (matches existing deployment posture — add both together
-when TLS termination lands).
+failure (no retry, no failure surfaced to the poller); the stated goal's load (e.g. "holds 200 N")
+never reaches the solver — `HeuristicStrategicProvider` only parses FS/mass/hours tokens, so the
+enforced FS floor can diverge from what the user actually asked for even though the verdict-cache fix
+above at least stops the WRONG case's verdict from satisfying the request; full event-log refold +
+per-event deep-copy on every read (no snapshotting) will not scale past a demo-length session; zero
+frontend tests; no TLS anywhere in the stack, so the session cookie has no `Secure` flag (matches
+existing deployment posture — add both together when TLS termination lands).
 
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
