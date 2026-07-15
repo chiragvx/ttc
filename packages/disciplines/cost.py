@@ -10,6 +10,15 @@ Grounding (Inversion #1 still holds):
 The gate is opt-in via `GlobalConstraints.max_cost_usd`: a project can state "under $50" and the
 export gate blocks a design that busts it. Without a budget set, cost is a pure readout — no gate
 contribution. This is Cost as a lens, not a stopper by default.
+
+2026-07-15 — the per-material $/kg quick-ref and the "cheapest material" callout in the knowledge
+fragment now read live packages.ledger.bom.MATERIAL_DB (the same dict
+packages/catalog/bootstrap.py::set_material_db() overrides at process startup) instead of a frozen
+"PLA/PETG/ABS ≈ $22-25; AL6061 raw ≈ $8; STEEL raw ≈ $2" string — same staleness bug
+manufacturing.py's clearance-hole quick-ref had, same fix: the fragment is a CALLABLE, resolved at
+PROMPT-BUILD time (packages/disciplines/__init__.py::_fragment_text). `_cost_usd` below already read
+MATERIAL_DB live via `material()` — only the prompt TEXT was frozen at import time; this closes that
+last gap, so every discipline fragment is catalog-live now.
 """
 
 from __future__ import annotations
@@ -40,11 +49,27 @@ def reset_machine_rate() -> None:
     MACHINE_RATE_USD_PER_HR = _DEFAULT_MACHINE_RATE_USD_PER_HR
 
 
-_FRAGMENT = """\
+def _material_cost_quick_ref() -> str:
+    from packages.ledger.bom import MATERIAL_DB
+
+    ordered = sorted(MATERIAL_DB.values(), key=lambda m: m.cost_per_kg_usd)
+    return ", ".join(f"{m.name}≈${m.cost_per_kg_usd:g}/kg" for m in ordered)
+
+
+def _cheapest_material_name() -> str:
+    from packages.ledger.bom import MATERIAL_DB
+
+    if not MATERIAL_DB:
+        return "the lowest-$/kg option"
+    return min(MATERIAL_DB.values(), key=lambda m: m.cost_per_kg_usd).name
+
+
+def _fragment() -> str:
+    return f"""\
 ## Discipline: Cost (analytic $ estimate — L0)
 A pure readout across every part: material cost + machine time × rate. Numbers are ANALYTIC (labeled
 as estimates), not slicer-grounded — treat as ballpark, not a quote.
-- **material** — material_profile selects a $/kg (PLA/PETG/ABS ≈ $22-25; AL6061 raw ≈ $8; STEEL raw ≈ $2).
+- **material** — material_profile selects a $/kg: {_material_cost_quick_ref()}.
 - **mass** — density × geometry volume (deterministic; from the active subsystem's volume function).
 - **print/machine time** — the analytic time estimate already used by telemetry (L0); a slicer
   replaces this at L1.
@@ -52,7 +77,7 @@ as estimates), not slicer-grounded — treat as ballpark, not a quote.
 
 ### Intent mapping
 - "under $N" → set the budget; the copilot proposes lighter/thinner geometry to fit.
-- "cheaper material" → propose material switch (PLA is cheapest thermoplastic; STEEL cheapest metal by mass).
+- "cheaper material" → propose switching toward the lowest-$/kg option above (today: {_cheapest_material_name()}).
 - "reduce mass" → smaller geometry OR switch to a lower-density material (watch the strength trade)."""
 
 
@@ -103,7 +128,7 @@ def _gate(ledger: MasterParametricLedger) -> GateFinding:
 COST = register(DisciplineSpec(
     name="cost",
     description="Analytic $ readout (material + machine time × rate); optional max_cost_usd gate",
-    knowledge_fragment=_FRAGMENT,
+    knowledge_fragment=_fragment,  # callable — see this module's docstring
     # Cost applies to every part regardless of ledger contents — it reads whatever active subsystem
     # is set + material_profile from the structure discipline block.
     # No owned params (uses shared discipline data + subsystem volume).

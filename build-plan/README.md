@@ -144,8 +144,15 @@ that read it live — `structures.py` names whichever materials are actually sti
 (`youngs_mod_mpa`), `thermal.py` rebuilds its ladder sorted by `service_temp_c`. The thermal gate's
 "upgrade material" suggestion is now live-computed too (materials at/above the failing operating
 temp, excluding the current one) rather than a fixed "PETG/ABS/AL6061" list that could recommend a
-material too cold for the actual failure. Only `cost.py`'s fragment (hand-typed "$22-25 / $8 / $2"
-per-material price ranges) remains a frozen string.
+material too cold for the actual failure.
+
+**2026-07-15 — `cost.py` wired to the catalog too, closing the last gap:** its "$22-25 / $8 / $2"
+per-material price quick-ref and "PLA is cheapest thermoplastic; STEEL cheapest metal by mass"
+callout were the last hand-typed numbers left in any discipline's knowledge fragment. Same fix again:
+`_cost_usd()` already read `MATERIAL_DB` live via `material()`, so only the prompt TEXT was frozen —
+it's a callable now, rebuilding the $/kg quick-ref and the "cheapest material" callout (by
+`cost_per_kg_usd`, no more hardcoded thermoplastic/metal split) from the live dict. Every discipline
+fragment (manufacturing, structures, thermal, cost) is catalog-live now.
 
 **Still not fixed** (ranked roughly by severity): the stated goal's load (e.g. "holds 200 N") never
 reaches the solver — `HeuristicStrategicProvider` only parses FS/mass/hours tokens, so the enforced FS
@@ -153,9 +160,7 @@ floor can diverge from what the user actually asked for even though the verdict-
 least stops the WRONG case's verdict from satisfying the request; zero frontend tests; no TLS anywhere
 in the stack, so the session cookie has no `Secure` flag (matches existing
 deployment posture — add both together when TLS termination lands); no external-standards sourcing
-yet for the new catalog (deliberately deferred per this session's own scope); `cost.py`'s knowledge
-fragment still hand-types its per-material price ranges — the one discipline fragment not yet
-catalog-wired.
+yet for the new catalog (deliberately deferred per this session's own scope).
 
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had

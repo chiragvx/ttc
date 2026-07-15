@@ -62,12 +62,12 @@ in the same sentence deliberately is NOT — it reads `packages.ledger.apply.MIN
 actually-enforced constant), so the prompt can never claim a floor that doesn't match real
 export-gate enforcement.
 
-`structures.py` (its "suggest a stiffer material" callout) and `thermal.py` (its service-temp ladder
-and the gate's "upgrade material" suggestion) are callables too now, reading live
-`packages.ledger.bom.MATERIAL_DB` directly — no separate dataset needed for these two, since
-`_apply_materials()` above already keeps that dict itself catalog-sourced. `cost.py`'s fragment (its
-hand-typed "$22-25 / $8 / $2" per-material price ranges) is the one knowledge fragment still a frozen
-string — not yet wired, same "separate, larger scope" reasoning.
+`structures.py` (its "suggest a stiffer material" callout), `thermal.py` (its service-temp ladder and
+the gate's "upgrade material" suggestion), and `cost.py` (its per-material $/kg quick-ref and
+"cheapest material" callout) are all callables now, reading live `packages.ledger.bom.MATERIAL_DB`
+directly — none of the three needed a separate catalog dataset, since `_apply_materials()` above
+already keeps that dict itself catalog-sourced. Every discipline's knowledge fragment is catalog-live
+now; none is still a string frozen at module-import time.
 
 ## Adding a new category of reference data
 
