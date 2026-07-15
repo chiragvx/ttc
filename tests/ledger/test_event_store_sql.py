@@ -25,6 +25,30 @@ def test_sql_store_folds_like_in_memory(base_ledger):
     assert sql.verify_chain() is True
 
 
+def test_events_since_queries_only_the_tail(base_ledger):
+    """SqlEventStore overrides _events_since with a real WHERE seq >= ? query (2026-07-15, fold()'s
+    snapshot cache) instead of the default full-fetch-then-slice — pins that it returns exactly the
+    same events the default would, for a real sqlite-backed store."""
+    store = _populate(SqlEventStore(), base_ledger)
+    all_events = store.events()
+    assert len(all_events) == 3  # genesis + mutation + signoff
+    assert store._events_since(0) == all_events
+    assert store._events_since(1) == all_events[1:]
+    assert store._events_since(len(all_events)) == []
+
+
+def test_sql_store_fold_cache_reflects_new_events_across_reads(base_ledger):
+    """The same incremental-fold behavior EventLog gets, but backed by a real sqlite connection —
+    confirms _events_since's WHERE-clause override composes correctly with fold()'s cache."""
+    store = SqlEventStore()
+    store.append_genesis(base_ledger, actor="system", ts=TS)
+    store.append_mutation(ParameterDelta(target_node=SKIN, requested_value=3.0), actor="user", ts=TS)
+    assert store.fold().instances["root"].params["skin_thickness_mm"].value == 3.0
+
+    store.append_mutation(ParameterDelta(target_node=SKIN, requested_value=4.0), actor="user", ts=TS)
+    assert store.fold().instances["root"].params["skin_thickness_mm"].value == 4.0
+
+
 def test_sql_store_persists_across_reconnect(tmp_path, base_ledger):
     db = str(tmp_path / "events.db")
     store = _populate(SqlEventStore(db), base_ledger)

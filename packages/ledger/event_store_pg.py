@@ -85,6 +85,17 @@ class PgEventStore(BaseEventLog):
         return [Event(seq=r[0], kind=EventKind(r[1]), actor=r[2], ts=r[3],
                       payload=json.loads(r[4]), prev_hash=r[5], hash=r[6]) for r in rows]
 
+    def _events_since(self, count: int) -> list[Event]:
+        # a cache-hit fold() only needs the TAIL — avoids re-fetching/re-deserializing the whole
+        # project's history from Postgres on every read (see BaseEventLog.fold()'s docstring); this
+        # is the concrete fix for "the Postgres path where _all_events() also re-reads every row".
+        rows = self.conn.execute(
+            "SELECT seq, kind, actor, ts, payload, prev_hash, hash FROM events "
+            "WHERE project_id = %s AND seq >= %s ORDER BY seq", (self.project_id, count)
+        ).fetchall()
+        return [Event(seq=r[0], kind=EventKind(r[1]), actor=r[2], ts=r[3],
+                      payload=json.loads(r[4]), prev_hash=r[5], hash=r[6]) for r in rows]
+
     def _put_artifact(self, sha256: str, content: bytes) -> None:
         self.conn.execute("INSERT INTO artifacts (sha256, content) VALUES (%s,%s) ON CONFLICT DO NOTHING",
                           (sha256, content))

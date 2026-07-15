@@ -4,7 +4,7 @@ Master index for turning the `prd-27-8.14` vision into a real product, engineere
 (dev-time) and powered by Claude (runtime).
 
 **Last updated:** 2026-07-15
-**Current phase:** Phases 0–4 implemented & green (**530 backend tests pass on Windows** — `python -m
+**Current phase:** Phases 0–4 implemented & green (**539 backend tests pass on Windows** — `python -m
 pytest tests -q`, 27 skip on dependency-gated markers, more in the Linux container) and the **full
 wedge stack runs end-to-end on `docker compose up`**. Spike 4 fully PASSES (deflection-validated FS +
 19/19 auto-mesh). Built across the phases: ledger + rules validator + event store/replay (in-mem + SQL
@@ -86,12 +86,26 @@ instead of silently burning their full 90s/240s budget before giving up unexplai
 `max_retries=0` is unchanged — a deterministic geometry/FEA failure would just fail identically again;
 this fix is about surfacing failure honestly, not retrying it.
 
+**2026-07-15 — event-log snapshot cache:** `BaseEventLog.fold()` used to refold the ENTIRE history
+from genesis on every single read — every mesh render, telemetry poll, param fetch, WS mutation
+response — and `apply_delta` deep-copies the whole ledger per `PARAMETER_MUTATION` it folds, so a
+session's total cost was effectively quadratic in reads×mutations-so-far. `fold()` now caches the
+last-folded ledger + how many events produced it: a read with no new events returns the cache
+directly (zero replay work); a read with k new events folds only those k on top of the cache
+(`replay()` gained an `initial` param for this). `SqlEventStore`/`PgEventStore` also override the new
+`_events_since(count)` hook with a real `WHERE seq >= ?` query, so a cache-hit read on the Postgres
+path doesn't even re-fetch the full history from the DB — the concrete fix for "the Postgres path
+where `_all_events()` also re-reads every row". Measured directly: 500 mutations × 5 reads each (2,500
+`fold()` calls, roughly what one real editing session produces) — 43.4s uncached vs 0.034s cached, a
+~1,277× speedup that widens further with session length since the uncached cost is quadratic and the
+cached cost is linear. Cache correctness verified against a from-scratch cold replay after many
+incremental appends, and against a different `reconcile` callable correctly invalidating it.
+
 **Still not fixed** (ranked roughly by severity): the stated goal's load (e.g. "holds 200 N") never
 reaches the solver — `HeuristicStrategicProvider` only parses FS/mass/hours tokens, so the enforced FS
 floor can diverge from what the user actually asked for even though the verdict-cache fix above at
-least stops the WRONG case's verdict from satisfying the request; full event-log refold + per-event
-deep-copy on every read (no snapshotting) will not scale past a demo-length session; zero frontend
-tests; no TLS anywhere in the stack, so the session cookie has no `Secure` flag (matches existing
+least stops the WRONG case's verdict from satisfying the request; zero frontend tests; no TLS anywhere
+in the stack, so the session cookie has no `Secure` flag (matches existing
 deployment posture — add both together when TLS termination lands).
 
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was

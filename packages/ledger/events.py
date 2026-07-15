@@ -82,6 +82,7 @@ class Event(BaseModel):
 def replay(
     events: Iterable[Event],
     reconcile: Optional[Callable[[MasterParametricLedger], MasterParametricLedger]] = None,
+    initial: Optional[MasterParametricLedger] = None,
 ) -> MasterParametricLedger:
     """Reconstruct ledger state from FACTS only. Never calls an LLM/optimizer/solver.
 
@@ -98,8 +99,18 @@ def replay(
     `instance_id in ledger.instances` miss below and is silently dropped (see that branch's comment)
     -- forever, since a later reconcile-once-at-the-end synthesizes a FRESH child with no memory of
     the dropped cut. Reconciling after every event closes that gap: by the time the FEATURE_OP event
-    folds, the child it targets already exists (if it's an assembly-template child at all)."""
-    ledger: MasterParametricLedger | None = None
+    folds, the child it targets already exists (if it's an assembly-template child at all).
+
+    `initial` (2026-07-15, default None -> every pre-existing caller unaffected — a bare `events`
+    list must then include its own GENESIS) lets a caller resume folding from an ALREADY-COMPUTED
+    ledger state instead of always starting from genesis. `BaseEventLog.fold()`'s snapshot cache
+    uses this to fold only the events appended SINCE the last read, instead of re-folding the WHOLE
+    history (with its per-event `apply_delta` deep-copy) on every single read — a demo-length session
+    is fine either way, but the cost was O(events-so-far) on every read (mesh render, telemetry poll,
+    param fetch, …), degrading to effectively quadratic over a long session. `events` passed
+    alongside `initial` must be EXACTLY the events after whatever produced it — never re-passing a
+    GENESIS event once `initial` is already set."""
+    ledger: MasterParametricLedger | None = initial
     for ev in events:
         if ev.kind is EventKind.DERIVATION:
             continue  # rehydrated by hash, never recomputed
@@ -288,11 +299,42 @@ class BaseEventLog(ABC):
     def events(self) -> list[Event]:
         return self._all_events()
 
+    def _events_since(self, count: int) -> list[Event]:
+        """Every event after position `count` (0-indexed) — the default just slices `_all_events()`;
+        `SqlEventStore`/`PgEventStore` override this with a `WHERE seq >= ?` query so a cache-hit
+        `fold()` doesn't have to re-fetch (and re-deserialize) the WHOLE history from the DB just to
+        grab its tail (see `fold()`'s docstring)."""
+        return self._all_events()[count:]
+
     def fold(
         self,
         reconcile: Optional[Callable[[MasterParametricLedger], MasterParametricLedger]] = None,
     ) -> MasterParametricLedger:
-        return replay(self._all_events(), reconcile=reconcile)
+        """Snapshot-cached (2026-07-15): a bare re-fold over the WHOLE event history on every single
+        call — every mesh render, telemetry poll, param fetch, WS mutation response — was O(events-
+        so-far) per call (each PARAMETER_MUTATION fold does a full `apply_delta` deep-copy), making a
+        long session's total cost effectively quadratic in the number of reads×mutations. Caches the
+        last-folded ledger + how many events produced it; a read with NO new events since then
+        returns the cached ledger directly (zero replay work); a read with k NEW events folds only
+        those k on top of the cache instead of refolding from genesis. `_count()` (cheap — COUNT(*)
+        for SQL, len() in-memory) decides whether anything changed at all, without ever fetching the
+        actual rows unless it did. Cache key includes `id(reconcile)` since folding with vs without
+        `reconcile_all` produces genuinely different ledger states — a different callable invalidates
+        it. Safe under this class's append-only contract: events are only ever added, never removed
+        or reordered, by any caller reachable from this store's own API."""
+        n = self._count()
+        cache_ledger = getattr(self, "_fold_cache_ledger", None)
+        cache_count = getattr(self, "_fold_cache_count", 0)
+        cache_reconcile_id = getattr(self, "_fold_cache_reconcile_id", None)
+        if cache_ledger is not None and cache_reconcile_id == id(reconcile) and cache_count <= n:
+            new_events = self._events_since(cache_count) if cache_count < n else []
+            ledger = replay(new_events, reconcile=reconcile, initial=cache_ledger) if new_events else cache_ledger
+        else:
+            ledger = replay(self._all_events(), reconcile=reconcile)
+        self._fold_cache_ledger = ledger
+        self._fold_cache_count = n
+        self._fold_cache_reconcile_id = id(reconcile)
+        return ledger
 
     def verify_chain(self) -> bool:
         prev = GENESIS_PREV
@@ -326,6 +368,9 @@ class EventLog(BaseEventLog):
     def _all_events(self) -> list[Event]:
         return list(self._events)
 
+    def _events_since(self, count: int) -> list[Event]:
+        return list(self._events[count:])  # skip re-copying the already-folded prefix
+
     def _put_artifact(self, sha256: str, content: bytes) -> None:
         self._artifacts[sha256] = content
 
@@ -333,7 +378,10 @@ class EventLog(BaseEventLog):
         return self._artifacts.get(sha256)
 
     def clone(self) -> "EventLog":
-        """Copy-on-write fork: shares prior history, then diverges independently."""
+        """Copy-on-write fork: shares prior history, then diverges independently. The fold cache is
+        NOT copied — the clone gets its own on first read, cheap (whichever events it happens to
+        already share with `self` will still hit "no new events" on that very first fold if nothing
+        was appended in between)."""
         c = EventLog()
         c._events = list(self._events)
         c._artifacts = dict(self._artifacts)

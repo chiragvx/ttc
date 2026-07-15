@@ -55,6 +55,13 @@ class _FakeConn:
             self.rows.append({"project_id": pid, "seq": seq, "kind": kind, "actor": actor, "ts": ts,
                               "payload": payload, "prev_hash": prev_hash, "hash": hash_})
             return _Result(None)
+        if s.startswith("SELECT seq, kind, actor, ts, payload, prev_hash, hash FROM events WHERE project_id") \
+                and "AND seq >=" in s:
+            pid, min_seq = params
+            matching = sorted((r for r in self.rows if r["project_id"] == pid and r["seq"] >= min_seq),
+                              key=lambda r: r["seq"])
+            return _Result([(r["seq"], r["kind"], r["actor"], r["ts"], r["payload"], r["prev_hash"], r["hash"])
+                            for r in matching])
         if s.startswith("SELECT seq, kind, actor, ts, payload, prev_hash, hash FROM events WHERE project_id"):
             (pid,) = params
             matching = sorted((r for r in self.rows if r["project_id"] == pid), key=lambda r: r["seq"])
@@ -108,6 +115,39 @@ def test_a_mutation_on_one_project_never_appears_in_another(shared_table, base_l
     bob_led = bob.fold()
     assert alice_led.instances["root"].params["skin_thickness_mm"].value == 9.0
     assert bob_led.instances["root"].params["skin_thickness_mm"].value == 2.0
+
+
+def test_events_since_is_scoped_by_both_project_id_and_seq(shared_table, base_ledger):
+    """fold()'s snapshot cache (2026-07-15) relies on _events_since to fetch only the TAIL of ONE
+    project's stream — must never leak another project's rows, and must never re-return rows
+    already folded."""
+    from packages.ledger.event_store_pg import PgEventStore
+
+    alice = PgEventStore.from_env(project_id="alice_file")
+    bob = PgEventStore.from_env(project_id="bob_file")
+    alice.append_genesis(base_ledger, actor="system", ts="t0")
+    bob.append_genesis(base_ledger, actor="system", ts="t0")
+    alice.append_mutation(ParameterDelta(target_node="instances.root.params.skin_thickness_mm",
+                                         requested_value=9.0), actor="user", ts="t1")
+
+    assert [e.seq for e in alice._events_since(0)] == [0, 1]
+    assert [e.seq for e in alice._events_since(1)] == [1]
+    assert alice._events_since(2) == []
+    assert bob._events_since(0) == bob._all_events()  # unaffected by Alice's second event
+
+
+def test_pg_store_fold_cache_reflects_new_events_across_reads(shared_table, base_ledger):
+    from packages.ledger.event_store_pg import PgEventStore
+
+    store = PgEventStore.from_env(project_id="proj")
+    store.append_genesis(base_ledger, actor="system", ts="t0")
+    store.append_mutation(ParameterDelta(target_node="instances.root.params.skin_thickness_mm",
+                                         requested_value=3.0), actor="user", ts="t1")
+    assert store.fold().instances["root"].params["skin_thickness_mm"].value == 3.0
+
+    store.append_mutation(ParameterDelta(target_node="instances.root.params.skin_thickness_mm",
+                                         requested_value=4.0), actor="user", ts="t2")
+    assert store.fold().instances["root"].params["skin_thickness_mm"].value == 4.0
 
 
 def test_project_id_threads_through_from_transport_file_state(monkeypatch):
