@@ -33,6 +33,9 @@ _DDL = [
         verdict_json TEXT NOT NULL, created TIMESTAMPTZ DEFAULT now())""",
     """CREATE TABLE IF NOT EXISTS optimize_results (
         project_id TEXT PRIMARY KEY, result_json TEXT NOT NULL, created TIMESTAMPTZ DEFAULT now())""",
+    """CREATE TABLE IF NOT EXISTS job_status (
+        project_id TEXT PRIMARY KEY, status TEXT NOT NULL, message TEXT,
+        updated TIMESTAMPTZ DEFAULT now())""",
 ]
 
 
@@ -123,3 +126,33 @@ class PgVerdictStore:
             "SELECT result_json FROM optimize_results WHERE project_id = %s", (project_id,)
         ).fetchone()
         return json.loads(row[0]) if row else None
+
+
+class PgJobStatusStore:
+    """Durable job-status channel across the web-process/worker-process boundary (2026-07-15 fix —
+    see this module's docstring): the web process writes "queued" right after `.send()`, the worker
+    writes "running"/"done"/"failed" as it actually executes, and any poller (in either process, or
+    a fresh one after a restart) reads the SAME row — unlike the previous in-process `publish`
+    callback, which the worker's own status updates never reached the web process at all."""
+
+    def __init__(self, dsn: str | None = None) -> None:
+        self.conn = _connect(dsn)
+
+    @classmethod
+    def from_env(cls) -> "PgJobStatusStore":
+        return cls()
+
+    def put_status(self, project_id: str, status: str, message: str | None = None) -> None:
+        self.conn.execute(
+            "INSERT INTO job_status (project_id, status, message) VALUES (%s, %s, %s) "
+            "ON CONFLICT (project_id) DO UPDATE SET status = EXCLUDED.status, "
+            "message = EXCLUDED.message, updated = now()",
+            (project_id, status, message),
+        )
+
+    def get_status(self, project_id: str):
+        from packages.truth_plane.verdict_store import JobStatus
+        row = self.conn.execute(
+            "SELECT status, message FROM job_status WHERE project_id = %s", (project_id,)
+        ).fetchone()
+        return JobStatus(status=row[0], message=row[1]) if row else None

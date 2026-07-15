@@ -41,7 +41,7 @@ from packages.ledger.fingerprint import fingerprint
 from packages.ledger.gates import evaluate_export_gates
 from packages.ledger.requirements import VerificationMatrix
 from packages.truth_plane.analysis import analyze_in_subprocess, optimize_in_subprocess  # module-level for monkeypatch
-from packages.truth_plane.verdict_store import InMemoryVerdictStore
+from packages.truth_plane.verdict_store import InMemoryJobStatusStore, InMemoryVerdictStore
 from packages.ledger.parameter import LockState, ParameterDef
 from packages.ledger.schema import (
     Domains,
@@ -233,6 +233,16 @@ def _make_verdict_store():
     return InMemoryVerdictStore()
 
 
+def _make_status_store():
+    # a queued /analyze or /optimize job's progress must be readable by the WEB process even though
+    # the actor body runs in a separate WORKER process (2026-07-15 fix — packages/truth_plane/jobs.py's
+    # module docstring) — same in-mem/Postgres split as the verdict store, for the same reason.
+    if os.environ.get("DATABASE_URL"):
+        from packages.ledger.event_store_pg import PgJobStatusStore
+        return PgJobStatusStore.from_env()
+    return InMemoryJobStatusStore()
+
+
 def _make_event_log(project_id: str):
     if os.environ.get("DATABASE_URL"):
         from packages.ledger.event_store_pg import PgEventStore
@@ -404,6 +414,7 @@ class SessionState:
 
     def __init__(self) -> None:
         self.verdict_store = _make_verdict_store()   # SHARED across files, keyed per-file by file_id
+        self.status_store = _make_status_store()      # SHARED — a queued job's progress, same keying
         self.strategic = StrategicAgent()             # SHARED — stateless heuristic parser
         self._next_untitled = 1
         first = self._make_file()
@@ -919,8 +930,14 @@ def create_app() -> FastAPI:
         if cached:
             return {"status": "done", "cached": True, "verdict": dataclasses.asdict(cached)}
         if os.environ.get("REDIS_URL"):  # durable queued path (worker + Postgres) — poll /analyze/status
+            # NOTE: no jobs.configure() here — the actor body runs in the SEPARATE worker process,
+            # which already configured its own store/status_store once at startup
+            # (packages/truth_plane/worker.py); calling configure() in THIS (web) process has no
+            # effect on it (2026-07-15 — removed dead code that suggested otherwise). Recording
+            # "queued" here IS meaningful: it's the only signal a poller gets before the worker
+            # actually picks the job up.
             from packages.truth_plane import jobs
-            jobs.configure(store=state.verdict_store, publish=None)
+            state.status_store.put_status(state.project_id, "queued")
             jobs.run_fs_analysis.send(state.project_id, params, material, load_n, subsystem_name, cut_features)
             return {"status": "queued"}
         # inline path: run the real FS (in a child process via the threadpool) — needs solvers
@@ -962,8 +979,10 @@ def create_app() -> FastAPI:
         cut_features = [f.model_dump(mode="json") for f in inst.cut_features]
         candidates = [c for c in (2.0, 3.0, 4.0, 5.0) if lo <= c <= hi]
         if os.environ.get("REDIS_URL"):  # durable queued path (worker) — poll /optimize/status
+            # see /analyze's identical comment: no jobs.configure() here, it has no effect on the
+            # separate worker process; state.status_store.put_status is the meaningful part.
             from packages.truth_plane import jobs
-            jobs.configure(store=state.verdict_store, publish=None)
+            state.status_store.put_status(state.project_id, "queued")
             jobs.run_optimization.send(state.project_id, candidates, base_params, "PLA", load_n, fs_floor,
                                        inst.subsystem_type, cut_features)
             return {"status": "queued"}
@@ -988,7 +1007,13 @@ def create_app() -> FastAPI:
 
     @router.get("/optimize/status")
     def optimize_status():
-        return {"result": state.verdict_store.get_optimize(state.project_id)}
+        # job_status/job_message (2026-07-15) surface a FAILED queued job durably — before this, a
+        # crashed worker job left `result` None forever, indistinguishable from "still running", so
+        # a poller (or a human) had no way to tell "give it more time" from "this will never finish".
+        job_status = state.status_store.get_status(state.project_id)
+        return {"result": state.verdict_store.get_optimize(state.project_id),
+                "job_status": job_status.status if job_status else None,
+                "job_message": job_status.message if job_status else None}
 
     @router.get("/analyze/status")
     def analyze_status(material: str = "PLA", load_n: float = 40.0):
@@ -1000,7 +1025,10 @@ def create_app() -> FastAPI:
                            fingerprint=fingerprint(), geometry_params=gp,
                            instance_id=inst.id if inst is not None else None,
                            material=material, load_n=load_n)
-        return {"current": dataclasses.asdict(v) if v else None}
+        job_status = state.status_store.get_status(state.project_id)
+        return {"current": dataclasses.asdict(v) if v else None,
+                "job_status": job_status.status if job_status else None,
+                "job_message": job_status.message if job_status else None}
 
     @router.post("/signoff")
     def signoff(reviewer: str = "engineer"):

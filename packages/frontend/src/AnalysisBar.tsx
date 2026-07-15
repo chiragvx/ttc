@@ -5,6 +5,10 @@ export interface AnalysisState {
   fs: number | null;
   solverSeconds: number | null;
   exportStatus: string; // EXPORT_BLOCKED | EXPORT_ELIGIBLE
+  // a queued job's durably-recorded failure reason (2026-07-15) — surfaced by /analyze/status and
+  // /optimize/status's job_message field so a crashed worker job reads as an actual error instead of
+  // silently timing out after the polling loop's full 60-90s budget with no explanation at all.
+  errorMessage?: string | null;
 }
 
 export function AnalysisBar({
@@ -36,7 +40,9 @@ export function AnalysisBar({
         </span>
       )}
       {state.status === "stale" && <span style={{ color: "#d29922" }}>parameters changed — re-run analysis</span>}
-      {state.status === "error" && <span style={{ color: "#f85149" }}>analysis failed</span>}
+      {state.status === "error" && (
+        <span style={{ color: "#f85149" }}>{state.errorMessage || "analysis failed"}</span>
+      )}
       <span style={{ flex: 1 }} />
       <span style={{ color: eligible ? "#3fb950" : "#8b949e" }}>
         Export: <b>{eligible ? "ELIGIBLE" : "blocked"}</b>

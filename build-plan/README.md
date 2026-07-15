@@ -4,7 +4,7 @@ Master index for turning the `prd-27-8.14` vision into a real product, engineere
 (dev-time) and powered by Claude (runtime).
 
 **Last updated:** 2026-07-15
-**Current phase:** Phases 0–4 implemented & green (**526 backend tests pass on Windows** — `python -m
+**Current phase:** Phases 0–4 implemented & green (**530 backend tests pass on Windows** — `python -m
 pytest tests -q`, 27 skip on dependency-gated markers, more in the Linux container) and the **full
 wedge stack runs end-to-end on `docker compose up`**. Spike 4 fully PASSES (deflection-validated FS +
 19/19 auto-mesh). Built across the phases: ledger + rules validator + event store/replay (in-mem + SQL
@@ -69,14 +69,30 @@ after cutting and returns the honest "unknown" `analyze_geometry` already gives 
 case whenever a cut compromises either face. Verified end-to-end with a real bracket + an
 edge-intersecting cut feature that the block happens BEFORE `evaluate_fs`/gmsh is ever imported.
 
-**Still not fixed** (ranked roughly by severity): Dramatiq jobs are at-most-once with invisible
-failure (no retry, no failure surfaced to the poller); the stated goal's load (e.g. "holds 200 N")
-never reaches the solver — `HeuristicStrategicProvider` only parses FS/mass/hours tokens, so the
-enforced FS floor can diverge from what the user actually asked for even though the verdict-cache fix
-above at least stops the WRONG case's verdict from satisfying the request; full event-log refold +
-per-event deep-copy on every read (no snapshotting) will not scale past a demo-length session; zero
-frontend tests; no TLS anywhere in the stack, so the session cookie has no `Secure` flag (matches
-existing deployment posture — add both together when TLS termination lands).
+**2026-07-15 — Dramatiq job status now crosses the process boundary:** a queued `/analyze`/`/optimize`
+job's progress used to live only in an in-process `publish` callback — which could never reach the
+web process from the separate Dramatiq worker process in the actual compose deployment, so a crashed
+job left every poller waiting forever with zero signal anything went wrong (confirmed: the previous
+`jobs.configure(store=state.verdict_store, publish=None)` calls inside the web process's `/analyze`/
+`/optimize` handlers were dead code — the actor body only ever runs in the worker process, which
+configures its OWN globals once at startup). Replaced with a durable, `project_id`-keyed
+`JobStatusStore` (in-mem for local dev, a new Postgres `job_status` table in compose — same split as
+the verdict store): the web process now writes `"queued"` right after enqueueing, the worker writes
+`"running"`/`"done"`/`"failed"` (+ the exception message on failure) as it actually executes, and
+`/analyze/status`/`/optimize/status` surface `job_status`/`job_message` alongside the existing
+`current`/`result` fields. The frontend's polling loops now stop immediately on a `"failed"` status
+instead of silently burning their full 90s/240s budget before giving up unexplained
+(`AnalysisBar`'s error line now shows the actual failure message, not just "analysis failed").
+`max_retries=0` is unchanged — a deterministic geometry/FEA failure would just fail identically again;
+this fix is about surfacing failure honestly, not retrying it.
+
+**Still not fixed** (ranked roughly by severity): the stated goal's load (e.g. "holds 200 N") never
+reaches the solver — `HeuristicStrategicProvider` only parses FS/mass/hours tokens, so the enforced FS
+floor can diverge from what the user actually asked for even though the verdict-cache fix above at
+least stops the WRONG case's verdict from satisfying the request; full event-log refold + per-event
+deep-copy on every read (no snapshotting) will not scale past a demo-length session; zero frontend
+tests; no TLS anywhere in the stack, so the session cookie has no `Secure` flag (matches existing
+deployment posture — add both together when TLS termination lands).
 
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had

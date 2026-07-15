@@ -84,6 +84,52 @@ def test_analyze_status_reflects_current_geometry(monkeypatch):
     assert c.get("/analyze/status").json()["current"]["factor_of_safety"] == 4.0
 
 
+def test_queued_analyze_records_status_durably_across_the_process_boundary(monkeypatch):
+    """2026-07-15 fix: before this, a queued job's status lived only in a `publish` callback that
+    could never reach the web process from the separate worker process — a poller had no way to
+    tell 'still running' apart from 'crashed with no signal at all'. The web process now writes
+    'queued' itself right after enqueueing (verified here); packages/backend/test_jobs.py verifies
+    the worker side writes 'running'/'done'/'failed' onto the SAME durable store."""
+    # import BEFORE setting REDIS_URL: jobs.py picks its broker (Redis vs Stub) ONCE at import time,
+    # from whatever REDIS_URL was set to then — importing first guarantees a StubBroker (no real
+    # `redis` package needed) regardless of which order pytest happens to collect test files in.
+    import packages.truth_plane.jobs as jobs_module
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("REDIS_URL", "redis://fake/0")  # makes the ROUTE take the queued branch
+    monkeypatch.setattr(jobs_module.run_fs_analysis, "send", lambda *a, **k: None)  # don't actually enqueue
+
+    c = TestClient(app_module.create_app())
+    c.post("/instances", json={"subsystem_type": "bracket", "instance_id": "root"})
+
+    assert c.get("/analyze/status").json()["job_status"] is None  # nothing queued yet
+
+    r = c.post("/analyze").json()
+    assert r["status"] == "queued"
+
+    status = c.get("/analyze/status").json()
+    assert status["current"] is None       # no verdict yet -- the job hasn't actually run
+    assert status["job_status"] == "queued"  # but the poller can tell it WAS accepted, not lost
+
+
+def test_analyze_status_surfaces_a_failed_queued_job(monkeypatch):
+    """Simulates what the worker process would have durably recorded on a crash -- writes directly
+    to the SAME status_store the web process reads, exactly like a real worker (a separate process)
+    would via the shared Postgres table in compose."""
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(app_module, "analyze_in_subprocess", _fake_analyze)
+    app = app_module.create_app()
+    c = TestClient(app)
+    c.post("/instances", json={"subsystem_type": "bracket", "instance_id": "root"})
+
+    session = app.state.sessions.only()
+    session.status_store.put_status(session.project_id, "failed", message="solver exploded")
+
+    status = c.get("/analyze/status").json()
+    assert status["job_status"] == "failed"
+    assert status["job_message"] == "solver exploded"
+
+
 def _fake_optimize(candidates, base_params, material_name, load_n, fs_floor, timeout_s=600.0,
                    subsystem_name="bracket", cut_features=None):
     merged = {**base_params, SKIN: 4.0}

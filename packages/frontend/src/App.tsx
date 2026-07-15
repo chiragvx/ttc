@@ -285,17 +285,24 @@ export default function App() {
   };
 
   const runAnalyze = async () => {
-    setAnalysis((a) => ({ ...a, status: "running" }));
+    setAnalysis((a) => ({ ...a, status: "running", errorMessage: null }));
     try {
       const r = await analyze(40);
       if (r.status === "error") {
-        setAnalysis((a) => ({ ...a, status: "error" }));
+        setAnalysis((a) => ({ ...a, status: "error", errorMessage: r.message ?? null }));
         return;
       }
       let verdict = r.verdict ?? null;
+      // job_status/job_message (2026-07-15) let a durably-recorded worker crash stop this loop
+      // immediately instead of silently burning the full 90s budget before giving up unexplained.
       for (let i = 0; r.status === "queued" && !verdict && i < 60; i++) {
         await sleep(1500);
-        verdict = (await analyzeStatus(40)).current;
+        const s = await analyzeStatus(40);
+        verdict = s.current;
+        if (s.job_status === "failed") {
+          setAnalysis((a) => ({ ...a, status: "error", errorMessage: s.job_message ?? "analysis failed" }));
+          return;
+        }
       }
       const e = await exportCheck();
       setAnalysis({
@@ -319,10 +326,17 @@ export default function App() {
         return;
       }
       let result = r.status === "done" ? r : null; // inline (dev) returns the result directly
+      // job_status/job_message (2026-07-15) let a durably-recorded worker crash stop this loop
+      // immediately instead of silently burning the full 240s budget before giving up unexplained.
       for (let i = 0; r.status === "queued" && !result && i < 120; i++) {
         await sleep(2000); // durable (compose) path: the worker runs the sweep, poll for it
         const s = await optimizeStatus();
         if (s.result) result = s.result;
+        if (s.job_status === "failed") {
+          setOptimizeResult({ variants: [], bestValue: null, bestMass: null, paramName: null });
+          setAnalysis((a) => ({ ...a, status: "error", errorMessage: s.job_message ?? "optimize failed" }));
+          return;
+        }
       }
       if (!result || result.best_value == null) {
         setOptimizeResult({ variants: result?.variants ?? [], bestValue: null, bestMass: null, paramName: result?.param_name ?? null });
