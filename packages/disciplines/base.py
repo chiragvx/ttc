@@ -12,7 +12,7 @@ See build-plan/reference/DOMAIN_TAXONOMY.md for the full disciplines × subsyste
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Union
 
 if TYPE_CHECKING:
     from packages.ledger.schema import MasterParametricLedger
@@ -43,7 +43,12 @@ def _no_gate(ledger: "MasterParametricLedger") -> GateFinding:
 class DisciplineSpec:
     name: str
     description: str
-    knowledge_fragment: str
+    # A plain string (the common case) OR a zero-arg callable returning one — 2026-07-15, so a
+    # discipline whose fragment cites live reference data (packages/catalog) can rebuild it at PROMPT
+    # time instead of freezing whatever packages.catalog held at IMPORT time (module import happens
+    # long before packages/catalog/bootstrap.py::apply_to_live_app() ever runs). See
+    # packages/disciplines/__init__.py::active_discipline_fragments, the one place this is resolved.
+    knowledge_fragment: Union[str, Callable[[], str]]
     owned_params: tuple[str, ...] = ()
     # subset of owned_params that changes the analyzed geometry (feeds the verdict signature)
     geometry_params: tuple[str, ...] = ()

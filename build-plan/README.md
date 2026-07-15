@@ -4,7 +4,7 @@ Master index for turning the `prd-27-8.14` vision into a real product, engineere
 (dev-time) and powered by Claude (runtime).
 
 **Last updated:** 2026-07-15
-**Current phase:** Phases 0–4 implemented & green (**566 backend tests pass on Windows** — `python -m
+**Current phase:** Phases 0–4 implemented & green (**576 backend tests pass on Windows** — `python -m
 pytest tests -q`, 27 skip on dependency-gated markers, more in the Linux container) and the **full
 wedge stack runs end-to-end on `docker compose up`**. Spike 4 fully PASSES (deflection-validated FS +
 19/19 auto-mesh). Built across the phases: ledger + rules validator + event store/replay (in-mem + SQL
@@ -121,8 +121,19 @@ reassignment, no I/O in either package — `packages/ledger`'s "no I/O" rule sta
 (the separate Dramatiq process where cost/thermal grounding actually executes — easy to miss, and
 originally missed in the first draft of this plan). `python -m packages.catalog.seed` /
 `make seed-catalog` pushes the JSON into Postgres, upserting + pruning so checked-in JSON always
-wins on reseed. `manufacturing.py`'s clearance-hole table is seeded but not yet wired live — it's
-baked into LLM-prompt prose, and templating that dynamically is separate, larger scope.
+wins on reseed.
+
+**2026-07-15 — the DFM prompt fragment now reads from the catalog live:** `manufacturing.py`'s
+clearance-hole table used to be a string frozen at module-import time (before `apply_to_live_app()`
+ever runs). `DisciplineSpec.knowledge_fragment` can now be a zero-arg callable, resolved at
+PROMPT-BUILD time (`packages/disciplines/__init__.py::_fragment_text`) instead of import time —
+`manufacturing.py`'s fragment is one now, sourcing the clearance-hole quick-ref and the *advisory*
+recommended wall thickness from `packages.catalog`. The *hard* min-wall floor quoted in the same
+sentence deliberately still reads `packages.ledger.apply.MIN_WALL_MM` directly, never the catalog's
+own (informational-only) copy of that number — so the prompt can never claim an enforced floor that
+doesn't match what the export gate actually checks. Verified live: overriding the catalog's
+clearance-hole dataset changes what `active_discipline_fragments()` (the real prompt-consumption
+path) returns, while the min-wall sentence stays pinned regardless of what the catalog says.
 
 **Still not fixed** (ranked roughly by severity): the stated goal's load (e.g. "holds 200 N") never
 reaches the solver — `HeuristicStrategicProvider` only parses FS/mass/hours tokens, so the enforced FS
@@ -130,7 +141,10 @@ floor can diverge from what the user actually asked for even though the verdict-
 least stops the WRONG case's verdict from satisfying the request; zero frontend tests; no TLS anywhere
 in the stack, so the session cookie has no `Secure` flag (matches existing
 deployment posture — add both together when TLS termination lands); no external-standards sourcing
-yet for the new catalog (deliberately deferred per this session's own scope).
+yet for the new catalog (deliberately deferred per this session's own scope); structures.py/thermal.py's
+own knowledge fragments still hand-type their numbers (e.g. structures.py's stiffness-lever param
+names, thermal.py's PLA/PETG/ABS/AL6061/STEEL service-temp ladder) — only manufacturing's fragment
+is catalog-wired so far.
 
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had

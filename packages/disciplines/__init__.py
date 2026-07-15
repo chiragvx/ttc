@@ -59,9 +59,18 @@ def all_geometry_params(ledger: MasterParametricLedger) -> tuple[str, ...]:
     return tuple(out)
 
 
+def _fragment_text(spec: DisciplineSpec) -> str:
+    """knowledge_fragment is either a plain string or a zero-arg callable (2026-07-15, see
+    DisciplineSpec's own docstring) — resolved HERE, at prompt-build time, so a discipline whose
+    fragment cites packages.catalog reference data reflects whatever is live right now, not whatever
+    was live at module-import time."""
+    frag = spec.knowledge_fragment
+    return frag() if callable(frag) else frag
+
+
 def active_discipline_fragments(ledger: MasterParametricLedger) -> str:
     """Concatenated knowledge fragments for the disciplines live on this ledger (for the LLM prompt)."""
-    return "\n\n".join(s.knowledge_fragment for s in active_disciplines(ledger))
+    return "\n\n".join(_fragment_text(s) for s in active_disciplines(ledger))
 
 
 # Side-effect imports: each module calls register() on load. Order = display order.

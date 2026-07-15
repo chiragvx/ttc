@@ -8,6 +8,7 @@ import pytest
 
 from packages.catalog.models import MaterialRecord, ReferenceDataset, ReferenceEntry
 from packages.disciplines import cost as cost_module
+from packages.disciplines import manufacturing as manufacturing_module
 from packages.ledger import bom
 
 
@@ -16,6 +17,7 @@ def _reset_overrides():
     yield
     bom.reset_material_db()
     cost_module.reset_machine_rate()
+    manufacturing_module.reset_dfm_reference()
 
 
 class _FakeStore:
@@ -103,3 +105,48 @@ def test_empty_materials_leaves_the_default(monkeypatch):
     _patch_store(monkeypatch, _FakeStore(materials={}))
     apply_to_live_app()
     assert bom.MATERIAL_DB == bom._DEFAULT_MATERIAL_DB
+
+
+def test_apply_overrides_manufacturing_dfm(monkeypatch):
+    from packages.catalog.bootstrap import apply_to_live_app
+
+    fake = _FakeStore(datasets={
+        "manufacturing.clearance_holes_mm": ReferenceDataset(
+            key="manufacturing.clearance_holes_mm", domain="manufacturing",
+            entries=[ReferenceEntry(entry_key="M5", value_numeric=5.5)]),
+        "manufacturing.wall_thickness_mm": ReferenceDataset(
+            key="manufacturing.wall_thickness_mm", domain="manufacturing",
+            entries=[ReferenceEntry(entry_key="recommended_wall_load_bearing", value_numeric=3.3),
+                    ReferenceEntry(entry_key="min_wall", value_numeric=0.5)]),  # must NOT be applied
+    })
+    _patch_store(monkeypatch, fake)
+
+    apply_to_live_app()
+    text = manufacturing_module._fragment()
+    assert "M5→5.5" in text
+    assert "≥ 3.3 mm recommended" in text
+    # the hard floor is NEVER sourced from the catalog, even though this dataset carries a
+    # (deliberately different, to prove it's ignored) min_wall entry
+    from packages.ledger.apply import MIN_WALL_MM
+    assert f"Minimum wall is {MIN_WALL_MM:g} mm" in text
+
+
+def test_manufacturing_dfm_failure_does_not_block_the_other_overrides(monkeypatch):
+    from packages.catalog.bootstrap import apply_to_live_app
+
+    class _RaisingManufacturingStore(_FakeStore):
+        def dataset(self, key):
+            if key.startswith("manufacturing."):
+                raise RuntimeError("boom")
+            return super().dataset(key)
+
+    fake = _RaisingManufacturingStore(datasets={
+        "cost.machine_rates_usd_per_hr": ReferenceDataset(
+            key="cost.machine_rates_usd_per_hr", domain="cost",
+            entries=[ReferenceEntry(entry_key="fdm_default", value_numeric=11.0)]),
+    })
+    _patch_store(monkeypatch, fake)
+
+    apply_to_live_app()  # must not raise
+    assert cost_module.MACHINE_RATE_USD_PER_HR == 11.0  # unaffected by the manufacturing failure
+    assert "M3→3.4" in manufacturing_module._fragment()  # manufacturing fell back to its own default

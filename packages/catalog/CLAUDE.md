@@ -37,24 +37,32 @@ idempotent `CREATE ... IF NOT EXISTS` DDL run at connect time) — schema change
 
 ## Wiring into the live app
 
-`packages/ledger/bom.py::set_material_db()` / `packages/disciplines/cost.py::set_machine_rate()` are
-the injection seams — pure reassignment, no I/O in either of those packages themselves.
-`bootstrap.py::apply_to_live_app()` is the ONE function that calls `get_store()` and applies both
-overrides, each independently fault-tolerant (a catalog failure never crashes the app or blocks the
-other override — the hardcoded defaults simply stand).
+`packages/ledger/bom.py::set_material_db()`, `packages/disciplines/cost.py::set_machine_rate()`, and
+`packages/disciplines/manufacturing.py::set_dfm_reference()` are the injection seams — pure
+reassignment, no I/O in any of those packages themselves. `bootstrap.py::apply_to_live_app()` is the
+ONE function that calls `get_store()` and applies all three overrides, each independently
+fault-tolerant (a catalog failure never crashes the app or blocks the OTHER overrides — the
+hardcoded defaults simply stand).
 
-**Must be called from every process that reads `material()`/`MACHINE_RATE_USD_PER_HR`** — today that
-is BOTH `packages/transport/app.py::create_app()` (the API process) AND
-`packages/truth_plane/worker.py` (the separate Dramatiq worker process, where `analyze_geometry`'s
-cost/thermal grounding actually executes). Adding a third process that touches these disciplines
-needs the same call.
+**Must be called from every process that reads `material()` / `MACHINE_RATE_USD_PER_HR` / the
+manufacturing knowledge fragment** — today that is BOTH `packages/transport/app.py::create_app()`
+(the API process — the only one that builds LLM prompts, so the only one where the manufacturing
+override actually matters) AND `packages/truth_plane/worker.py` (the separate Dramatiq worker
+process, where `analyze_geometry`'s cost/thermal grounding executes). Calling all three from both
+processes is harmless even where one is a no-op (`apply_to_live_app()`'s own contract: "call me from
+every process, I'll apply whatever's actually relevant there"). Adding a third process that touches
+any of these needs the same call.
 
-## What's seeded but NOT yet wired
-
-`manufacturing.clearance_holes_mm` / `manufacturing.wall_thickness_mm` are migrated into the
-database but `packages/disciplines/manufacturing.py`'s knowledge fragment still hand-types them as
-prose for the LLM prompt. Templating that fragment to pull live values from the catalog is a
-separate, larger scope (prompt-templating work) — deliberately deferred, not forgotten.
+`manufacturing.py`'s knowledge fragment is a CALLABLE (`DisciplineSpec.knowledge_fragment: str |
+Callable[[], str]`), resolved at PROMPT-BUILD time by
+`packages/disciplines/__init__.py::_fragment_text` — not a string frozen at module-import time
+(which would run before `apply_to_live_app()` ever executes). The clearance-hole quick-ref and the
+*advisory* recommended wall thickness are catalog-sourced this way; the *hard* min-wall floor quoted
+in the same sentence deliberately is NOT — it reads `packages.ledger.apply.MIN_WALL_MM` directly (the
+actually-enforced constant), so the prompt can never claim a floor that doesn't match real
+export-gate enforcement. `structures.py`/`thermal.py`'s own fragments are still static strings —
+not yet wired to the catalog (same "separate, larger scope" reasoning; nothing structural blocks it,
+just not done yet).
 
 ## Adding a new category of reference data
 
