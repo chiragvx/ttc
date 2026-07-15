@@ -61,6 +61,8 @@ packages/
   subsystems/        the part catalog (32 registered types) — ParamSpec/Subsystem registry, compose
                      helpers, assembly composition, generic cut features, pickable-feature layer
   disciplines/       closed-form structures/manufacturing/thermal/cost knowledge fed to the LLM prompt
+  catalog/           local, Supabase-ready reference-data store (materials, DFM/cost lookups) —
+                     seed-file default, Postgres tier for compose/hosted Supabase later
   truth_plane/analysis.py  grounded FS pipeline generalized to any fea_eligible subsystem
   truth_plane/regen/    determinism probe + tagged templated generator (Spike 1 fallback)
   truth_plane/solvers/  validated CalculiX FS pipeline + print estimator (Linux)
@@ -80,7 +82,8 @@ docker/              Dockerfile.dev + Dockerfile.app + README (canonical Linux k
 constraints/         kernel-linux.txt (pinned build123d/OCCT/gmsh/CalculiX toolchain)
 .devcontainer/       VS Code dev container -> the Linux image
 docker-compose.yml   the full wedge stack (backend + worker + Postgres + Redis + frontend) in one command
-Makefile             make test | probe | fingerprint | image | ci | ci-determinism | spike4-smoke
+Makefile             make test | probe | fingerprint | image | ci | ci-determinism | spike4-smoke |
+                     seed-catalog
 build-plan/          program + phase trackers, spike kill-criteria, findings, reference docs
 prd-27-8.14/         the original source PRDs (vision; superseded by build-plan/reference/TECH_PLAN.md)
 ```

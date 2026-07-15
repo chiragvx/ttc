@@ -1,0 +1,19 @@
+{
+  "materials": [
+    {"name": "PLA", "density_g_per_mm3": 0.00124, "youngs_mod_mpa": 3500.0, "poisson": 0.36,
+     "yield_mpa": 50.0, "service_temp_c": 55.0, "cost_per_kg_usd": 22.0,
+     "source": "representative-2026-dev-default", "is_verified": false},
+    {"name": "PETG", "density_g_per_mm3": 0.00127, "youngs_mod_mpa": 2100.0, "poisson": 0.40,
+     "yield_mpa": 50.0, "service_temp_c": 70.0, "cost_per_kg_usd": 25.0,
+     "source": "representative-2026-dev-default", "is_verified": false},
+    {"name": "ABS", "density_g_per_mm3": 0.00104, "youngs_mod_mpa": 2200.0, "poisson": 0.35,
+     "yield_mpa": 40.0, "service_temp_c": 90.0, "cost_per_kg_usd": 23.0,
+     "source": "representative-2026-dev-default", "is_verified": false},
+    {"name": "AL6061", "density_g_per_mm3": 0.00270, "youngs_mod_mpa": 68900.0, "poisson": 0.33,
+     "yield_mpa": 276.0, "service_temp_c": 200.0, "cost_per_kg_usd": 8.0,
+     "source": "representative-2026-dev-default", "is_verified": false, "properties": {"note": "raw stock; machining is extra"}},
+    {"name": "STEEL", "density_g_per_mm3": 0.00785, "youngs_mod_mpa": 210000.0, "poisson": 0.30,
+     "yield_mpa": 250.0, "service_temp_c": 400.0, "cost_per_kg_usd": 2.0,
+     "source": "representative-2026-dev-default", "is_verified": false, "properties": {"note": "raw stock; machining is extra"}}
+  ]
+}

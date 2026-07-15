@@ -1,0 +1,21 @@
+{
+  "datasets": [
+    {"key": "manufacturing.clearance_holes_mm", "domain": "manufacturing",
+     "description": "Clearance-hole diameter quick reference for metric fastener sizes (FDM/FFF prints)",
+     "unit": "mm", "source": "representative-2026-dev-default", "version": "1",
+     "entries": [
+       {"entry_key": "M3", "value_numeric": 3.4},
+       {"entry_key": "M4", "value_numeric": 4.5},
+       {"entry_key": "M5", "value_numeric": 5.4},
+       {"entry_key": "M6", "value_numeric": 6.4},
+       {"entry_key": "M8", "value_numeric": 8.4}
+     ]},
+    {"key": "manufacturing.wall_thickness_mm", "domain": "manufacturing",
+     "description": "Wall thickness floors for FDM/FFF printed parts",
+     "unit": "mm", "source": "representative-2026-dev-default", "version": "1",
+     "entries": [
+       {"entry_key": "min_wall", "value_numeric": 0.8, "notes": "hard floor, enforced in packages/ledger/apply.py::MIN_WALL_MM"},
+       {"entry_key": "recommended_wall_load_bearing", "value_numeric": 1.2}
+     ]}
+  ]
+}

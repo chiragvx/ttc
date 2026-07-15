@@ -3,7 +3,7 @@
 
 IMAGE ?= gtc-dev
 
-.PHONY: test probe fingerprint image shell ci ci-determinism spike4-smoke
+.PHONY: test probe fingerprint image shell ci ci-determinism spike4-smoke seed-catalog
 
 # --- host (runs on the Windows dev box too) ---
 test:
@@ -14,6 +14,11 @@ probe:
 
 fingerprint:
 	python scripts/toolchain_fingerprint.py --json
+
+# Push packages/catalog/seed_data/*.json into Postgres (materials, DFM/cost reference data) —
+# requires DATABASE_URL (e.g. `docker compose up -d postgres` first). Idempotent.
+seed-catalog:
+	python -m packages.catalog.seed
 
 # --- Linux kernel/solver image ---
 image:

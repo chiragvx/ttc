@@ -7,10 +7,16 @@ importing `jobs`.
 
 from __future__ import annotations
 
+from packages.catalog.bootstrap import apply_to_live_app
 from packages.ledger.event_store_pg import PgJobStatusStore, PgVerdictStore
 from packages.truth_plane import jobs
 
 jobs.configure(store=PgVerdictStore.from_env(), status_store=PgJobStatusStore.from_env())
+
+# Required here, not just in packages/transport/app.py::create_app() — analyze_geometry (via
+# packages/disciplines/{cost,thermal}.py's material() calls) runs INSIDE this worker process, a
+# separate process from the API server that never touches create_app() (2026-07-15).
+apply_to_live_app()
 
 # re-export so `dramatiq packages.truth_plane.worker` discovers the actors
 run_fs_analysis = jobs.run_fs_analysis

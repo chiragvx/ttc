@@ -19,9 +19,26 @@ from packages.disciplines.base import DisciplineSpec, GateFinding
 from packages.ledger.bom import material
 from packages.ledger.schema import MasterParametricLedger
 
-# Dev-default machine rate (USD/hour). At L1 this becomes a per-project param or is derived from
-# a per-material rate table (FDM ≠ CNC ≠ SLA). Until then, one honest number.
-MACHINE_RATE_USD_PER_HR: float = 2.0
+# Dev-default machine rate (USD/hour) — the hardcoded FALLBACK; `set_machine_rate` (2026-07-15) lets
+# packages/catalog/bootstrap.py::apply_to_live_app() override it from the `cost.machine_rates_usd_per_hr`
+# reference dataset at process startup (both the API process and the Dramatiq worker process), same
+# "hardcoded default, optionally overridden, never crashes on a missing source" shape as
+# packages/ledger/bom.py::MATERIAL_DB. At L1 this becomes a per-project param or is derived from a
+# per-material/per-process rate table (FDM ≠ CNC ≠ SLA) — the reference dataset already models it as
+# a keyed lookup (today's single "fdm_default" entry) for exactly that future expansion.
+_DEFAULT_MACHINE_RATE_USD_PER_HR: float = 2.0
+MACHINE_RATE_USD_PER_HR: float = _DEFAULT_MACHINE_RATE_USD_PER_HR
+
+
+def set_machine_rate(rate_usd_per_hr: float) -> None:
+    global MACHINE_RATE_USD_PER_HR
+    MACHINE_RATE_USD_PER_HR = rate_usd_per_hr
+
+
+def reset_machine_rate() -> None:
+    global MACHINE_RATE_USD_PER_HR
+    MACHINE_RATE_USD_PER_HR = _DEFAULT_MACHINE_RATE_USD_PER_HR
+
 
 _FRAGMENT = """\
 ## Discipline: Cost (analytic $ estimate — L0)

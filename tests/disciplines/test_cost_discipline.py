@@ -5,7 +5,8 @@ from __future__ import annotations
 import pytest
 
 from packages.disciplines import all_discipline_findings, get_discipline
-from packages.disciplines.cost import MACHINE_RATE_USD_PER_HR, cost_usd
+from packages.disciplines import cost as cost_module
+from packages.disciplines.cost import cost_usd
 from packages.ledger.bom import material
 from packages.ledger.gates import evaluate_export_gates
 from packages.subsystems import get_subsystem
@@ -43,7 +44,10 @@ def test_cost_formula_matches_material_and_time(base_ledger):
     v = get_subsystem("washer").volume_mm3(led)
     mat = material(led.domains.structure.material_profile)  # PLA
     mass_kg = mat.density_g_per_mm3 * v / 1000.0
-    expected = mass_kg * mat.cost_per_kg_usd + (v / 5.0 / 3600.0) * MACHINE_RATE_USD_PER_HR
+    # read the LIVE module value, not a `from ... import` snapshot — cost_module.MACHINE_RATE_USD_PER_HR
+    # is mutable global state since set_machine_rate() (2026-07-15); a stale imported copy would
+    # silently diverge from what cost_usd() itself reads if another test's override leaked in.
+    expected = mass_kg * mat.cost_per_kg_usd + (v / 5.0 / 3600.0) * cost_module.MACHINE_RATE_USD_PER_HR
     assert cost_usd(led) == pytest.approx(expected)
 
 
@@ -78,3 +82,26 @@ def test_gate_stays_quiet_when_within_budget(base_ledger):
     led = led.model_copy(update={"global_constraints": gc})
     reasons, _ = all_discipline_findings(led)
     assert not any("exceeds max_cost_usd" in r for r in reasons)
+
+
+def test_set_machine_rate_changes_cost_usd(base_ledger):
+    """packages/catalog/bootstrap.py's injection seam (2026-07-15) — cost_usd() reads the module
+    global at call time, so overriding it must actually change the computed cost."""
+    led = _seeded_active(base_ledger, "washer")
+    try:
+        before = cost_usd(led)
+        cost_module.set_machine_rate(cost_module.MACHINE_RATE_USD_PER_HR * 10.0)
+        after = cost_usd(led)
+        assert after > before
+    finally:
+        cost_module.reset_machine_rate()
+
+
+def test_reset_machine_rate_restores_the_hardcoded_default():
+    try:
+        cost_module.set_machine_rate(999.0)
+        assert cost_module.MACHINE_RATE_USD_PER_HR == 999.0
+        cost_module.reset_machine_rate()
+        assert cost_module.MACHINE_RATE_USD_PER_HR == cost_module._DEFAULT_MACHINE_RATE_USD_PER_HR
+    finally:
+        cost_module.reset_machine_rate()

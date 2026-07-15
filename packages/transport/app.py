@@ -601,6 +601,14 @@ class SessionManager:
 
 
 def create_app() -> FastAPI:
+    # Overrides packages/ledger/bom.py's MATERIAL_DB / packages/disciplines/cost.py's machine rate
+    # from packages/catalog (2026-07-15) if a reference-data source is configured — a no-op falling
+    # back to the hardcoded defaults on any failure (see bootstrap.py's own docstring). Also called
+    # from packages/truth_plane/worker.py, since analyze_geometry/cost/thermal also run in that
+    # SEPARATE process, which never touches create_app().
+    from packages.catalog.bootstrap import apply_to_live_app
+    apply_to_live_app()
+
     # FastAPI's own auto-generated /docs, /redoc, /openapi.json are registered directly on `app` at
     # construction time — BEFORE `router`'s auth dependency exists, and never wrapped by it (2026-07-15
     # audit finding: these leaked the full private route/schema surface, including internal request

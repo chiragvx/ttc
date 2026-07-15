@@ -1,0 +1,10 @@
+{
+  "datasets": [
+    {"key": "cost.machine_rates_usd_per_hr", "domain": "cost",
+     "description": "Machine time cost rate by process (L0 analytic estimate)",
+     "unit": "usd_per_hr", "source": "representative-2026-dev-default", "version": "1",
+     "entries": [
+       {"entry_key": "fdm_default", "value_numeric": 2.0, "notes": "current single global MACHINE_RATE_USD_PER_HR"}
+     ]}
+  ]
+}

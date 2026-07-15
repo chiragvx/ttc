@@ -1,0 +1,105 @@
+"""apply_to_live_app() — the one function that wires packages.catalog into the running app. Each
+override is independently fault-tolerant: a failure in the catalog store must never crash the app or
+block the OTHER override (packages/catalog/bootstrap.py's own docstring)."""
+
+from __future__ import annotations
+
+import pytest
+
+from packages.catalog.models import MaterialRecord, ReferenceDataset, ReferenceEntry
+from packages.disciplines import cost as cost_module
+from packages.ledger import bom
+
+
+@pytest.fixture(autouse=True)
+def _reset_overrides():
+    yield
+    bom.reset_material_db()
+    cost_module.reset_machine_rate()
+
+
+class _FakeStore:
+    def __init__(self, materials=None, datasets=None, raise_on="") -> None:
+        self._materials = materials or {}
+        self._datasets = datasets or {}
+        self._raise_on = raise_on
+
+    def materials(self):
+        if self._raise_on == "materials":
+            raise RuntimeError("boom")
+        return dict(self._materials)
+
+    def dataset(self, key):
+        if self._raise_on == "dataset":
+            raise RuntimeError("boom")
+        return self._datasets.get(key)
+
+
+def _patch_store(monkeypatch, store) -> None:
+    from packages.catalog import loader
+    monkeypatch.setattr(loader, "get_store", lambda: store)
+
+
+def test_apply_overrides_material_db(monkeypatch):
+    from packages.catalog.bootstrap import apply_to_live_app
+
+    fake = _FakeStore(materials={
+        "PLA": MaterialRecord(name="PLA", density_g_per_mm3=9.99, youngs_mod_mpa=1.0, poisson=0.3,
+                              yield_mpa=1.0, service_temp_c=1.0, cost_per_kg_usd=1.0),
+    })
+    _patch_store(monkeypatch, fake)
+
+    apply_to_live_app()
+    assert bom.material("PLA").density_g_per_mm3 == 9.99
+
+
+def test_apply_overrides_machine_rate(monkeypatch):
+    from packages.catalog.bootstrap import apply_to_live_app
+
+    fake = _FakeStore(datasets={
+        "cost.machine_rates_usd_per_hr": ReferenceDataset(
+            key="cost.machine_rates_usd_per_hr", domain="cost",
+            entries=[ReferenceEntry(entry_key="fdm_default", value_numeric=42.0)],
+        ),
+    })
+    _patch_store(monkeypatch, fake)
+
+    apply_to_live_app()
+    assert cost_module.MACHINE_RATE_USD_PER_HR == 42.0
+
+
+def test_materials_failure_does_not_block_machine_rate_or_crash(monkeypatch):
+    from packages.catalog.bootstrap import apply_to_live_app
+
+    fake = _FakeStore(
+        raise_on="materials",
+        datasets={"cost.machine_rates_usd_per_hr": ReferenceDataset(
+            key="cost.machine_rates_usd_per_hr", domain="cost",
+            entries=[ReferenceEntry(entry_key="fdm_default", value_numeric=7.0)])},
+    )
+    _patch_store(monkeypatch, fake)
+
+    apply_to_live_app()  # must not raise
+    assert bom.material("PLA").density_g_per_mm3 == bom._DEFAULT_MATERIAL_DB["PLA"].density_g_per_mm3
+    assert cost_module.MACHINE_RATE_USD_PER_HR == 7.0  # the OTHER override still applied
+
+
+def test_missing_machine_rate_entry_leaves_the_default(monkeypatch):
+    from packages.catalog.bootstrap import apply_to_live_app
+
+    fake = _FakeStore(datasets={
+        "cost.machine_rates_usd_per_hr": ReferenceDataset(
+            key="cost.machine_rates_usd_per_hr", domain="cost", entries=[]),  # no fdm_default entry
+    })
+    _patch_store(monkeypatch, fake)
+
+    apply_to_live_app()
+    assert cost_module.MACHINE_RATE_USD_PER_HR == cost_module._DEFAULT_MACHINE_RATE_USD_PER_HR
+
+
+def test_empty_materials_leaves_the_default(monkeypatch):
+    from packages.catalog.bootstrap import apply_to_live_app
+
+    _patch_store(monkeypatch, _FakeStore(materials={}))
+    apply_to_live_app()
+    assert bom.MATERIAL_DB == bom._DEFAULT_MATERIAL_DB

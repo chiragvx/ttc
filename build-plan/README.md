@@ -4,7 +4,7 @@ Master index for turning the `prd-27-8.14` vision into a real product, engineere
 (dev-time) and powered by Claude (runtime).
 
 **Last updated:** 2026-07-15
-**Current phase:** Phases 0–4 implemented & green (**539 backend tests pass on Windows** — `python -m
+**Current phase:** Phases 0–4 implemented & green (**566 backend tests pass on Windows** — `python -m
 pytest tests -q`, 27 skip on dependency-gated markers, more in the Linux container) and the **full
 wedge stack runs end-to-end on `docker compose up`**. Spike 4 fully PASSES (deflection-validated FS +
 19/19 auto-mesh). Built across the phases: ledger + rules validator + event store/replay (in-mem + SQL
@@ -101,12 +101,36 @@ where `_all_events()` also re-reads every row". Measured directly: 500 mutations
 cached cost is linear. Cache correctness verified against a from-scratch cold replay after many
 incremental appends, and against a different `reconcile` callable correctly invalidating it.
 
+**2026-07-15 — `packages/catalog/`: a local, Supabase-ready reference-data store (not to be confused
+with the 32-part *subsystem* catalog below):** every material property, DFM threshold, fastener
+clearance dimension, and cost rate used to be a hand-typed Python constant with zero external
+grounding (`bom.py`'s own comment: "Values are representative"). New package, two storage tiers
+behind one interface — `SeedFileStore` (checked-in JSON, the zero-infra default every test still
+runs against) and `PgCatalogStore` (a new `catalog` Postgres schema in the SAME database the
+ledger's event/verdict/job-status stores already use — not a new service; pointing `DATABASE_URL` at
+a real hosted Supabase instance later needs zero code change, since Supabase is vanilla Postgres).
+Schema: a bespoke typed `materials` table (stable shape, matches `Material` 1:1) plus a generic
+`reference_datasets`/`reference_entries` pair for everything else, so a brand-new category of
+reference data (thread pitches, surface finishes, more processes) is new rows, never a schema
+migration — the concrete answer to "scalable to expand exponentially". Seed data is a **faithful
+migration** of today's hardcoded values (no new "real" numbers yet — external sourcing is explicitly
+deferred): 5 materials, the M3–M8 clearance-hole table, the 0.8/1.2mm wall-thickness floors, and the
+$2/hr machine rate. Wired live via `bom.py::set_material_db()` / `cost.py::set_machine_rate()` (pure
+reassignment, no I/O in either package — `packages/ledger`'s "no I/O" rule stays intact) called from
+`bootstrap.py::apply_to_live_app()` in **both** `create_app()` and `packages/truth_plane/worker.py`
+(the separate Dramatiq process where cost/thermal grounding actually executes — easy to miss, and
+originally missed in the first draft of this plan). `python -m packages.catalog.seed` /
+`make seed-catalog` pushes the JSON into Postgres, upserting + pruning so checked-in JSON always
+wins on reseed. `manufacturing.py`'s clearance-hole table is seeded but not yet wired live — it's
+baked into LLM-prompt prose, and templating that dynamically is separate, larger scope.
+
 **Still not fixed** (ranked roughly by severity): the stated goal's load (e.g. "holds 200 N") never
 reaches the solver — `HeuristicStrategicProvider` only parses FS/mass/hours tokens, so the enforced FS
 floor can diverge from what the user actually asked for even though the verdict-cache fix above at
 least stops the WRONG case's verdict from satisfying the request; zero frontend tests; no TLS anywhere
 in the stack, so the session cookie has no `Secure` flag (matches existing
-deployment posture — add both together when TLS termination lands).
+deployment posture — add both together when TLS termination lands); no external-standards sourcing
+yet for the new catalog (deliberately deferred per this session's own scope).
 
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
