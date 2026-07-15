@@ -16,3 +16,8 @@ Hard rules:
   own (future) message channels — do not block the UI on them.
 - `npm run dev` proxies `/ws`, `/ledger`, `/export` to the FastAPI backend on :8000 (run
   `uvicorn packages.transport.app:create_app --factory` to serve it).
+- `npm test` (2026-07-15) runs the vitest suite (`vitest.config.ts`, jsdom env, React Testing
+  Library) — kept in a separate config file from `vite.config.ts` so the vitest-only `test` field
+  never risks the dev/build config. Prefer testing pure logic (`api.ts`'s request-building) and
+  presentational components (`RequirementsCard.tsx`) over anything touching the WebGL viewport —
+  `Viewport.tsx`/react-three-fiber need a real GL context this harness doesn't provide.

@@ -169,10 +169,21 @@ override still wins), and `/analyze`'s response now echoes the RESOLVED load bac
 asks about the exact same case instead of racing a goal that could change mid-poll. The frontend reads
 that echoed value instead of hardcoding 40/25, and `RequirementsCard` surfaces `implied_load_n`.
 
-**Still not fixed** (ranked roughly by severity): zero frontend tests; no TLS anywhere in the stack,
-so the session cookie has no `Secure` flag (matches existing deployment posture — add both together
-when TLS termination lands); no external-standards sourcing yet for the new catalog (deliberately
-deferred per this session's own scope).
+**2026-07-15 — frontend test harness stood up from zero:** `packages/frontend` had NO test tooling at
+all (no vitest/jest/testing-library in `package.json`). Added `vitest` + jsdom + React Testing Library
+behind their own `vitest.config.ts` (deliberately separate from `vite.config.ts` — the vitest-only
+`test` field never risks the working dev/build config). Initial coverage targets the two areas most
+worth a regression net right now: `api.ts`'s request-building (pins down the load-threading fix just
+above — `analyze()`/`analyzeStatus()`/`optimize()` must OMIT `load_n` by default so the backend's own
+goal-resolution applies, only appending it when explicitly overridden; plus the `Authorization` header
+behavior) and `RequirementsCard.tsx` (a pure presentational component, no WebGL dependency). Anything
+touching the `Viewport.tsx` react-three-fiber tree is deliberately left alone for now — it needs a real
+GL context this harness doesn't provide. `npm test` / `npm run build` both green.
+
+**Still not fixed** (ranked roughly by severity): no TLS anywhere in the stack, so the session cookie
+has no `Secure` flag (matches existing deployment posture — add both together when TLS termination
+lands); no external-standards sourcing yet for the new catalog (deliberately deferred per this
+session's own scope).
 
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
