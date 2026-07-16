@@ -1,9 +1,34 @@
 # UAV Subsystem Proposals — curation-first list
 
-**How to use this file**: skim the tables and **delete any row you don't want built** (same workflow
-as `SUBSYSTEM_PROPOSALS.md`). What survives becomes the next expansion phase. Every row that
-survives lands as one self-contained file under `packages/subsystems/` — no central-file edits per
-part, per the existing scalable-subsystem pattern (see `[[domain-registry-pattern]]`).
+**Status (2026-07-16): BUILT.** All 111 rows across the 14 tables below (everything except the 2
+already-built rows this list never duplicated — `bulkhead_frame`, `longeron` — and the 2 ⚠-flagged
+rows, `wing_rib_blank`/`stabilizer_rib_blank`, deliberately left out pending their own explicit
+yes/no) are now real, registered `packages/subsystems/<name>.py` files — a copilot querying for any
+of these part types finds an exact match instead of having to invent geometry. Generated from 10
+proven archetypes already proven out by the pre-existing catalog (`render_bracket`/`render_panel`/
+`render_lbracket`/`render_standoff`/`render_uchannel`/`render_bulkhead_frame`, plus the plain-Box/
+hollow-tube/cradle/enclosure-shell inline patterns `longeron.py`/`square_tube.py`/`saddle_clamp.py`/
+`enclosure.py` already established) under a code generator (not 111 separate hand-authored files —
+this is mechanical templating, not creative geometry work, so a deterministic generator is more
+reliable than 111 independent authoring passes). Verified for real, not just code-reviewed: every one
+of the 111 builds a valid, single-solid, positive-volume `build123d` part at its own defaults, and
+every closed-form `volume()` estimate is within 5% of the real built volume — both checked directly
+(not LLM-judged) and now permanently regression-tested in
+`tests/subsystems/test_uav_hardware_catalog.py` (447 tests). One real bug was caught this way:
+`tie_down_ring`'s own default `flange_width_mm`/`bolt_hole_dia_mm` combo violated its own edge-distance
+invariant — fixed before landing.
+
+Known, disclosed consequence: the copilot's "part types you can design" prompt section grew from a
+32-entry to a 143-entry catalog (~50 KB of text) — it's part of the static, cacheable prompt prefix
+(no per-request timestamp/UUID in it, so this doesn't re-cost tokens every turn per
+`packages/agents/CLAUDE.md`'s caching rule), but it is a real, disclosed increase in prompt size worth
+knowing about, not hidden.
+
+**How this file was originally meant to be used** (kept for history / future expansion rounds):
+skim the tables and **delete any row you don't want built** (same workflow as
+`SUBSYSTEM_PROPOSALS.md`). What survives becomes the next expansion phase. Every row that survives
+lands as one self-contained file under `packages/subsystems/` — no central-file edits per part, per
+the existing scalable-subsystem pattern (see `[[domain-registry-pattern]]`).
 
 **Scope, same guardrail as always**: every item here is **structural/mounting geometry only** —
 boxes, cylinders, extrusions, hole patterns, ring/frame shapes. Nothing here needs an aero solver,

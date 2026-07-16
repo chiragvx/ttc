@@ -183,7 +183,42 @@ GL context this harness doesn't provide. `npm test` / `npm run build` both green
 **Still not fixed** (ranked roughly by severity): no TLS anywhere in the stack, so the session cookie
 has no `Secure` flag (matches existing deployment posture — add both together when TLS termination
 lands); no external-standards sourcing yet for the new catalog (deliberately deferred per this
-session's own scope).
+session's own scope); `cost.py`'s knowledge fragment still hand-types its per-material price ranges —
+the one discipline fragment not yet catalog-wired.
+
+**2026-07-16 — UAV hardware catalog expansion: 111 new subsystems, all structural/mounting-only.**
+`build-plan/reference/UAV_SUBSYSTEM_PROPOSALS.md`'s full curated list (14 categories — fuselage/wing/
+tail structure, landing gear, propulsion mounts, payload/avionics/power bays, control-surface linkage,
+antenna/comms, deployment/recovery, ground handling, CubeSat hardware, fasteners, misc airframe
+hardware) is now real, registered `packages/subsystems/<name>.py` code — a copilot querying for "a fin
+root fitting" or "a battery tray" finds an exact match instead of inventing geometry. Deliberately
+excludes the 2 ⚠-flagged rows (`wing_rib_blank`/`stabilizer_rib_blank`) pending their own explicit
+sign-off — an unrelated one-off airfoil-lofted `vertical_fin` subsystem was drafted and then removed
+this same session once it became clear `naca_wing`/`winged_fuselage` were an explicit one-time
+exception (a real Fusion 360 process the user asked to be replicated directly), not a general license
+to keep adding airfoil-lofted surfaces without their own sign-off — the proposals doc's own "any true
+airfoil-lofted surface" parked-list entry governs, and this expansion respects it.
+
+Generated via a code generator (10 archetypes reusing the pre-existing catalog's own proven renderers
+— `render_bracket`/`render_panel`/`render_lbracket`/`render_standoff`/`render_uchannel`/
+`render_bulkhead_frame`, plus `longeron.py`/`square_tube.py`/`saddle_clamp.py`/`enclosure.py`'s inline
+patterns), not 111 hand-authored files — mechanical templating over a shared, already-tested geometry
+core is more reliable than 111 independent authoring passes at this scale. Verified for real, not
+LLM-judged: every one of the 111 builds a valid single-solid positive-volume `build123d` part at its
+own defaults, and every closed-form `volume()` estimate is within 5% of the real built volume — both
+checked directly and now permanently regression-tested (`tests/subsystems/test_uav_hardware_catalog.py`,
+447 tests: registration, invariants-at-defaults, positive volume, real-geometry validity, and
+closed-form-vs-real volume accuracy, parametrized over all 111 names). One real bug caught this way:
+`tie_down_ring`'s own default `flange_width_mm`/`bolt_hole_dia_mm` combo violated its own edge-distance
+invariant — fixed before landing. `fea_eligible` deliberately left at its default `False` for every
+new item (including the plain-Box "rail" archetype items that are shape-identical to `longeron.py`,
+which IS `fea_eligible=True`) — per `base.py`'s own "opt-in per subsystem, not inferred" rule, that
+call is left to whoever explicitly reviews a specific part for it, not inferred here from shape alone.
+
+Known, disclosed consequence: the copilot's "part types you can design" prompt section grew from a
+32-entry to a 143-entry catalog (~50 KB of text, verified live) — part of the static, cacheable prompt
+prefix (no per-request timestamp/UUID in it, so this doesn't re-cost tokens every turn per
+`packages/agents/CLAUDE.md`'s caching rule), but a real, disclosed base-size increase, not a hidden one.
 
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had

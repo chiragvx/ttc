@@ -241,3 +241,125 @@ from packages.subsystems import naca_wing as _naca_wing  # noqa: E402, F401
 from packages.subsystems import ogive_fuselage as _ogive_fuselage  # noqa: E402, F401
 # Composite: ogive_fuselage body + naca_wing panel, boolean-fused into one printable body (2026-07-05)
 from packages.subsystems import winged_fuselage as _winged_fuselage  # noqa: E402, F401
+
+# UAV hardware catalog expansion (2026-07-16) -- build-plan/reference/UAV_SUBSYSTEM_PROPOSALS.md's
+# curated, structural/mounting-only list, built out in full so a copilot querying for any of these
+# part types finds a real, registered generator instead of having to invent geometry. Every one of
+# these reuses an EXISTING shared archetype (render_bracket/render_panel/render_lbracket/
+# render_standoff/render_uchannel/render_bulkhead_frame, or the plain-Box/hollow-tube/cradle inline
+# patterns longeron.py/square_tube.py/saddle_clamp.py already established) under this catalog's own
+# "one archetype, many named entries" convention (see washer.py reusing the standoff generator).
+# Excludes the 2 already-built rows (bulkhead_frame, longeron, imported above) and the 2 (Wing rib
+# blank / stabilizer rib blank) rows the proposals doc itself flags with the borderline-naming
+# warning (needs its own deliberate yes, not bundled into this bulk pass).
+from packages.subsystems import fuselage_ring_frame as _fuselage_ring_frame  # noqa: E402, F401
+from packages.subsystems import stringer as _stringer  # noqa: E402, F401
+from packages.subsystems import keel_beam as _keel_beam  # noqa: E402, F401
+from packages.subsystems import nose_ring as _nose_ring  # noqa: E402, F401
+from packages.subsystems import tail_cone_ring as _tail_cone_ring  # noqa: E402, F401
+from packages.subsystems import skin_attach_frame as _skin_attach_frame  # noqa: E402, F401
+from packages.subsystems import doubler_plate as _doubler_plate  # noqa: E402, F401
+from packages.subsystems import access_hatch_frame as _access_hatch_frame  # noqa: E402, F401
+from packages.subsystems import canopy_frame as _canopy_frame  # noqa: E402, F401
+from packages.subsystems import tail_boom as _tail_boom  # noqa: E402, F401
+from packages.subsystems import tail_boom_clamp as _tail_boom_clamp  # noqa: E402, F401
+from packages.subsystems import wing_spar as _wing_spar  # noqa: E402, F401
+from packages.subsystems import wing_root_fitting as _wing_root_fitting  # noqa: E402, F401
+from packages.subsystems import wing_tip_fitting as _wing_tip_fitting  # noqa: E402, F401
+from packages.subsystems import wing_fold_hinge as _wing_fold_hinge  # noqa: E402, F401
+from packages.subsystems import wing_strut as _wing_strut  # noqa: E402, F401
+from packages.subsystems import dihedral_brace as _dihedral_brace  # noqa: E402, F401
+from packages.subsystems import spar_joiner_sleeve as _spar_joiner_sleeve  # noqa: E402, F401
+from packages.subsystems import wing_bolt_pair as _wing_bolt_pair  # noqa: E402, F401
+from packages.subsystems import wing_tube_joiner as _wing_tube_joiner  # noqa: E402, F401
+from packages.subsystems import stabilizer_spar as _stabilizer_spar  # noqa: E402, F401
+from packages.subsystems import elevator_hinge_bracket as _elevator_hinge_bracket  # noqa: E402, F401
+from packages.subsystems import rudder_hinge_bracket as _rudder_hinge_bracket  # noqa: E402, F401
+from packages.subsystems import tail_skid as _tail_skid  # noqa: E402, F401
+from packages.subsystems import fin_root_fitting as _fin_root_fitting  # noqa: E402, F401
+from packages.subsystems import main_gear_leg as _main_gear_leg  # noqa: E402, F401
+from packages.subsystems import nose_gear_leg as _nose_gear_leg  # noqa: E402, F401
+from packages.subsystems import gear_mount_plate as _gear_mount_plate  # noqa: E402, F401
+from packages.subsystems import wheel_hub as _wheel_hub  # noqa: E402, F401
+from packages.subsystems import wheel_axle as _wheel_axle  # noqa: E402, F401
+from packages.subsystems import skid_pad as _skid_pad  # noqa: E402, F401
+from packages.subsystems import tailwheel_bracket as _tailwheel_bracket  # noqa: E402, F401
+from packages.subsystems import shock_strut_housing as _shock_strut_housing  # noqa: E402, F401
+from packages.subsystems import gear_door_hinge as _gear_door_hinge  # noqa: E402, F401
+from packages.subsystems import jack_point as _jack_point  # noqa: E402, F401
+from packages.subsystems import tie_down_ring as _tie_down_ring  # noqa: E402, F401
+from packages.subsystems import motor_mount_firewall as _motor_mount_firewall  # noqa: E402, F401
+from packages.subsystems import engine_bed_rail as _engine_bed_rail  # noqa: E402, F401
+from packages.subsystems import nacelle_ring as _nacelle_ring  # noqa: E402, F401
+from packages.subsystems import cowl_mount_bracket as _cowl_mount_bracket  # noqa: E402, F401
+from packages.subsystems import prop_hub_blank as _prop_hub_blank  # noqa: E402, F401
+from packages.subsystems import prop_spacer as _prop_spacer  # noqa: E402, F401
+from packages.subsystems import spinner_backplate as _spinner_backplate  # noqa: E402, F401
+from packages.subsystems import fuel_tank_tray as _fuel_tank_tray  # noqa: E402, F401
+from packages.subsystems import fuel_tank_strap_mount as _fuel_tank_strap_mount  # noqa: E402, F401
+from packages.subsystems import exhaust_mount_bracket as _exhaust_mount_bracket  # noqa: E402, F401
+from packages.subsystems import avionics_tray as _avionics_tray  # noqa: E402, F401
+from packages.subsystems import equipment_rack_rail as _equipment_rack_rail  # noqa: E402, F401
+from packages.subsystems import camera_mount_static as _camera_mount_static  # noqa: E402, F401
+from packages.subsystems import sensor_pod_shell as _sensor_pod_shell  # noqa: E402, F401
+from packages.subsystems import payload_bay_door as _payload_bay_door  # noqa: E402, F401
+from packages.subsystems import payload_bay_ring as _payload_bay_ring  # noqa: E402, F401
+from packages.subsystems import pcb_stack_rail as _pcb_stack_rail  # noqa: E402, F401
+from packages.subsystems import wiring_channel as _wiring_channel  # noqa: E402, F401
+from packages.subsystems import cable_passthrough_boss as _cable_passthrough_boss  # noqa: E402, F401
+from packages.subsystems import component_shelf_bracket as _component_shelf_bracket  # noqa: E402, F401
+from packages.subsystems import battery_tray as _battery_tray  # noqa: E402, F401
+from packages.subsystems import battery_strap_mount as _battery_strap_mount  # noqa: E402, F401
+from packages.subsystems import battery_hatch as _battery_hatch  # noqa: E402, F401
+from packages.subsystems import power_distribution_mount_plate as _power_distribution_mount_plate  # noqa: E402, F401
+from packages.subsystems import fuse_holder_bracket as _fuse_holder_bracket  # noqa: E402, F401
+from packages.subsystems import battery_bay_divider as _battery_bay_divider  # noqa: E402, F401
+from packages.subsystems import esc_mount_plate as _esc_mount_plate  # noqa: E402, F401
+from packages.subsystems import charge_port_bezel as _charge_port_bezel  # noqa: E402, F401
+from packages.subsystems import control_horn as _control_horn  # noqa: E402, F401
+from packages.subsystems import pushrod_guide as _pushrod_guide  # noqa: E402, F401
+from packages.subsystems import servo_mount_tray as _servo_mount_tray  # noqa: E402, F401
+from packages.subsystems import hinge_line_bracket as _hinge_line_bracket  # noqa: E402, F401
+from packages.subsystems import bellcrank_mount_plate as _bellcrank_mount_plate  # noqa: E402, F401
+from packages.subsystems import servo_arm_blank as _servo_arm_blank  # noqa: E402, F401
+from packages.subsystems import linkage_clevis as _linkage_clevis  # noqa: E402, F401
+from packages.subsystems import control_rod_coupler as _control_rod_coupler  # noqa: E402, F401
+from packages.subsystems import antenna_mount_plate as _antenna_mount_plate  # noqa: E402, F401
+from packages.subsystems import patch_antenna_mount as _patch_antenna_mount  # noqa: E402, F401
+from packages.subsystems import whip_antenna_base as _whip_antenna_base  # noqa: E402, F401
+from packages.subsystems import gps_mast as _gps_mast  # noqa: E402, F401
+from packages.subsystems import comms_bay_bracket as _comms_bay_bracket  # noqa: E402, F401
+from packages.subsystems import telemetry_module_tray as _telemetry_module_tray  # noqa: E402, F401
+from packages.subsystems import rf_shield_mount as _rf_shield_mount  # noqa: E402, F401
+from packages.subsystems import coax_clamp as _coax_clamp  # noqa: E402, F401
+from packages.subsystems import deployment_hinge as _deployment_hinge  # noqa: E402, F401
+from packages.subsystems import parachute_bay_hatch as _parachute_bay_hatch  # noqa: E402, F401
+from packages.subsystems import tail_fold_joint as _tail_fold_joint  # noqa: E402, F401
+from packages.subsystems import breakaway_joint_plate as _breakaway_joint_plate  # noqa: E402, F401
+from packages.subsystems import recovery_harness_anchor as _recovery_harness_anchor  # noqa: E402, F401
+from packages.subsystems import deployment_bay_door as _deployment_bay_door  # noqa: E402, F401
+from packages.subsystems import separation_ring as _separation_ring  # noqa: E402, F401
+from packages.subsystems import launch_rail_shoe as _launch_rail_shoe  # noqa: E402, F401
+from packages.subsystems import catapult_hook as _catapult_hook  # noqa: E402, F401
+from packages.subsystems import ground_dolly_mount as _ground_dolly_mount  # noqa: E402, F401
+from packages.subsystems import wingtip_stand as _wingtip_stand  # noqa: E402, F401
+from packages.subsystems import handling_handle as _handling_handle  # noqa: E402, F401
+from packages.subsystems import cubesat_rail as _cubesat_rail  # noqa: E402, F401
+from packages.subsystems import deck_plate as _deck_plate  # noqa: E402, F401
+from packages.subsystems import kill_switch_mount as _kill_switch_mount  # noqa: E402, F401
+from packages.subsystems import pcb_stack_standoff as _pcb_stack_standoff  # noqa: E402, F401
+from packages.subsystems import solar_panel_backing_plate as _solar_panel_backing_plate  # noqa: E402, F401
+from packages.subsystems import rail_clip as _rail_clip  # noqa: E402, F401
+from packages.subsystems import corner_bumper as _corner_bumper  # noqa: E402, F401
+from packages.subsystems import quick_release_pin as _quick_release_pin  # noqa: E402, F401
+from packages.subsystems import snap_pin as _snap_pin  # noqa: E402, F401
+from packages.subsystems import turnbuckle_blank as _turnbuckle_blank  # noqa: E402, F401
+from packages.subsystems import tensioner_bracket as _tensioner_bracket  # noqa: E402, F401
+from packages.subsystems import glue_tab as _glue_tab  # noqa: E402, F401
+from packages.subsystems import rivet_pattern_plate as _rivet_pattern_plate  # noqa: E402, F401
+from packages.subsystems import inspection_cover as _inspection_cover  # noqa: E402, F401
+from packages.subsystems import ballast_tray as _ballast_tray  # noqa: E402, F401
+from packages.subsystems import cg_adjustment_rail as _cg_adjustment_rail  # noqa: E402, F401
+from packages.subsystems import fairing_ring as _fairing_ring  # noqa: E402, F401
+from packages.subsystems import bulkhead_ring as _bulkhead_ring  # noqa: E402, F401
+from packages.subsystems import data_port_bezel as _data_port_bezel  # noqa: E402, F401

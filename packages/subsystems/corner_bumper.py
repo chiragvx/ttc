@@ -1,0 +1,64 @@
+"""Corner Bumper -- Small compliant-shape bumper at a satellite corner
+
+Structural/mounting geometry only (`build-plan/reference/UAV_SUBSYSTEM_PROPOSALS.md` category
+12) -- a cylinder with a concentric through-bore, the SAME shape family `standoff.py`
+already registers (`render_standoff`), reused here under this part's own name/proportions per this
+catalog's established "one archetype, many named catalog entries" convention (see `standoff.py`/
+`washer.py`: washer already reuses the standoff generator the same way).
+"""
+
+from __future__ import annotations
+
+import math
+
+from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+
+_MIN_WALL_MM = 0.8
+
+_FRAGMENT = """\
+## Subsystem: Corner Bumper
+Small compliant-shape bumper at a satellite corner -- a cylindrical body with a concentric through-bore (FDM/FFF or turned).
+- **outer_dia_mm** -- outer diameter.
+- **inner_dia_mm** -- bore diameter.
+- **height_mm** -- length along the axis.
+
+### Intent mapping
+- "for an M3 screw" -> inner_dia_mm ~= 3.4 (clearance); "M4" -> 4.5.
+- "taller" / "longer" -> increase height_mm.
+- "thicker wall" / "stronger" -> increase outer_dia_mm (wall = (outer - inner)/2, >= 0.8 mm).\
+"""
+
+
+def _build(p):
+    from packages.truth_plane.regen.templated import render_standoff
+    return render_standoff(outer_dia_mm=p.outer_dia_mm, inner_dia_mm=p.inner_dia_mm, height_mm=p.height_mm)
+
+
+def _volume(p) -> float:
+    ro, ri = p.outer_dia_mm / 2.0, p.inner_dia_mm / 2.0
+    return math.pi * max(0.0, ro * ro - ri * ri) * p.height_mm
+
+
+def _check(p) -> list[str]:
+    if p.inner_dia_mm >= p.outer_dia_mm:
+        return [f"inner_dia {p.inner_dia_mm:.1f} mm >= outer_dia {p.outer_dia_mm:.1f} mm (no wall)"]
+    wall = (p.outer_dia_mm - p.inner_dia_mm) / 2.0
+    if wall < _MIN_WALL_MM:
+        return [f"wall {wall:.2f} mm < min wall {_MIN_WALL_MM} mm"]
+    return []
+
+
+CORNER_BUMPER = register_subsystem(Subsystem(
+    name="corner_bumper",
+    description="Small compliant-shape bumper at a satellite corner -- structural/mounting geometry (FDM/FFF or CNC)",
+    fragment=_FRAGMENT,
+    disciplines=("structures", "manufacturing", "thermal"),
+    params=[
+        ParamSpec("outer_dia_mm", value=10.0, min=4.0, max=35.0, unit='mm'),
+        ParamSpec("inner_dia_mm", value=1.0, min=0.1, max=10.0, unit='mm'),
+        ParamSpec("height_mm", value=10.0, min=3.0, max=35.0, unit='mm'),
+    ],
+    build=_build,
+    volume=_volume,
+    invariants=_check,
+))
