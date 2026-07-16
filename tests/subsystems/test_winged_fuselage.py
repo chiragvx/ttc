@@ -44,6 +44,12 @@ def test_invariants_catch_child_violations(base_ledger, seeded_with):
                       tip_chord_mm=(10.0, 10.0, 600.0), thickness_pct=(6.0, 6.0, 21.0))
     reasons2 = get_subsystem("winged_fuselage").check_invariants(led2)
     assert any("max thickness" in r for r in reasons2)
+    # ...including naca_wing's reversed-taper check (this composite's own _check() delegates to
+    # NACA_WING.invariants(p) verbatim -- the fix propagates here for free, confirmed rather than assumed).
+    led3 = seeded_with(base_ledger, "winged_fuselage",
+                      root_chord_mm=(20.0, 20.0, 600.0), tip_chord_mm=(600.0, 10.0, 600.0))
+    reasons3 = get_subsystem("winged_fuselage").check_invariants(led3)
+    assert any("taper root-to-tip" in r for r in reasons3)
 
 
 def test_invariants_catch_wing_span_too_short_to_cross_fuselage_shell(base_ledger, seeded_with):

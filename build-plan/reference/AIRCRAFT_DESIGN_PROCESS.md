@@ -254,18 +254,25 @@ surviving gaps, to be closed before Section 1 is treated as sufficient:
   1 select which calibrated coefficient set Stage 2 is allowed to use, so a plausible configuration
   can't silently route into an unvalidated regression.
 
-- **Stage 3's aggregate invariants are exactly, not approximately, blind to reversed taper direction.**
-  Confirmed against `packages/subsystems/naca_wing.py`: `_check()` validates positivity and a min-wall
-  floor but never `root_chord_mm >= tip_chord_mm`, so a `ParameterDelta` can legally build a wing
-  narrowest at the root and widest at the tips (a backward "paddle" planform — the wrong end holding
-  the most material for where bending load is highest). Wing area, aspect ratio, and MAC are each an
-  integral (or ratio of integrals) of a symmetric linear chord ramp and are *algebraically* identical
-  whether root/tip values are swapped — no tightening of tolerance on those same checks could ever
-  separate the two shapes, and OCCT's watertight/manifold checks don't distinguish taper direction
-  either. `naca_wing` is also `fea_eligible=False`, so nothing downstream catches it. **Fix:** add a
-  pointwise monotonicity/ordering assertion (e.g. `root_chord_mm >= tip_chord_mm`, or a structural
-  proxy like chord × thickness³ non-increasing root-to-tip) to every taper-schedule generator, since
-  aggregate integrals over a symmetric ramp can never distinguish which end holds the extremum.
+- **Stage 3's aggregate invariants are exactly, not approximately, blind to reversed taper direction —
+  confirmed, and fixed (2026-07-16).** `packages/subsystems/naca_wing.py::_check()` validated
+  positivity and a min-wall floor but never `root_chord_mm >= tip_chord_mm`, so a `ParameterDelta`
+  could legally build a wing narrowest at the root and widest at the tips (a backward "paddle"
+  planform — the wrong end holding the most material for where bending load is highest). Wing area,
+  aspect ratio, and MAC are each an integral (or ratio of integrals) of a symmetric linear chord ramp
+  and are *algebraically* identical whether root/tip values are swapped — no tightening of tolerance
+  on those same checks could ever separate the two shapes, and OCCT's watertight/manifold checks don't
+  distinguish taper direction either; `naca_wing` is also `fea_eligible=False`, so nothing downstream
+  caught it either. **Fixed:** `_check()` now rejects `root_chord_mm < tip_chord_mm` outright (equal —
+  the declared "straight wing" case — still passes); `winged_fuselage.py`'s own `_check()` delegates to
+  `NACA_WING.invariants(p)` verbatim, so the fix covers it for free, confirmed by a regression test
+  there too rather than assumed. Covered by `tests/subsystems/test_naca_wing.py::
+  test_reversed_taper_root_narrower_than_tip_is_rejected` /
+  `test_equal_root_and_tip_chord_is_not_a_reversed_taper` and
+  `tests/subsystems/test_winged_fuselage.py::test_invariants_catch_child_violations`'s extended case.
+  The general lesson stands for every other taper-schedule generator this catalog grows later: a
+  pointwise monotonicity/ordering assertion is needed alongside any aggregate integral check, since the
+  latter can never distinguish which end holds the extremum.
 
 - **Confirmed live and already fixed: the export gate could serve a stale, wrong-load-case verdict as
   "grounded."** `FileState.resolved_ledger()` — the one function shared by `/export/check` and the

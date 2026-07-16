@@ -243,6 +243,23 @@ def _check(p) -> list[str]:
         out.append(f"tip_chord_mm {p.tip_chord_mm:.1f} mm must be > 0")
     if p.thickness_pct <= 0.0:
         out.append(f"thickness_pct {p.thickness_pct:.1f}% must be > 0")
+    # Structural sanity, not a numeric-tolerance question: a real cantilevered wing must taper
+    # root-to-tip (or stay untapered, root_chord_mm == tip_chord_mm -- the declared "straight wing"
+    # case), never the reverse. The root carries the highest bending moment and needs the MOST
+    # material; a wing narrower at the root than the tips puts the least material exactly where the
+    # load is highest. This is invisible to every other check in this file: wing area, aspect ratio,
+    # and MAC are each an integral (or ratio of integrals) of a symmetric linear chord ramp over
+    # [root, tip], and are algebraically IDENTICAL whether the two endpoint values are swapped -- no
+    # amount of tightening those numeric checks could ever catch a reversed taper (this exact blind
+    # spot was found by this project's own adversarial red-team pass on step-based testing; see
+    # build-plan/reference/AIRCRAFT_DESIGN_PROCESS.md §5, "Stage 3's aggregate invariants are exactly,
+    # not approximately, blind to reversed taper direction").
+    if p.root_chord_mm < p.tip_chord_mm:
+        out.append(
+            f"root_chord_mm {p.root_chord_mm:.1f} mm is smaller than tip_chord_mm {p.tip_chord_mm:.1f} "
+            f"mm -- a wing must taper root-to-tip (or stay untapered), never the reverse: the root "
+            f"carries the highest bending load and needs the most material, not the least"
+        )
     # The tightest cross-section (whichever end has the smaller chord) sets the tightest max
     # thickness — for a NACA 4-digit section, max thickness IS thickness_pct% of the local chord BY
     # DEFINITION (the "12" in NACA0012 literally means "12% of chord"), so this reuses the exact

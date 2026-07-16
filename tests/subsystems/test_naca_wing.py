@@ -64,6 +64,27 @@ def test_thin_tip_violates_min_wall(base_ledger, seeded_with):
     assert any("max thickness" in r for r in reasons)
 
 
+def test_reversed_taper_root_narrower_than_tip_is_rejected(base_ledger, seeded_with):
+    """A wing narrower at the root than the tips (a backward "paddle" planform) is structurally
+    invalid -- the root carries the highest bending load. Wing area/aspect-ratio/MAC are all
+    algebraically blind to this (integrals over a symmetric chord ramp don't care which end holds the
+    larger value), so this needs its own explicit check, not a tolerance on an existing one."""
+    led = seeded_with(base_ledger, "naca_wing",
+                     root_chord_mm=(20.0, 20.0, 600.0), tip_chord_mm=(600.0, 10.0, 600.0))
+    reasons = get_subsystem("naca_wing").check_invariants(led)
+    assert any("taper root-to-tip" in r for r in reasons), (
+        f"expected a reversed-taper violation, got: {reasons}"
+    )
+
+
+def test_equal_root_and_tip_chord_is_not_a_reversed_taper(base_ledger, seeded_with):
+    # the declared "straight (untapered) wing" case (root_chord_mm == tip_chord_mm) must NOT trip the
+    # reversed-taper check -- only root < tip is invalid.
+    led = seeded_with(base_ledger, "naca_wing", tip_chord_mm=(120.0, 10.0, 600.0))  # == root_chord_mm
+    reasons = get_subsystem("naca_wing").check_invariants(led)
+    assert not any("taper root-to-tip" in r for r in reasons)
+
+
 @pytest.mark.skipif(not HAS_B123D, reason="needs build123d")
 def test_geometry_builds_at_defaults(base_ledger, seeded):
     led = seeded(base_ledger, "naca_wing")
