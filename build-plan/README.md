@@ -220,6 +220,46 @@ Known, disclosed consequence: the copilot's "part types you can design" prompt s
 prefix (no per-request timestamp/UUID in it, so this doesn't re-cost tokens every turn per
 `packages/agents/CLAUDE.md`'s caching rule), but a real, disclosed base-size increase, not a hidden one.
 
+**2026-07-17 — general (non-aerospace) hardware catalog expansion: 121 more subsystems, registry now
+264.** Same idea as the 07-16 UAV batch, aimed at the sibling `build-plan/reference/
+SUBSYSTEM_PROPOSALS.md` list (13 categories — fasteners/receiving hardware, brackets & mounts,
+enclosures & covers, panels & plates, structural sections, spacers & standoffs, rotational &
+transmission, bearings/bushings/linear, alignment/locating/jigs, sealing, handles/knobs/ergonomic,
+cable/wire/plumbing, and multi-body assemblies): every surviving row is now a real, registered
+`packages/subsystems/<name>.py` file, so a copilot querying for "a wing nut" or "a NEMA17 face mount"
+finds an exact match instead of inventing geometry.
+
+Same code-generator approach as the UAV batch: 14 archetypes drove the build — the 10 already proven
+by the UAV expansion, plus 4 new ones this list needed (puck, stepped, flanged, wedge, plate_bore),
+each prototyped directly against build123d before being wired into the generator. Not 121
+hand-authored files, for the same reason as the UAV batch: mechanical templating over a shared,
+already-tested geometry core beats 121 independent creative passes at this scale. Verified for real,
+not LLM-judged: every one of the 121 builds a valid single-solid positive-volume `build123d` part at
+its own defaults, and every closed-form `volume()` estimate is within 5% of the real built volume —
+both checked directly and now permanently regression-tested
+(`tests/subsystems/test_general_hardware_catalog.py`: registration, invariants-at-defaults, positive
+volume, real-geometry validity, and closed-form-vs-real volume accuracy, parametrized over all 121
+names). Full suite green after landing: **1523 passed, 27 skipped**.
+
+Two real bugs caught this way, both fixed before landing: `2020_extrusion_blank`/`2040_extrusion_blank`
+are not legal Python module/identifier names (a bare name can't start with a digit) — renamed to
+`extrusion_2020_blank`/`extrusion_2040_blank` (file, `name=`, and the proposals-doc table all updated
+to match); and the registry-size regression test's own first draft used a strict `==` on
+`len(SUBSYSTEM_REGISTRY)`, which is wrong because other test files (`test_assembly_template.py`,
+`test_saddle_clamp.py`) legitimately register their own throwaway subsystems into the same shared
+global registry when the full suite runs together — changed to a `>=` floor check with the reasoning
+recorded inline, since what actually matters is nothing got silently overwritten, not an exact count.
+
+Deliberately excludes 4 rows pending their own explicit sign-off, same "flag it, don't force an
+approximation" policy as the UAV list's ⚠ rows: `wave_washer` (sine-wave spring geometry),
+`snap_ring_shim` (split-ring geometry), `worm_blank` (helical thread geometry), `grommet_blank`
+(flexible-material profile) — each needs swept/compliant geometry outside this batch's archetypes,
+not a scope judgment call.
+
+Known, disclosed consequence, same shape as the UAV entry: the copilot's "part types you can design"
+prompt section grows again, from 143 to a 264-entry catalog — still the static, cacheable prompt
+prefix, so this is a real, disclosed base-size increase and not a hidden one or a per-turn cost.
+
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
 validated none of it. It's now split across 7 logical commits (ledger → truth-plane →

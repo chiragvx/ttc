@@ -1,6 +1,29 @@
 # Subsystem Proposals — curation-first list
 
-**How to use this file**: skim the tables and **delete any row you don't want built**. What survives becomes the next expansion phase (probably split into 2–3 batches of ~30 each). Every row that survives will land as one self-contained file under `packages/subsystems/` — no central-file edits per part.
+**Status (2026-07-17): BUILT.** All 121 rows across the 13 tables below are now real, registered
+`packages/subsystems/<name>.py` files — a copilot querying for any of these general/non-aerospace
+part types finds an exact match instead of having to invent geometry. Four rows were deliberately
+left out pending their own explicit yes/no, same as the UAV list's ⚠ policy: `wave_washer`
+(sine-wave spring geometry), `snap_ring_shim` (split-ring geometry), `worm_blank` (helical thread
+geometry), `grommet_blank` (flexible-material profile) — each needs swept/compliant geometry this
+catalog's archetypes don't cover, not a scope judgment call, so they stayed in the parked section
+below rather than getting a forced approximation. `2020_extrusion_blank`/`2040_extrusion_blank`
+landed as `extrusion_2020_blank`/`extrusion_2040_blank` (leading digits aren't a legal Python module
+name); the tables below have been corrected to match.
+
+Same generator approach as the UAV catalog ([[scalable-subsystem-refactor]],
+`UAV_SUBSYSTEM_PROPOSALS.md`): 14 archetypes (the 10 already proven by that expansion, plus 4 new
+ones this batch needed — puck/stepped/flanged/wedge/plate_bore, each prototyped against real
+build123d before being committed) drove a code generator rather than 121 hand-authored files. Every
+one of the 121 builds a valid, single-solid, positive-volume `build123d` part at its own defaults,
+and every closed-form `volume()` estimate is within 5% of the real built volume — checked directly,
+not LLM-judged, and now permanently regression-tested in
+`tests/subsystems/test_general_hardware_catalog.py`. Total registered catalog size (original 32 +
+UAV 111 + this batch's 121) is now 264, verified with the full suite green (1523 passed, 27
+skipped).
+
+**How this file was originally meant to be used** (kept for history / future expansion rounds):
+skim the tables and **delete any row you don't want built**. What survives becomes the next expansion phase (probably split into 2–3 batches of ~30 each). Every row that survives will land as one self-contained file under `packages/subsystems/` — no central-file edits per part.
 
 - **Type**: `Single` = one printed body. `Compound` = one design intent, ≥2 printed bodies (following the enclosure-with-lid principle: matched dims by construction).
 - ✅ = already implemented in the current catalog (23 parts as of 2026-07-02). Kept for context; do not need to be listed again but shown so you can see gaps.
@@ -113,8 +136,8 @@ Wedge scope: functional printable/machinable parts, no aerospace/CFD/propulsion/
 | `angle_iron` | Extruded L cross-section (structural stock length) | Single | |
 | `c_channel` | Extruded C cross-section (open one side) | Single | |
 | `uchannel` ✅ | Extruded U cross-section | Single | |
-| `2020_extrusion_blank` | 20mm × 20mm T-slot extrusion (slot geometry, not fully accurate) | Single | |
-| `2040_extrusion_blank` | 20mm × 40mm T-slot extrusion | Single | |
+| `extrusion_2020_blank` | 20mm × 20mm T-slot extrusion (slot geometry, not fully accurate) | Single | |
+| `extrusion_2040_blank` | 20mm × 40mm T-slot extrusion | Single | |
 | `frame_corner_bracket` | 3-axis corner bracket for T-slot framing | Single | |
 
 ## 6. Spacers & standoffs
