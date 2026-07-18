@@ -446,14 +446,30 @@ class FileState:
 
     def mutate(self, req: ParamMutationRequest):
         led = self.ledger()
-        delta = ParameterDelta(target_node=req.target_node, requested_value=req.requested_value,
+        # Robustness (2026-07-19): the copilot sometimes emits a BARE param name (`span_mm`) instead of
+        # the instance-qualified path (`instances.<id>.params.span_mm`) — which hard-rejects as "unknown
+        # node" and silently drops the whole size step (seen live building a BWB). If the target has no
+        # dots AND the ACTIVE instance's subsystem declares exactly that param, qualify it to the active
+        # instance (which, right after an add_instance, IS the just-added part). A correctly-qualified
+        # path, a cross-cutting node, or a bare name that ISN'T a param of the active part is untouched —
+        # so this only ever rescues the unambiguous case, never reinterprets a real request.
+        target_node = req.target_node
+        if "." not in target_node and self.active_instance_id in led.instances:
+            active = led.instances[self.active_instance_id]
+            try:
+                params = {p.name for p in get_subsystem_model(active.subsystem_type).params}
+            except KeyError:
+                params = set()
+            if target_node in params:
+                target_node = f"instances.{self.active_instance_id}.params.{target_node}"
+        delta = ParameterDelta(target_node=target_node, requested_value=req.requested_value,
                                set_lock=LockState(req.set_lock) if req.set_lock else None)
         # enforce the TARGETED instance's own subsystem invariants (bracket edge-distance, enclosure
         # cavity sanity, …) on the live slider path, on top of the general min-wall floor. The target
         # path already encodes which instance it addresses — dispatch on THAT when it names one,
         # falling back to the file's active instance for a cross-cutting param (material profile,
         # build orientation, …) that isn't itself instance-scoped.
-        target_iid = _instance_id_from_target(req.target_node) or self.active_instance_id
+        target_iid = _instance_id_from_target(target_node) or self.active_instance_id
         target_inst = led.instances.get(target_iid) if target_iid else None
         # No target instance at all (an empty file, or a cross-cutting mutation with nothing yet to
         # scope invariants to) -> nothing to validate beyond apply_delta's own bounds/lock checks.

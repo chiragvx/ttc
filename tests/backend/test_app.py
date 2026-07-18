@@ -489,3 +489,27 @@ def test_ws_mutation_response_carries_refreshed_valid_ranges():
         vr2 = {v["node"]: v for v in resp2["valid_ranges"]}
         bt2 = vr2[f"instances.{iid}.params.blend_taper_mm"]
         assert 799.0 <= bt2["valid_max"] <= 800.0
+
+
+def test_bare_param_name_is_qualified_to_the_active_instance():
+    # 2026-07-19: the copilot sometimes emits a BARE param name instead of the instance-qualified
+    # path; that used to hard-reject as "unknown node" and silently drop the whole size step (seen
+    # live building a BWB). A bare name matching the ACTIVE instance's param must now apply.
+    c = TestClient(create_app())
+    c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "bwb_fuselage", "instance_id": "centerbody"})
+    with c.websocket_connect("/ws") as ws:
+        ws.send_json({"target_node": "sweep_deg", "requested_value": 12.0})  # BARE — no dots
+        msg = ws.receive_json()
+    assert msg["event_type"] == "PARAMETER_CASCADE_UPDATE"  # resolved + applied, not rejected
+    assert c.get("/ledger").json()["instances"]["centerbody"]["params"]["sweep_deg"]["value"] == 12.0
+
+
+def test_bare_name_that_is_not_a_param_of_the_active_part_still_rejects():
+    # the qualification must ONLY rescue an unambiguous match — a bare name that isn't a real param
+    # must still reject, never get silently rewritten onto the wrong thing.
+    c = TestClient(create_app())
+    c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "bwb_fuselage", "instance_id": "cb"})
+    with c.websocket_connect("/ws") as ws:
+        ws.send_json({"target_node": "not_a_real_param", "requested_value": 5.0})
+        msg = ws.receive_json()
+    assert msg["event_type"] == "PARAMETER_MUTATION_REJECTED"
