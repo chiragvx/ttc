@@ -232,6 +232,21 @@ export function Viewport({
                 style={{ ...btn, background: autoRotate ? "#1f6feb" : "#21262d" }}>
           ↻ Rotate
         </button>
+        <button
+          onClick={() => {
+            // orthographic 3-view blueprint (front/top/right, labelled XYZ). Open the freshly-rendered
+            // PNG in a new tab; a cache-buster keeps it current after edits (the endpoint is no-store,
+            // but the query param also defeats any intermediary/tab cache).
+            void fetch(`/blueprint?t=${Date.now()}`)
+              .then((r) => r.blob())
+              .then((b) => window.open(URL.createObjectURL(b), "_blank"))
+              .catch(() => {});
+          }}
+          title="Open an orthographic 3-view blueprint (front / top / right, labelled XYZ)"
+          style={btn}
+        >
+          ⊞ Blueprint
+        </button>
       </div>
       {selection && (
         <FeatureCard

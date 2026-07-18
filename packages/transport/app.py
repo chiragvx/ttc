@@ -1271,6 +1271,20 @@ def create_app() -> FastAPI:
         from packages.subsystems.features import list_pickable_features
         return {"features": list_pickable_features(state.ledger())}
 
+    @router.get("/blueprint")
+    async def blueprint():
+        # Orthographic 3-view blueprint PNG of the whole assembly (front/top/right, labelled XYZ axes,
+        # per-part colours) — for the user AND, later, the vision-validation step of the build loop.
+        # Kernel work (tessellates real solids), so it runs in a threadpool off the event loop; NOT a
+        # Tier-0 hot path (requested on demand, never on a slider drag).
+        from packages.truth_plane.regen.blueprint import render_blueprint
+        led = state.ledger()
+        inst = state.active_instance()
+        title = "Design blueprint" if inst is None else f"Design blueprint — {get_subsystem(inst.subsystem_type).name}"
+        png = await run_in_threadpool(render_blueprint, led, title)
+        return Response(content=png, media_type="image/png",
+                        headers={"Cache-Control": "no-store"})
+
     app.include_router(router)
 
     @app.websocket("/ws")
