@@ -79,6 +79,12 @@ def instance_world_offsets(ledger: "MasterParametricLedger") -> dict[str, tuple[
     not folded into this running stack — they don't consume auto-layout "slots".)
     """
     offsets: dict[str, tuple[float, float, float]] = {}
+    # Phase 1 (2026-07-19): a part joined by a typed Connection gets its world translation from the
+    # MATE SOLVER (packages/subsystems/placement.py) — computed from the partner's declared interface
+    # frame — instead of a hand-set transform or auto-layout. Connection-placed parts short-circuit the
+    # parent-chain/auto-layout logic below; everything without a connection is unchanged.
+    from packages.subsystems.placement import resolve_placements
+    mated = resolve_placements(ledger)  # {instance_id: world Transform}; empty when there are no connections
     # cumulative Y-extent already claimed in a parent's stack (seeded with the parent's OWN extent
     # for a real parent, 0.0 for the top-level stack, then grown by each auto-placed child's
     # extent), keyed by parent id — `None` is the top-level stack's key.
@@ -86,6 +92,10 @@ def instance_world_offsets(ledger: "MasterParametricLedger") -> dict[str, tuple[
 
     def resolve(instance_id: str) -> tuple[float, float, float]:
         if instance_id in offsets:
+            return offsets[instance_id]
+        if instance_id in mated:
+            t = mated[instance_id]
+            offsets[instance_id] = (t.x_mm, t.y_mm, t.z_mm)  # absolute world placement from the mate solver
             return offsets[instance_id]
         inst = ledger.instances[instance_id]
         parent_id = inst.parent_id

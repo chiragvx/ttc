@@ -41,6 +41,34 @@ class ParamSpec:
         return ParameterDef(value=self.value, unit=self.unit, bounds=(self.min, self.max))
 
 
+@dataclass(frozen=True)
+class Frame:
+    """A declared mate point in a part's OWN (unplaced, local) coordinates (Phase 1, 2026-07-19).
+    `origin` is where the interface sits; `normal` is the outward direction its face points (unit-ish).
+    Two mating faces touch with ANTI-PARALLEL normals — `wing_panel.root` points -X into the body,
+    `bwb_fuselage.tip_right` points +X out of it — which is why a pre-oriented pair (e.g. `side_sign`
+    already handles the wing's mirroring) mates with ZERO rotation, pure translation. `up` fully
+    constrains orientation for the rotation-requiring mates deferred to Phase 1b; unused in v1."""
+
+    origin: tuple[float, float, float]
+    normal: tuple[float, float, float] = (1.0, 0.0, 0.0)
+    up: Optional[tuple[float, float, float]] = None
+
+
+@dataclass(frozen=True)
+class InterfaceSpec:
+    """One declared interface (mate point) on a subsystem — the EKG 'interface' made typed. Its `frame`
+    is a callable over the part's resolved params (like `build`/`volume`/`invariants`), so the mate
+    point tracks the geometry: change `span_mm` and the wing-tip interface moves with it, and the
+    placement solver re-mates automatically. `kind`: 'mount' (a part hangs off it), 'containment' (an
+    envelope others sit inside — the body-vs-frame-dissolving edge), 'port' (a future coupling attach
+    point, Phase 2)."""
+
+    name: str
+    kind: str  # "mount" | "containment" | "port"
+    frame: Callable[["Namespace"], Frame]
+
+
 class Namespace:
     """Attribute-access facade over a subsystem's resolved param values. `p.top_width_mm` returns the
     float value. Passed to build/volume/invariants so nobody re-lists the param names."""
@@ -133,6 +161,12 @@ class Subsystem:
     # means an ordinary systems/structural/mounting part — same deliberately-opt-in-per-subsystem
     # stance as `fea_eligible`, not inferred from shape or size.
     is_airframe_defining: bool = False
+    # 2026-07-19 (Phase 1 — interfaces + connections): declared mate points on this part. A part with
+    # interfaces can be joined to another via a typed `Connection`, and the placement solver
+    # (packages/subsystems/placement.py) derives its Transform from the mate instead of the LLM
+    # computing coordinates. Empty (default) = an ordinary part with no declared mate points; nothing
+    # changes for it. See InterfaceSpec / Frame above and ENGINEERING_GRAPH_ARCHITECTURE.md §1.
+    interfaces: list["InterfaceSpec"] = field(default_factory=list)
 
     def defaults(self) -> dict[str, ParameterDef]:
         """Materialised ParameterDefs keyed by name — used to seed the ledger's geometry bag."""

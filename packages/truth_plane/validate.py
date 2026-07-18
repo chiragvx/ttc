@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict
 
 from packages.subsystems import get_subsystem
 from packages.subsystems.assembly import instance_world_offsets
+from packages.subsystems.placement import connection_issues
 
 if TYPE_CHECKING:
     from packages.ledger.schema import MasterParametricLedger
@@ -142,21 +143,36 @@ def validate_geometry(ledger: "MasterParametricLedger") -> ValidationReport:
 
     ids = list(healthy)
 
+    # --- connections: dangling refs, or a mate that needs a rotation the v1 solver won't auto-place
+    # (packages/subsystems/placement.py). A declared connection that can't resolve is a real error —
+    # the parts won't be placed as intended. ---
+    for msg in connection_issues(ledger):
+        issues.append(ValidationIssue(check="connections", severity="warning", message=msg, instances=[]))
+
     # --- connectivity: parts should form ONE joined body (a floating part is almost always a
     # placement mistake — the wing-in-empty-space failure). Warning, not error: a deliberate kit of
     # separate parts is legitimate; the scope layer can later escalate this for a design meant to be
-    # one connected vehicle. Reports the gap so the fix is actionable. ---
+    # one connected vehicle. Reports the gap so the fix is actionable.
+    # 2026-07-19 (Phase 1): a declared Connection now counts as "joined" — so a part legitimately mated
+    # by a connection is NEVER falsely flagged as floating even if its bbox happens not to overlap
+    # (thin parts, a small gap). Bbox adjacency still catches implicit/undeclared touching. ---
     if len(ids) >= 2:
-        # union-find over bbox adjacency
         parent = {i: i for i in ids}
         def find(x):
             while parent[x] != x:
                 parent[x] = parent[parent[x]]; x = parent[x]
             return x
+        def union(x, y):
+            if x in parent and y in parent:
+                parent[find(x)] = find(y)
+        # EXACT edges first: every valid connection joins its two endpoints
+        for c in ledger.connections:
+            union(c.a.instance_id, c.b.instance_id)
+        # then implicit bbox adjacency
         for a in range(len(ids)):
             for b in range(a + 1, len(ids)):
                 if _touching(healthy[ids[a]]["bbox"], healthy[ids[b]]["bbox"]):
-                    parent[find(ids[a])] = find(ids[b])
+                    union(ids[a], ids[b])
         comps: dict[str, list[str]] = {}
         for i in ids:
             comps.setdefault(find(i), []).append(i)

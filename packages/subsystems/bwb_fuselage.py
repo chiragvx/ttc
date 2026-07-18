@@ -68,7 +68,7 @@ already carries (no hollowing feature exists yet, see `ogive_fuselage.py`'s own 
 
 from __future__ import annotations
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 from packages.subsystems._loft_profiles import ease_at, taper_stations
 from packages.subsystems._naca_airfoil import (
     naca4_half_thickness,
@@ -276,6 +276,18 @@ def _check(p) -> list[str]:
     return out
 
 
+def _tip_frame(p, side: float):
+    """Local mate frame at a body tip (Phase 1). The tip sits at `x = side*span/2`, shifted aft/up by
+    the body's OWN sweep/dihedral (`sweep_dihedral_offset` — the exact offset the copilot used to
+    hand-compute and get wrong). The face points outward (±X) so a wing_panel.root (which points
+    inward) mates anti-parallel with ZERO rotation. This is why declaring the interface here — on the
+    body, computed from its own params — is what kills the placement trig."""
+    from packages.subsystems.base import Frame
+    half = p.span_mm / 2.0
+    y_off, z_off = sweep_dihedral_offset(half, p.sweep_deg, p.dihedral_deg)
+    return Frame(origin=(side * half, y_off, z_off), normal=(side, 0.0, 0.0))
+
+
 BWB_FUSELAGE = register_subsystem(Subsystem(
     name="bwb_fuselage",
     description="Blended-wing-body — ONE continuous full-span loft, thick airfoil centerbody "
@@ -302,4 +314,11 @@ BWB_FUSELAGE = register_subsystem(Subsystem(
     # 2026-07-19 (airframe-first pacing) — the whole point of a BWB is that the body IS the wing,
     # setting the vehicle's own outer mold line. See prompt_builder.py's "airframe-first pacing".
     is_airframe_defining=True,
+    # 2026-07-19 (Phase 1) — a wing_panel mates its `root` to one of these tips; the placement solver
+    # positions it from this declared frame, so the sweep/dihedral offset is computed here (from the
+    # body's own params), never hand-computed by the copilot.
+    interfaces=[
+        InterfaceSpec(name="tip_right", kind="mount", frame=lambda p: _tip_frame(p, +1.0)),
+        InterfaceSpec(name="tip_left",  kind="mount", frame=lambda p: _tip_frame(p, -1.0)),
+    ],
 ))

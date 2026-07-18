@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Callable, Optional
 # NEW-STYLE (Phase A) — the scalable model. Existing subsystems keep using SubsystemContext below
 # until they migrate. Both APIs coexist during the transition.
 from packages.subsystems.base import (
+    Frame,
+    InterfaceSpec,
     Namespace,
     ParamSpec,
     Subsystem,

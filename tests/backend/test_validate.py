@@ -102,6 +102,38 @@ def test_judge_image_returns_none_on_an_unparseable_verdict_never_a_fabricated_p
         assert prov.judge_image(image_png=b"P", prompt="p", vision_model="m") is None, junk
 
 
+def test_a_connection_declared_part_is_not_falsely_flagged_floating():
+    # Phase 1 (2026-07-19): a part joined by a typed Connection counts as connected even if its bbox
+    # happens not to overlap — so the mate solver places the wings on the body tips, and the
+    # connectivity check must NOT call them floating.
+    from packages.truth_plane.validate import validate_geometry
+    from packages.ledger.schema import Connection, InterfaceRef
+    led = _make([
+        ("bwb_fuselage", "body", {}, {"span_mm": 500, "tip_chord_mm": 130, "sweep_deg": 15, "dihedral_deg": 2}),
+        ("wing_panel", "wr", {}, {"side_sign": 1, "root_chord_mm": 130}),
+        ("wing_panel", "wl", {}, {"side_sign": -1, "root_chord_mm": 130}),
+    ])
+    led.connections = [
+        Connection(id="cr", a=InterfaceRef(instance_id="wr", interface="root"),
+                   b=InterfaceRef(instance_id="body", interface="tip_right")),
+        Connection(id="cl", a=InterfaceRef(instance_id="wl", interface="root"),
+                   b=InterfaceRef(instance_id="body", interface="tip_left")),
+    ]
+    r = validate_geometry(led)
+    assert not any(i.check == "connectivity" for i in r.issues), r.summary
+    assert not any(i.check == "connections" for i in r.issues)
+
+
+def test_dangling_connection_surfaces_in_the_self_check():
+    from packages.truth_plane.validate import validate_geometry
+    from packages.ledger.schema import Connection, InterfaceRef
+    led = _make([("bwb_fuselage", "body", {}, {"span_mm": 500})])
+    led.connections = [Connection(id="bad", a=InterfaceRef(instance_id="body", interface="tip_right"),
+                                  b=InterfaceRef(instance_id="ghost", interface="root"))]
+    r = validate_geometry(led)
+    assert any(i.check == "connections" for i in r.issues)
+
+
 def test_visual_validation_skipped_cleanly_without_a_model(monkeypatch):
     from packages.agents.vision_validator import validate_visual
     from packages.transport.app import make_demo_ledger

@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 from packages.subsystems._naca_airfoil import (
     naca4_half_thickness,
     naca4_profile_points,
@@ -202,6 +202,15 @@ def _check(p) -> list[str]:
     return out
 
 
+def _root_frame(p):
+    """Local mate frame at the panel's root — its own local ORIGIN (that's the whole reason this part
+    is easier to attach than naca_wing: no half-span offset). The face points INWARD toward the body
+    (-X for a right panel, +X for a left one), i.e. `-side`, so it mates ANTI-PARALLEL with a
+    bwb_fuselage tip (which points outward) at ZERO rotation — pure translation (Phase 1)."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, 0.0), normal=(-_side(p), 0.0, 0.0))
+
+
 WING_PANEL = register_subsystem(Subsystem(
     name="wing_panel",
     description="Half-span tapered NACA wing panel -- root (max chord) at the inner/body end tapering "
@@ -227,4 +236,8 @@ WING_PANEL = register_subsystem(Subsystem(
     # A lifting surface sets part of the vehicle's outer mold line, same as naca_wing -> airframe-
     # defining (see packages/agents/prompt_builder.py's airframe-first pacing).
     is_airframe_defining=True,
+    # 2026-07-19 (Phase 1) — `root` mates to a bwb_fuselage tip (or any mount). The placement solver
+    # positions the panel so this frame coincides with the tip's; because both are pre-oriented the
+    # mate is pure translation. See ENGINEERING_GRAPH_ARCHITECTURE.md §1 / ENGINEERING_GRAPH_PLAN.md P1.
+    interfaces=[InterfaceSpec(name="root", kind="mount", frame=_root_frame)],
 ))

@@ -165,6 +165,30 @@ class Review(_Strict):
     reviewer: Optional[str] = None
 
 
+class InterfaceRef(_Strict):
+    """A reference to one declared mate point on one instance (Phase 1, 2026-07-19). `interface` names
+    an InterfaceSpec on the instance's subsystem (packages/subsystems/base.py)."""
+
+    instance_id: str
+    interface: str
+
+
+class Connection(_Strict):
+    """A typed join between two instances' interfaces — the EKG 'connection' made a first-class ledger
+    object (ENGINEERING_GRAPH_ARCHITECTURE.md §1). Replaces hand-computed placement: mating `a` to `b`
+    means the placement solver (packages/subsystems/placement.py) positions the not-yet-placed part so
+    its interface frame coincides with its partner's, instead of the LLM computing a Transform.
+
+    `kind` is advisory today (all kinds mate the same way in Phase 1); `containment` is the edge that
+    dissolves body-vs-frame (arch doc §5). `gap_mm` pushes the two apart along the mate normal."""
+
+    id: str
+    a: InterfaceRef
+    b: InterfaceRef
+    kind: Literal["mate", "bolted", "slip_fit", "containment"] = "mate"
+    gap_mm: float = 0.0
+
+
 class MasterParametricLedger(_Strict):
     project_metadata: ProjectMetadata
     global_constraints: GlobalConstraints = Field(default_factory=GlobalConstraints)
@@ -174,5 +198,9 @@ class MasterParametricLedger(_Strict):
     # migration; app code seeds a root instance from the active subsystem.
     instances: dict[str, Instance] = Field(default_factory=dict)
     root_id: str = "root"
+    # Phase 1 (2026-07-19) — typed interface-to-interface joins. A part with a connection is placed by
+    # the mate solver, not by a hand-set transform (which still works as a fallback/override). Empty
+    # for every design that predates this — fully backward-compatible.
+    connections: list[Connection] = Field(default_factory=list)
     derived: DerivedSafety = Field(default_factory=DerivedSafety)
     review: Review = Field(default_factory=Review)
