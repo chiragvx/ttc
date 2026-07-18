@@ -504,3 +504,7 @@ from packages.subsystems import tube_fuselage as _tube_fuselage  # noqa: E402, F
 # Blended-wing-body fuselage (2026-07-18) -- ONE continuous full-span loft, thick airfoil centerbody
 # blending to thin wing-like tips. `naca_wing`'s sibling; see bwb_fuselage.py's module docstring.
 from packages.subsystems import bwb_fuselage as _bwb_fuselage  # noqa: E402, F401
+
+# Half-span wing panel (2026-07-19) -- root at the inner/body end, single taper to the outer tip;
+# side_sign picks left/right. The side-panel `naca_wing` can't be. See wing_panel.py's docstring.
+from packages.subsystems import wing_panel as _wing_panel  # noqa: E402, F401

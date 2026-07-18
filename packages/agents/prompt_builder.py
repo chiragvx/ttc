@@ -151,60 +151,60 @@ surface" — good enough without evaluating that fuselage's exact taper formula 
 `naca_wing` a much smaller `span_mm` than a main wing (a real vertical stabilizer is far shorter than \
 the wingspan) — e.g. 200-350mm for a fuselage in the many-hundred-mm range.
 - **Worked, VERIFIED recipe — a BWB centerbody with continuing outer wing panels** (verified directly \
-this session, rebuilding this exact composition in build123d and slicing across the seam to confirm \
-the join lines up): a real blended-wing-body is often built as THREE separate parts — a `bwb_fuselage` \
-scoped down to just the thick centerbody, plus a `naca_wing` panel on EACH side continuing the taper \
-out to the real wingtip — not one `bwb_fuselage` spanning the whole vehicle. Reach for this specifically \
-when the user distinguishes "the body" from "the wings" as separate things (e.g. wants them "as \
-separate parts", or describes a body that should stay compact while the wings extend further), rather \
-than one continuous BWB shape end to end.
-  - **MUST be TWO SEPARATE TURNS, never one — this is not optional.** CONFIRMED LIVE FAILURE (this \
-  session): a single turn that both resized an EXISTING body's `span_mm`/`blend_taper_mm` AND added both \
-  wings at once produced a body resize that silently hit an invariant CONFLICT (never retried) plus two \
-  wings added with NO position and NO sizing deltas at all — every number the wings needed depends on \
-  the body's post-resize state, and deltas + `instance_ops` in ONE proposal are all emitted together \
-  BEFORE any of them are actually applied, so nothing in that same turn can react to whether an earlier \
-  one in it landed, was clamped, or was rejected. The fix is procedural, not a wording tweak: \
+this session, rebuilding this exact composition in build123d and slicing across the seam to confirm the \
+join lines up to <1mm): a real blended-wing-body is built as THREE separate parts — a `bwb_fuselage` \
+scoped down to just the thick centerbody, plus a **`wing_panel`** on EACH side continuing the taper out \
+to the real wingtip — not one `bwb_fuselage` spanning the whole vehicle. Reach for this when the user \
+distinguishes "the body" from "the wings" as separate things (e.g. wants them "as separate parts", or a \
+body that stays compact while the wings extend further), rather than one continuous BWB shape end to end.
+  - **USE `wing_panel`, NOT `naca_wing`, for the side panels.** `naca_wing` is a FULL-span SYMMETRIC \
+  wing (max chord in its MIDDLE, tapering to a tip at BOTH ends) — used as a side panel it makes a wrong \
+  lens/football shape (thin at the body, thick in the middle, thin at the tip). `wing_panel` is the \
+  half-span panel with its root (max chord) at the INNER/body end tapering to a single OUTER tip — the \
+  correct side-panel shape (CONFIRMED live: the `naca_wing` version rendered as the lens shape and the \
+  user rejected it).
+  - **MUST be TWO SEPARATE TURNS, never one — not optional.** CONFIRMED LIVE FAILURE: a single turn that \
+  both resized an EXISTING body's `span_mm`/`blend_taper_mm` AND added both wings produced a body resize \
+  that silently hit an invariant CONFLICT (never retried) plus wings added with NO position/sizing — \
+  every number the wings need depends on the body's post-resize state, and deltas + `instance_ops` in \
+  ONE proposal are all emitted together BEFORE any apply, so nothing in that turn can react to whether an \
+  earlier item landed, was clamped, or was rejected.
   - **Turn 1** — get the body (`bwb_fuselage`) to its final centerbody proportions ONLY: either \
-  `add_instance` it fresh with its sizing `deltas` in the same call (safe — a fresh instance's own \
-  deltas targeting ITS OWN new id in the same proposal is the normal, already-supported pattern), or, if \
-  it already exists, propose ONLY the resize `deltas` — do not also add either wing this turn, even if \
-  the user's request describes the whole vehicle at once. Say plainly in your reply that the wings come \
-  next once the body's real proportions are confirmed.
-  - **Turn 2** (the FOLLOWING message, after the resize/add has actually landed) — re-read the body's \
-  REAL, now-committed `tip_chord_mm`/`tip_thickness_pct`/`sweep_deg`/`span_mm` from "Current parts in \
-  this file" / the live ledger JSON (never the value you PROPOSED last turn, in case it was clamped to \
-  an `APPLIED_ADVISORY` value or partially rejected) and ONLY THEN add both `naca_wing` panels, sized \
-  and positioned from those real numbers per the formulas below.
-  - Give `bwb_fuselage` a `span_mm` covering ONLY the centerbody + its own blend taper — NOT the full \
-  vehicle span (e.g. 500-800mm for a centerbody, not the 1500-1800mm a whole-vehicle BWB would use).
-  - Each `naca_wing`'s `root_chord_mm` = the body's OWN (real, committed) `tip_chord_mm` value (copy the \
-  number — this is what makes the wing's root match the body's own taper endpoint; there is no live \
-  link, so if the body's `tip_chord_mm` changes again later, the wing's `root_chord_mm` must be updated \
-  to match again, same as any other REFINING edit). Each wing's `thickness_pct` = the body's own \
-  `tip_thickness_pct`. Each wing's `sweep_deg` = the body's own `sweep_deg` (continues the same \
-  leading-edge sweep line — do NOT give the wings a different sweep unless the user explicitly asks for \
-  a kinked sweep).
-  - Position EACH wing (both sides use the SAME formula — do NOT flip any sign between left and right; \
-  `naca_wing` is symmetric about its own root, so the identical unmirrored part works on both sides): \
-  `x_mm = ±(body's span_mm / 2)` (positive for the right wing, negative for the left), \
-  `y_mm = (body's span_mm / 2) * tan(body's sweep_deg in radians)`, \
-  `z_mm = (body's span_mm / 2) * tan(body's dihedral_deg in radians)` — SAME `y_mm`/`z_mm` value on \
-  BOTH sides, only `x_mm`'s sign differs. No `rx_deg`/`ry_deg`/`rz_deg` — `bwb_fuselage` and `naca_wing` \
-  already share the identical span=local-X/chord=local-Y/thickness=local-Z convention, so this is pure \
-  translation, unlike the vertical-stabilizer recipe above which needs a 90° reorientation. Both \
-  `add_instance` entries for the wings MUST carry this position AND the sizing deltas above in the SAME \
-  call — an add with no position/sizing falls back to auto-layout at generic catalog defaults, which is \
-  the exact live failure this two-turn rule exists to prevent.
-  - Worked numbers (from this session's verification): body `span_mm=600`, `sweep_deg=20`, \
-  `dihedral_deg=2`, `tip_chord_mm=120`, `tip_thickness_pct=12` → each wing gets `root_chord_mm=120`, \
-  `thickness_pct=12`, `sweep_deg=20`, and is placed at `x_mm=±300`, `y_mm=300*tan(20°)≈109.2`, \
-  `z_mm=300*tan(2°)≈10.5`.
-  - Be upfront about ONE real limitation, do not silently paper over it: both parts use the identical \
-  NACA cross-section formula, so the chord/thickness match EXACTLY at the seam (no visible step) — but \
-  `bwb_fuselage`'s own taper curve (a smooth cosine-ease) and `naca_wing`'s taper (a straight line) do \
-  not necessarily share the same SLOPE at that junction, so a subtle kink in the outline's curvature at \
-  the seam is possible even though the sizes line up perfectly.
+  `add_instance` it fresh with its sizing `deltas` in the same call (a fresh instance's own deltas \
+  targeting its OWN new id in the same proposal is the supported pattern), or if it already exists, \
+  propose ONLY the resize `deltas` — do NOT add either wing this turn, even if the request describes the \
+  whole vehicle. Say the wings come next once the body's real proportions are confirmed. Give the body a \
+  `span_mm` covering ONLY the centerbody + its blend taper (e.g. 500-800mm), NOT the full vehicle span.
+  - **Turn 2** (the FOLLOWING message, after the resize/add actually landed) — READ the body's REAL, \
+  now-committed `span_mm`/`tip_chord_mm`/`tip_thickness_pct`/`sweep_deg`/`dihedral_deg` from "Current \
+  parts in this file" / the live ledger JSON (NEVER the value you proposed last turn — it may have been \
+  clamped to an `APPLIED_ADVISORY` value or rejected; this "read the precursor part's ACTUAL committed \
+  dims, don't assume them" rule is what makes the placement land accurately). THEN add both `wing_panel`s, \
+  each `add_instance` carrying its sizing deltas AND its position in the SAME call:
+    - `root_chord_mm` = the body's real committed `tip_chord_mm` (seamless join — the wing root chord \
+    equals the body's own tip chord); `thickness_pct` = the body's real `tip_thickness_pct`; \
+    `sweep_deg` = the body's real `sweep_deg`; `dihedral_deg` = the body's real `dihedral_deg` (these \
+    four continue the body's own outline outward with no step and no kink in sweep). `span_mm` = the \
+    exposed panel length the user wants on ONE side; `tip_chord_mm` = the outer wingtip chord (< the \
+    root). Total wingspan = body `span_mm` + 2 × panel `span_mm`.
+    - Right panel: `side_sign=1`. Left panel: `side_sign=-1`. (`side_sign` is what mirrors the panel — \
+    both panels keep the SAME `sweep_deg`/`dihedral_deg`, `side_sign` alone flips the side, so a matched \
+    pair sweeps aft symmetrically. NEVER use rotation for the mirror and never negate sweep_deg.)
+    - Position (root sits at the body's own tip station, because a `wing_panel`'s root is at its own \
+    local origin — no half-span offset): let `H = body span_mm / 2`. Right panel at \
+    `x_mm = +H`, Left panel at `x_mm = -H`; BOTH at `y_mm = H * tan(body sweep_deg in radians)` and \
+    `z_mm = H * tan(body dihedral_deg in radians)` (same y_mm/z_mm on both sides — these equal the \
+    body's OWN tip offset, so the wing root lands exactly on the body edge). NO `rx_deg`/`ry_deg`/`rz_deg` \
+    — `wing_panel` and `bwb_fuselage` share the span=local-X / chord=local-Y / thickness=local-Z \
+    convention, so this is pure translation.
+  - Worked numbers (verified this session, seam matched to <1mm): body `span_mm=500`, `sweep_deg=15`, \
+  `dihedral_deg=2`, real `tip_chord_mm=120`, real `tip_thickness_pct=12` → H=250; each `wing_panel` gets \
+  `root_chord_mm=120`, `thickness_pct=12`, `sweep_deg=15`, `dihedral_deg=2`, `span_mm=250`, \
+  `tip_chord_mm=70`; RIGHT: `side_sign=1, x_mm=250, y_mm=250*tan(15°)≈67.0, z_mm=250*tan(2°)≈8.7`; LEFT: \
+  `side_sign=-1, x_mm=-250, y_mm=67.0, z_mm=8.7`. Total span = 500 + 2×250 = 1000mm.
+  - One honest limitation, don't paper over it: the body's own taper is a smooth cosine-ease and the \
+  panel's is a straight line, so while the chord/thickness match EXACTLY at the seam (no step), the \
+  outline's SLOPE may not, leaving a possible subtle curvature kink right at the join.
 
 Single tapered body vs. segmented skeleton — pick the recipe that actually matches the request. Not \
 every "fuselage" (or similar streamlined shape) needs the bulkhead_frame+longeron recipe above: for a \

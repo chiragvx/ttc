@@ -48,7 +48,7 @@ def test_is_airframe_defining_flags_exactly_the_wing_and_fuselage_class_parts():
     # fea_eligible), so this pins the exact expected set rather than inferring it from name/shape.
     expected = {
         "naca_wing", "bwb_fuselage", "tube_fuselage", "ogive_fuselage", "winged_fuselage",
-        "lofted_spindle", "lofted_hull",
+        "lofted_spindle", "lofted_hull", "wing_panel",
     }
     actual = {name for name, sub in SUBSYSTEM_REGISTRY.items() if sub.is_airframe_defining}
     assert actual == expected
