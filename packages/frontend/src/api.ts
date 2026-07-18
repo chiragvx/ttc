@@ -1,4 +1,4 @@
-import type { ChatEvent, CutFeature, FeatureOp, InstanceOp, InstanceSnapshot, MeshData, PickableFeature, TelemetryDelta } from "./types";
+import type { ChatEvent, CutFeature, FeatureOp, InstanceOp, InstanceSnapshot, MeshData, PickableFeature, TelemetryDelta, ValidationResult } from "./types";
 import { loadSettings, type LlmSettings } from "./settings";
 
 // REST + SSE calls to the FastAPI backend (proxied by Vite in dev).
@@ -182,6 +182,15 @@ export async function getRequirements(): Promise<RequirementsData> {
 }
 export async function signoff(): Promise<void> {
   await apiFetch("/signoff?reviewer=engineer", { method: "POST" });
+}
+
+// Self-check the current assembly (2026-07-19). Geometric check always runs (no model); the visual
+// check runs only if a vision model is configured server-side (VISION_MODEL) and a key is passed.
+export async function runValidate(intent: string, apiKey?: string | null): Promise<ValidationResult> {
+  return (await apiFetch("/validate", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ intent, api_key: apiKey ?? null }),
+  })).json();
 }
 
 // Stream a conversational reply. Calls onEvent for each SSE event; abortable via signal.

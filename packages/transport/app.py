@@ -254,6 +254,13 @@ class ChatRequest(BaseModel):
     model: str | None = None
 
 
+class ValidateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    intent: str = ""                    # the user's design intent, for the (optional) visual check
+    api_key: str | None = None          # OpenRouter key — only needed for the visual/vision check
+    vision_model: str | None = None     # overrides the VISION_MODEL env for this call
+
+
 class GoalRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     goal: str                    # natural-language design goal -> a verification matrix (TARGETS only)
@@ -1284,6 +1291,30 @@ def create_app() -> FastAPI:
         png = await run_in_threadpool(render_blueprint, led, title)
         return Response(content=png, media_type="image/png",
                         headers={"Cache-Control": "no-store"})
+
+    @router.post("/validate")
+    async def validate(req: ValidateRequest):
+        # Self-check of the current assembly. GEOMETRIC check always runs (deterministic, no model —
+        # catches floating/engulfed/degenerate parts). VISUAL check runs ONLY when a vision model is
+        # configured (VISION_MODEL env, or req.vision_model) AND a key is available — else it's cleanly
+        # skipped and the geometric verdict stands alone (a missing visual check never fabricates a
+        # pass). This is what the copilot's build loop calls to check its own work.
+        from packages.truth_plane.validate import validate_geometry
+        from packages.agents.vision_validator import validate_visual, vision_model_configured
+        led = state.ledger()
+        geo = await run_in_threadpool(validate_geometry, led)
+        visual = None
+        vision_on = bool(req.vision_model) or vision_model_configured()
+        if vision_on:
+            visual = await run_in_threadpool(validate_visual, led, req.intent,
+                                             api_key=req.api_key, vision_model=req.vision_model)
+        return {
+            "ok": geo.ok and (visual.ok if visual is not None else True),
+            "geometric": geo.model_dump(),
+            "visual": visual.model_dump() if visual is not None else None,
+            "vision_enabled": vision_on,
+            "vision_ran": visual is not None,
+        }
 
     app.include_router(router)
 

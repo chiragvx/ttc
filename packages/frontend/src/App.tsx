@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { activateInstance, addInstance, analyze, analyzeStatus, applyFeatureOp as postFeatureOp, applyInstanceOp as postInstanceOp, createFile, exportCheck, fetchTelemetry, getParams, getRequirements, getSubsystems, listFiles, listInstances, openFile, optimize, optimizeStatus, removeInstance, setGoal, signoff, type FileRow, type InstanceRow, type ParamSpec, type RequirementsData, type SubsystemInfo } from "./api";
+import { activateInstance, addInstance, analyze, analyzeStatus, applyFeatureOp as postFeatureOp, applyInstanceOp as postInstanceOp, createFile, exportCheck, fetchTelemetry, getParams, getRequirements, getSubsystems, listFiles, listInstances, openFile, optimize, optimizeStatus, removeInstance, runValidate, setGoal, signoff, type FileRow, type InstanceRow, type ParamSpec, type RequirementsData, type SubsystemInfo } from "./api";
 import { AnalysisBar, type AnalysisState } from "./AnalysisBar";
 import { OptimizeResult, type OptimizeResultData } from "./OptimizeResult";
 import { Chat } from "./chat/Chat";
@@ -495,6 +495,7 @@ export default function App() {
             <Chat settings={settings} onApply={applyDeltas} onUndo={undo} onApplyFeatureOp={applyFeatureOp}
                   onApplyInstanceOp={applyInstanceOp} onUndoFeatureOp={undoFeatureOp} onUndoInstanceOp={undoInstanceOp}
                   onOpsApplied={refreshAfterOps}
+                  onValidate={(intent) => runValidate(intent, settings.apiKey)}
                   onUserMessage={applyGoal} onHoverInstance={setHoveredInstanceId}
                   onOpenSettings={() => setSettingsOpen(true)} />
           </div>

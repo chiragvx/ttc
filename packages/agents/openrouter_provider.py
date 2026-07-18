@@ -88,6 +88,48 @@ class OpenRouterDeltaProvider(LLMProvider):
         # forced tool_choice should prevent this; fail safe to a clarification rather than guess
         return DeltaProposal(request_clarification="No structured delta was produced.")
 
+    # -- vision judgment (blueprint self-check) --------------------------------------------------
+    def judge_image(self, *, image_png: bytes, prompt: str, vision_model: str) -> "dict | None":
+        """Send a PNG (base64 data URL) + `prompt` to a VISION-capable model and return its parsed
+        JSON verdict `{"ok": bool, "issues": [{"severity","message"}], "summary": str}`. Goes through
+        the SAME `_do_post` httpx seam as every other model call here (no vendor SDK — the CI lint that
+        forbids `import anthropic` is satisfied). `vision_model` is REQUIRED and distinct from
+        `self.model`: the default delta-emitter (deepseek/deepseek-chat) is text-only and cannot see —
+        the caller passes a real vision model (packages/agents/vision_validator.py reads it from
+        VISION_MODEL). Raises on transport error; the caller degrades gracefully.
+
+        Returns **None** when no genuine JSON verdict can be parsed (absent/truncated/non-JSON reply).
+        It must NEVER manufacture a `{"ok": True}` from an unparseable response — that would silently
+        flip a real problem into a fabricated visual pass (2026-07-19 review, HIGH). None means
+        "inconclusive"; the caller treats it as 'no visual verdict' and relies on the geometric check."""
+        import base64
+        b64 = base64.b64encode(image_png).decode("ascii")
+        payload = {
+            "model": vision_model,
+            "max_tokens": self.max_tokens,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                ],
+            }],
+        }
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        data = self._do_post(f"{self.base_url}/chat/completions", headers, payload)
+        content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+        if isinstance(content, list):  # some providers return content as parts
+            content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+        # tolerate a model that wraps its JSON in prose / a ```json fence
+        start, end = content.find("{"), content.rfind("}")
+        if start == -1 or end == -1:
+            return None  # no JSON object at all — inconclusive, never a fabricated pass
+        try:
+            parsed = json.loads(content[start:end + 1])
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
     # -- streaming conversational chat (prose + an optional delta proposal) --------------------
     def _do_stream(self, url: str, headers: dict, payload: dict):
         if self._stream_post is not None:

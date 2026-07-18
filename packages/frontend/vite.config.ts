@@ -21,6 +21,7 @@ export default defineConfig({
       "/chat": "http://localhost:8001",
       "/mesh": "http://localhost:8001",
       "/blueprint": "http://localhost:8001",
+      "/validate": "http://localhost:8001",
       "/analyze": "http://localhost:8001",
       "/optimize": "http://localhost:8001",
       "/signoff": "http://localhost:8001",

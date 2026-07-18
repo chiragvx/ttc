@@ -37,6 +37,27 @@ export interface ValidRange {
   valid_max: number;
 }
 
+// self-check report (2026-07-19) — geometric backbone always; visual half only when a vision model
+// is configured. Mirrors packages/truth_plane/validate.py::ValidationReport.
+export interface ValidationIssue {
+  check: string;      // degeneracy | connectivity | embedding | visual
+  severity: string;   // error | warning | info
+  message: string;
+  instances: string[];
+}
+export interface ValidationReport {
+  ok: boolean;
+  issues: ValidationIssue[];
+  summary: string;
+}
+export interface ValidationResult {
+  ok: boolean;
+  geometric: ValidationReport;
+  visual: ValidationReport | null;
+  vision_enabled: boolean;
+  vision_ran: boolean;
+}
+
 export interface CascadeUpdate {
   event_type: "PARAMETER_CASCADE_UPDATE";
   mutations_applied: MutationApplied[];
@@ -219,4 +240,5 @@ export interface ChatMessage {
   featureOpOutcomes?: (FeatureOpOutcome | undefined)[];
   instanceOps?: InstanceOp[];             // AI-proposed add/remove-instance ops — auto-applied likewise
   instanceOpOutcomes?: (InstanceOpOutcome | undefined)[];
+  validation?: ValidationResult;          // self-check run after this turn's geometry changes (2026-07-19)
 }
