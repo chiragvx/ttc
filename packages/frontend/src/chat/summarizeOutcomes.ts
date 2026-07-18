@@ -37,6 +37,23 @@ export function summarizeOutcomes(m: ChatMessage): string | null {
       parts.push(entry);
     });
   }
+  // Phase 1b (2026-07-19): connection outcomes MUST reach the model too, symmetric with instance/
+  // feature ops — otherwise a REJECTED mate (e.g. a hallucinated interface name) never gets fed back
+  // and the model re-proposes the identical wrong mate next turn, and an APPLIED mate's minted
+  // connection_id is never learned so it can't target a later remove_connection (2026-07-19 review).
+  if (m.connectionOps) {
+    m.connectionOps.forEach((op, i) => {
+      const outcome = m.connectionOpOutcomes?.[i];
+      if (!outcome) return;
+      const what = op.op === "add_connection"
+        ? `connect ${op.a_instance}.${op.a_interface} <-> ${op.b_instance}.${op.b_interface}`
+        : `remove_connection ${op.id}`;
+      let entry = `${what} -> ${outcome.status}`;
+      if (outcome.status === "APPLIED" && outcome.connectionId) entry += ` (connection_id=${outcome.connectionId})`;
+      if (outcome.message && outcome.status !== "APPLIED") entry += `: ${outcome.message}`;
+      parts.push(entry);
+    });
+  }
 
   return parts.length > 0 ? `[outcomes: ${parts.join("; ")}]` : null;
 }

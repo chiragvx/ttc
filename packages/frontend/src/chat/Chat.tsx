@@ -10,7 +10,7 @@ import { ValidationCard } from "./ValidationCard";
 import { summarizeOutcomes } from "./summarizeOutcomes";
 import { streamChat } from "../api";
 import type { LlmSettings } from "../settings";
-import type { ChatEvent, ChatMessage, DeltaOutcome, FeatureOp, FeatureOpOutcome, InstanceOp, InstanceOpOutcome, ParameterDelta, ValidationResult } from "../types";
+import type { ChatEvent, ChatMessage, ConnectionOp, ConnectionOpOutcome, DeltaOutcome, FeatureOp, FeatureOpOutcome, InstanceOp, InstanceOpOutcome, ParameterDelta, ValidationResult } from "../types";
 
 interface Props {
   settings: LlmSettings;
@@ -18,6 +18,7 @@ interface Props {
   onUndo: (outcomes: DeltaOutcome[]) => Promise<void>;
   onApplyFeatureOp: (op: FeatureOp) => Promise<FeatureOpOutcome>;
   onApplyInstanceOp: (op: InstanceOp) => Promise<InstanceOpOutcome>;
+  onApplyConnectionOp: (op: ConnectionOp) => Promise<ConnectionOpOutcome>;  // Phase 1b mate
   onUndoFeatureOp: (outcome: FeatureOpOutcome) => Promise<FeatureOpOutcome>;
   onUndoInstanceOp: (outcome: InstanceOpOutcome) => Promise<InstanceOpOutcome>;
   // called once after a whole batch of feature_ops/instance_ops finishes applying (a full proposal,
@@ -38,7 +39,7 @@ const uid = () => (crypto?.randomUUID?.() ?? String(Math.random()));
 // cap so a design it can't satisfy never loops forever (or burns tokens indefinitely).
 const MAX_AUTO_ROUNDS = 2;
 
-export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInstanceOp, onUndoFeatureOp, onUndoInstanceOp, onOpsApplied, onValidate, onOpenSettings, onUserMessage, onHoverInstance }: Props) {
+export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInstanceOp, onApplyConnectionOp, onUndoFeatureOp, onUndoInstanceOp, onOpsApplied, onValidate, onOpenSettings, onUserMessage, onHoverInstance }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [undone, setUndone] = useState<Record<string, boolean>>({});
@@ -119,6 +120,17 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
               patch(aid, (m) => ({ ...m, instanceOpOutcomes: [...instanceOpOutcomes] }));
             }
             if (instanceOpOutcomes.some((o) => o?.status === "APPLIED")) appliedGeometry = true;
+            await onOpsApplied();
+          }
+          if (e.connection_ops?.length) {
+            // AFTER instance_ops (both parts must exist), so the mate places the newly-added parts.
+            const connOutcomes: (ConnectionOpOutcome | undefined)[] = new Array(e.connection_ops.length).fill(undefined);
+            patch(aid, (m) => ({ ...m, connectionOps: e.connection_ops, connectionOpOutcomes: [...connOutcomes] }));
+            for (let i = 0; i < e.connection_ops.length; i++) {
+              connOutcomes[i] = await onApplyConnectionOp(e.connection_ops[i]);
+              patch(aid, (m) => ({ ...m, connectionOpOutcomes: [...connOutcomes] }));
+            }
+            if (connOutcomes.some((o) => o?.status === "APPLIED")) appliedGeometry = true;
             await onOpsApplied();
           }
           if (e.deltas.length) {
@@ -298,6 +310,29 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
               }
             }}
           />
+        ),
+      });
+    }
+    if (m.connectionOps && m.connectionOps.length > 0) {
+      sections.push({
+        label: "Mates",
+        content: (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {m.connectionOps.map((op, i) => {
+              const o = m.connectionOpOutcomes?.[i];
+              const ok = o?.status === "APPLIED";
+              const color = o == null ? "#8b949e" : ok ? "#3fb950" : "#f85149";
+              const label = op.op === "add_connection"
+                ? `${op.a_instance}.${op.a_interface} ↔ ${op.b_instance}.${op.b_interface}`
+                : `remove ${op.id}`;
+              return (
+                <div key={i} style={{ fontSize: 11, color: "#c9d1d9" }}>
+                  <span style={{ color }}>{o == null ? "…" : ok ? "✓" : "✕"}</span> {label}
+                  {o && !ok && o.message ? <span style={{ color: "#f85149" }}> — {o.message}</span> : null}
+                </div>
+              );
+            })}
+          </div>
         ),
       });
     }

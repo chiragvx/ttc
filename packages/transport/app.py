@@ -32,9 +32,9 @@ from packages.subsystems import (
 )
 from packages.subsystems.assembly_template import reconcile_all, reconcile_children
 from packages.subsystems.base import seed_instance
-from packages.ledger.apply import apply_delta, apply_feature_op, apply_instance_op
+from packages.ledger.apply import apply_connection_op, apply_delta, apply_feature_op, apply_instance_op
 from packages.ledger.bom import BOM, Component, ComponentKind, material
-from packages.ledger.deltas import FeatureOp, InstanceOp, ParameterDelta
+from packages.ledger.deltas import ConnectionOp, FeatureOp, InstanceOp, ParameterDelta
 from packages.ledger.events import EventLog
 from packages.ledger.derived_resolver import latest_verdict, ledger_with_derived
 from packages.ledger.fingerprint import fingerprint
@@ -958,6 +958,11 @@ def create_app() -> FastAPI:
                 state.log.append_instance_moved(outcome.instance_id, outcome.instance.transform,
                                                 actor="user", ts=_TS)
             else:
+                # persist the cascade-removed connections FIRST (a dangling connection resurrecting on
+                # an id-reused new part is exactly what this prevents — 2026-07-19 review), then the
+                # instance removal itself.
+                for cid in outcome.removed_connection_ids:
+                    state.log.append_connection_removed(cid, actor="user", ts=_TS)
                 state.log.append_instance_removed(outcome.instance_id, actor="user", ts=_TS)
                 if state.active_instance_id == outcome.instance_id:  # it just got removed -> fall
                     # back to whatever's left (None if the file is now empty) — no root to fall back to
@@ -969,6 +974,31 @@ def create_app() -> FastAPI:
             "instance": outcome.instance.model_dump(mode="json") if outcome.instance is not None else None,
             "previous_instance": (outcome.previous_instance.model_dump(mode="json")
                                   if outcome.previous_instance is not None else None),
+            "message": outcome.message,
+        }
+
+    @router.post("/connection_ops")
+    def create_connection_op(op: ConnectionOp):
+        # Phase 1b (2026-07-19): add/remove a typed interface<->interface mate. The placement solver
+        # then derives the mated part's position from the parts' declared frames — so the copilot wires
+        # a connection instead of hand-computing x/y/z. Interface validity is checked against the live
+        # registry (an interface the part doesn't declare is rejected loudly).
+        def interfaces_of(subsystem_type: str) -> frozenset[str]:
+            try:
+                return frozenset(i.name for i in get_subsystem_model(subsystem_type).interfaces)
+            except KeyError:
+                return frozenset()
+        _, outcome = apply_connection_op(state.ledger(), op, interfaces_of)
+        if outcome.changed:
+            if op.op == "add_connection":
+                state.log.append_connection_added(outcome.connection, actor="user", ts=_TS)
+            else:
+                state.log.append_connection_removed(outcome.connection_id, actor="user", ts=_TS)
+        return {
+            "ok": outcome.changed,
+            "status": outcome.status.value,
+            "connection_id": outcome.connection_id,
+            "connection": outcome.connection.model_dump(mode="json") if outcome.connection is not None else None,
             "message": outcome.message,
         }
 
@@ -1229,6 +1259,7 @@ def create_app() -> FastAPI:
                                 "deltas": [d.model_dump(mode="json") for d in payload.deltas],
                                 "feature_ops": [fo.model_dump(mode="json") for fo in payload.feature_ops],
                                 "instance_ops": [io.model_dump(mode="json") for io in payload.instance_ops],
+                                "connection_ops": [co.model_dump(mode="json") for co in payload.connection_ops],
                                 "clarification": payload.request_clarification,
                                 "suggestions": payload.suggestions})
                 elif kind == "error":

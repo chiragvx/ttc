@@ -1,4 +1,4 @@
-import type { ChatEvent, CutFeature, FeatureOp, InstanceOp, InstanceSnapshot, MeshData, PickableFeature, TelemetryDelta, ValidationResult } from "./types";
+import type { ChatEvent, ConnectionOp, CutFeature, FeatureOp, InstanceOp, InstanceSnapshot, MeshData, PickableFeature, TelemetryDelta, ValidationResult } from "./types";
 import { loadSettings, type LlmSettings } from "./settings";
 
 // REST + SSE calls to the FastAPI backend (proxied by Vite in dev).
@@ -125,6 +125,25 @@ export async function applyInstanceOp(op: InstanceOp): Promise<InstanceOpApplyRe
   return (await apiFetch("/instance_ops", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(op),
   })).json();
+}
+
+// --- ConnectionOp (2026-07-19): add/remove a typed interface<->interface mate. Posted VERBATIM as
+// received in a "proposal" SSE event; the placement solver derives the mated part's position.
+export interface ConnectionOpApplyResponse {
+  ok: boolean;
+  status: "APPLIED" | "REJECTED" | "CONFLICT";
+  connection_id: string | null;
+  connection: unknown | null;
+  message: string;
+}
+export async function applyConnectionOp(op: ConnectionOp): Promise<ConnectionOpApplyResponse> {
+  const res = await apiFetch("/connection_ops", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(op),
+  });
+  // a backend without this route (older build) returns 404/HTML — surface a clear message instead of
+  // a cryptic JSON-parse error (2026-07-19 review)
+  if (!res.ok) throw new Error(`connection endpoint unavailable (HTTP ${res.status})`);
+  return res.json();
 }
 
 // --- truth-plane analysis loop ---

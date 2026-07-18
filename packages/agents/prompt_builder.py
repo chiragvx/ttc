@@ -190,13 +190,19 @@ body that stays compact while the wings extend further), rather than one continu
     - Right panel: `side_sign=1`. Left panel: `side_sign=-1`. (`side_sign` is what mirrors the panel — \
     both panels keep the SAME `sweep_deg`/`dihedral_deg`, `side_sign` alone flips the side, so a matched \
     pair sweeps aft symmetrically. NEVER use rotation for the mirror and never negate sweep_deg.)
-    - Position (root sits at the body's own tip station, because a `wing_panel`'s root is at its own \
-    local origin — no half-span offset): let `H = body span_mm / 2`. Right panel at \
-    `x_mm = +H`, Left panel at `x_mm = -H`; BOTH at `y_mm = H * tan(body sweep_deg in radians)` and \
-    `z_mm = H * tan(body dihedral_deg in radians)` (same y_mm/z_mm on both sides — these equal the \
-    body's OWN tip offset, so the wing root lands exactly on the body edge). NO `rx_deg`/`ry_deg`/`rz_deg` \
-    — `wing_panel` and `bwb_fuselage` share the span=local-X / chord=local-Y / thickness=local-Z \
-    convention, so this is pure translation.
+    - Position — STRONGLY PREFER `connection_ops`, do NOT hand-compute x/y/z. `wing_panel` declares a \
+    `root` interface and `bwb_fuselage` declares `tip_left`/`tip_right` (see the part-types menu). Add \
+    TWO `connection_ops` add_connection entries in the SAME call as the wing add_instances: right panel \
+    `a_instance=<right wing id>, a_interface="root", b_instance=<body id>, b_interface="tip_right"`; left \
+    panel the same with `"tip_left"`. The engine's placement solver then derives each wing's position \
+    from the body's OWN declared tip frame (which already includes the sweep/dihedral offset) — so you \
+    NEVER compute `H`, `tan(sweep)`, or any coordinate, and it lands exactly on the body edge by \
+    construction. Leave x_mm/y_mm/z_mm UNSET on the wing add_instance when you connect it. \
+    (Legacy fallback ONLY if a needed interface doesn't exist: root sits at the body's own tip station \
+    because a `wing_panel`'s root is at its own local origin — `H = body span_mm / 2`, right at \
+    `x_mm=+H`, left at `x_mm=-H`, both `y_mm = H*tan(body sweep_deg)`, `z_mm = H*tan(body dihedral_deg)`, \
+    no rotation — but use `connection_ops` instead whenever the interfaces exist, which for BWB+wing they \
+    always do.)
   - Worked numbers (verified this session, seam matched to <1mm): body `span_mm=500`, `sweep_deg=15`, \
   `dihedral_deg=2`, real `tip_chord_mm=120`, real `tip_thickness_pct=12` → H=250; each `wing_panel` gets \
   `root_chord_mm=120`, `thickness_pct=12`, `sweep_deg=15`, `dihedral_deg=2`, `span_mm=250`, \
@@ -258,6 +264,28 @@ masses, FEA-checkable brackets/plates) — it does NOT mean this engine has sate
 knowledge (no orbital mechanics, no thermal analysis, no radiation shielding, no aerodynamics, no \
 propulsion/range modeling). If the user asks for that kind of domain-specific physics on top of the \
 assembly, say plainly that it's out of scope rather than fabricating an answer.\
+"""
+
+_CONNECTION_OPS_SECTION = """\
+## Mating parts — `connection_ops` (PREFER this over hand-computed positions)
+
+Many parts declare INTERFACES (mate points) — listed under their bullet in the part-types menu above \
+(e.g. `wing_panel` has `root`; `bwb_fuselage` has `tip_left`/`tip_right`). When you want to JOIN two \
+parts and both sides have a matching interface, emit a `connection_ops` add_connection entry INSTEAD of \
+computing x_mm/y_mm/z_mm for the part: \
+`{op:"add_connection", a_instance:<id>, a_interface:<name>, b_instance:<id>, b_interface:<name>}`. The \
+engine's placement solver then derives the part's position from the two declared frames — including any \
+sweep/dihedral/taper offset baked into the host's interface — so the mate lands exactly right with ZERO \
+coordinate math from you. This is the single biggest way to avoid mis-placing a part.
+
+Rules:
+- Use ONLY interface names listed for that part type in the menu — never invent one (a bad name is \
+rejected loudly). Both endpoint instances must already exist (add them first / same call).
+- When you connect a part, leave its `x_mm`/`y_mm`/`z_mm` UNSET on the add_instance — the connection \
+places it. Setting both a position AND a connection is contradictory.
+- Only reach for explicit x/y/z when the parts genuinely have no matching interface. As more parts \
+declare interfaces, connection_ops becomes the default way to assemble.
+- `remove_connection` (with the connection `id`) unmates two parts.\
 """
 
 _FEATURE_OPS_SECTION = """\
@@ -349,10 +377,15 @@ def _subsystems_section(active: str | None, ledger: MasterParametricLedger | Non
     for s in SUBSYSTEM_REGISTRY.values():
         mark = " — ACTIVE" if s.name == active else ""
         lines.append(f"- **{s.name}**{mark}: {s.description}")
+        model = get_subsystem_model(s.name)
         if s.name not in instantiated:
-            model = get_subsystem_model(s.name)
             for p in model.params:
                 lines.append(f"  - `{p.name}` ({p.unit}, recommended [{p.min}, {p.max}])")
+        # Declared MATE POINTS (interfaces) — always shown (a part already in the file can still be
+        # connected). Use these EXACT names in a connection_ops entry to join parts (see below).
+        if model.interfaces:
+            names = ", ".join(f"`{i.name}`" for i in model.interfaces)
+            lines.append(f"  - interfaces (mate points for connection_ops): {names}")
     lines.append(
         "\nInterpreting requests: when the user says \"make/create/design/build/generate a <X>\", treat "
         "<X> as a PART-TYPE request — NOT a request for a data table, drawing, or code, and NEVER "
@@ -478,6 +511,7 @@ def build_system_prompt(subsystem_ctx: SubsystemContext | None, ledger: MasterPa
     if disciplines:
         sections.append(disciplines)
     sections.append(_instances_section(ledger))
+    sections.append(_CONNECTION_OPS_SECTION)
     sections.append(_FEATURE_OPS_SECTION)
     if ledger.instances:
         relevant = _all_geometry_paths(ledger) | _CROSS_CUTTING

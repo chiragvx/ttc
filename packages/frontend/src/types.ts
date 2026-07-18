@@ -172,6 +172,27 @@ export interface InstanceOp {
   rationale?: string | null;
 }
 
+// Add/remove a typed interface<->interface mate (Phase 1b, 2026-07-19) — mirrors
+// packages/ledger/deltas.py::ConnectionOp. Posted to POST /connection_ops on accept. The engine's
+// placement solver derives the mated part's position from the two declared frames.
+export interface ConnectionOp {
+  op: "add_connection" | "remove_connection";
+  id?: string | null;              // required for remove_connection; auto-generated for add
+  a_instance?: string | null;
+  a_interface?: string | null;
+  b_instance?: string | null;
+  b_interface?: string | null;
+  kind?: "mate" | "bolted" | "slip_fit" | "containment" | null;
+  gap_mm?: number | null;
+  rationale?: string | null;
+}
+export interface ConnectionOpOutcome {
+  op: ConnectionOp;
+  status: "APPLIED" | "REJECTED" | "CONFLICT";
+  connectionId: string | null;
+  message?: string;
+}
+
 // What POST /instance_ops returns, reshaped for the UI — the InstanceOp analog of FeatureOpOutcome.
 export interface InstanceOpOutcome {
   op: InstanceOp;
@@ -211,7 +232,7 @@ export interface PickableFeature {
 // --- chat (SSE) ---
 export type ChatEvent =
   | { type: "token"; text: string }
-  | { type: "proposal"; deltas: ParameterDelta[]; feature_ops: FeatureOp[]; instance_ops: InstanceOp[]; clarification: string | null; suggestions: string[] }
+  | { type: "proposal"; deltas: ParameterDelta[]; feature_ops: FeatureOp[]; instance_ops: InstanceOp[]; connection_ops: ConnectionOp[]; clarification: string | null; suggestions: string[] }
   | { type: "no_llm" }
   | { type: "error"; message: string }
   | { type: "done" };
@@ -240,5 +261,7 @@ export interface ChatMessage {
   featureOpOutcomes?: (FeatureOpOutcome | undefined)[];
   instanceOps?: InstanceOp[];             // AI-proposed add/remove-instance ops — auto-applied likewise
   instanceOpOutcomes?: (InstanceOpOutcome | undefined)[];
+  connectionOps?: ConnectionOp[];         // AI-proposed interface mates (Phase 1b) — auto-applied
+  connectionOpOutcomes?: (ConnectionOpOutcome | undefined)[];
   validation?: ValidationResult;          // self-check run after this turn's geometry changes (2026-07-19)
 }

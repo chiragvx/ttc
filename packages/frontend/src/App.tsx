@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { activateInstance, addInstance, analyze, analyzeStatus, applyFeatureOp as postFeatureOp, applyInstanceOp as postInstanceOp, createFile, exportCheck, fetchTelemetry, getParams, getRequirements, getSubsystems, listFiles, listInstances, openFile, optimize, optimizeStatus, removeInstance, runValidate, setGoal, signoff, type FileRow, type InstanceRow, type ParamSpec, type RequirementsData, type SubsystemInfo } from "./api";
+import { activateInstance, addInstance, analyze, analyzeStatus, applyFeatureOp as postFeatureOp, applyConnectionOp as postConnectionOp, applyInstanceOp as postInstanceOp, createFile, exportCheck, fetchTelemetry, getParams, getRequirements, getSubsystems, listFiles, listInstances, openFile, optimize, optimizeStatus, removeInstance, runValidate, setGoal, signoff, type FileRow, type InstanceRow, type ParamSpec, type RequirementsData, type SubsystemInfo } from "./api";
 import { AnalysisBar, type AnalysisState } from "./AnalysisBar";
 import { OptimizeResult, type OptimizeResultData } from "./OptimizeResult";
 import { Chat } from "./chat/Chat";
@@ -9,7 +9,7 @@ import { SettingsModal } from "./SettingsModal";
 import { Viewport } from "./Viewport";
 import { loadSettings, type LlmSettings } from "./settings";
 import { useCadSocket } from "./useCadSocket";
-import { type DeltaOutcome, type FeatureOp, type FeatureOpOutcome, type InstanceOp, type InstanceOpOutcome, type ParameterDelta, type ServerMessage } from "./types";
+import { type ConnectionOp, type ConnectionOpOutcome, type DeltaOutcome, type FeatureOp, type FeatureOpOutcome, type InstanceOp, type InstanceOpOutcome, type ParameterDelta, type ServerMessage } from "./types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -258,6 +258,17 @@ export default function App() {
     }
   };
 
+  // Phase 1b: apply a typed interface mate. Like applyInstanceOp, does NOT refresh itself — the
+  // proposal loop calls onOpsApplied once for the batch.
+  const applyConnectionOp = async (op: ConnectionOp): Promise<ConnectionOpOutcome> => {
+    try {
+      const resp = await postConnectionOp(op);
+      return { op, status: resp.status, connectionId: resp.connection_id, message: resp.message };
+    } catch (e) {
+      return { op, status: "REJECTED", connectionId: op.id ?? null, message: String(e) };
+    }
+  };
+
   // Called ONCE after a whole batch of feature_ops/instance_ops has finished applying (a full chat
   // proposal, or a single manual Undo click) — reloads the outliner/params/viewport/telemetry a
   // single time instead of once per op. 2026-07-04: a 25-part proposal was doing a full project
@@ -495,6 +506,7 @@ export default function App() {
             <Chat settings={settings} onApply={applyDeltas} onUndo={undo} onApplyFeatureOp={applyFeatureOp}
                   onApplyInstanceOp={applyInstanceOp} onUndoFeatureOp={undoFeatureOp} onUndoInstanceOp={undoInstanceOp}
                   onOpsApplied={refreshAfterOps}
+                  onApplyConnectionOp={applyConnectionOp}
                   onValidate={(intent) => runValidate(intent, settings.apiKey)}
                   onUserMessage={applyGoal} onHoverInstance={setHoveredInstanceId}
                   onOpenSettings={() => setSettingsOpen(true)} />

@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from packages.ledger.apply import apply_delta
 from packages.ledger.deltas import ParameterDelta
-from packages.ledger.schema import CutFeature, Instance, MasterParametricLedger, Review, ReviewState, Transform
+from packages.ledger.schema import Connection, CutFeature, Instance, MasterParametricLedger, Review, ReviewState, Transform
 
 
 class EventKind(str, Enum):
@@ -35,12 +35,15 @@ class EventKind(str, Enum):
     INSTANCE_REMOVED = "INSTANCE_REMOVED"
     INSTANCE_MOVED = "INSTANCE_MOVED"  # reposition/reorient an ALREADY-PLACED instance
     FEATURE_OP = "FEATURE_OP"  # add/update/remove a hole/pocket/slot cut on an instance
+    CONNECTION_ADDED = "CONNECTION_ADDED"      # a typed interface<->interface mate (Phase 1b)
+    CONNECTION_REMOVED = "CONNECTION_REMOVED"
 
 
 FACT_KINDS = {
     EventKind.GENESIS, EventKind.PARAMETER_MUTATION, EventKind.REVIEW_SIGNOFF,
     EventKind.NL_INTENT, EventKind.USAGE, EventKind.INSTANCE_ADDED, EventKind.INSTANCE_REMOVED,
     EventKind.INSTANCE_MOVED, EventKind.FEATURE_OP,
+    EventKind.CONNECTION_ADDED, EventKind.CONNECTION_REMOVED,
 }
 
 # Facts that change the actual geometry/design — a prior ENGINEER_REVIEWED sign-off must not survive
@@ -50,6 +53,7 @@ FACT_KINDS = {
 GEOMETRY_CLASS_KINDS = {
     EventKind.PARAMETER_MUTATION, EventKind.INSTANCE_ADDED, EventKind.INSTANCE_REMOVED,
     EventKind.INSTANCE_MOVED, EventKind.FEATURE_OP,
+    EventKind.CONNECTION_ADDED, EventKind.CONNECTION_REMOVED,
 }
 
 GENESIS_PREV = "0" * 64
@@ -189,6 +193,17 @@ def replay(
             # awareness — still hits this branch and silently drops the op rather than raising,
             # matching NL_INTENT/USAGE's "recorded, not always state-changing" precedent, instead of
             # crashing the whole reconstruction over one stale reference.
+        elif ev.kind is EventKind.CONNECTION_ADDED:
+            assert ledger is not None
+            # store the resolved Connection fact (exactly ConnectionOpOutcome.connection at apply time)
+            conn = Connection.model_validate(ev.payload["connection"])
+            ledger = ledger.model_copy(update={
+                "connections": [c for c in ledger.connections if c.id != conn.id] + [conn]})
+        elif ev.kind is EventKind.CONNECTION_REMOVED:
+            assert ledger is not None
+            cid = ev.payload["connection_id"]
+            ledger = ledger.model_copy(update={
+                "connections": [c for c in ledger.connections if c.id != cid]})
         # NL_INTENT: recorded, no state change
         if (ledger is not None and ev.kind in GEOMETRY_CLASS_KINDS
                 and ledger.review.state is not ReviewState.AI_PROPOSED):
@@ -279,6 +294,14 @@ class BaseEventLog(ABC):
             {"op": op, "instance_id": instance_id, "feature": feature.model_dump(mode="json")},
             actor, ts,
         )
+
+    def append_connection_added(self, connection: "Connection", actor: str, ts: str) -> Event:
+        """FACT counterpart to `apply_connection_op`'s add outcome — stores the resolved Connection."""
+        return self._append(EventKind.CONNECTION_ADDED,
+                            {"connection": connection.model_dump(mode="json")}, actor, ts)
+
+    def append_connection_removed(self, connection_id: str, actor: str, ts: str) -> Event:
+        return self._append(EventKind.CONNECTION_REMOVED, {"connection_id": connection_id}, actor, ts)
 
     def append_nl_intent(self, text: str, actor: str, ts: str) -> Event:
         return self._append(EventKind.NL_INTENT, {"text": text}, actor, ts)

@@ -110,6 +110,32 @@ class InstanceOp(BaseModel):
     rationale: Optional[str] = None
 
 
+class ConnectionOp(BaseModel):
+    """Add/remove a typed JOIN between two instances' declared interfaces (Phase 1b, 2026-07-19) — the
+    SAME precedent as `FeatureOp`/`InstanceOp`: a new field on `DeltaProposal`, not a second tool. This
+    is how the copilot MATES parts instead of hand-computing a Transform: it wires
+    `wing_left.root <-> bwb_fuselage.tip_left` and the placement solver
+    (packages/subsystems/placement.py) derives the position from the parts' declared frames.
+
+    For `add_connection`: `a_instance`/`a_interface`/`b_instance`/`b_interface` are REQUIRED and each
+    interface must be one this part's subsystem actually DECLARES (validated at apply time against the
+    registry — the LLM must never invent an interface name, only use ones listed in the part-types
+    menu). `id` is optional (auto-generated if omitted, like add_instance). `kind`/`gap_mm` are
+    optional. For `remove_connection`: `id` is REQUIRED (a real existing connection id)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["add_connection", "remove_connection"]
+    id: Optional[str] = None                # required for remove_connection; auto-generated for add
+    a_instance: Optional[str] = None        # required for add_connection: first part's instance id
+    a_interface: Optional[str] = None       # required for add_connection: a declared interface on it
+    b_instance: Optional[str] = None        # required for add_connection: second part's instance id
+    b_interface: Optional[str] = None       # required for add_connection: a declared interface on it
+    kind: Optional[Literal["mate", "bolted", "slip_fit", "containment"]] = None
+    gap_mm: Optional[float] = None
+    rationale: Optional[str] = None
+
+
 class DeltaProposal(BaseModel):
     """What the geometric agent returns. Either deltas to apply, or a clarification request when the
     natural-language intent is ambiguous (e.g. '6S', '2 inch', 'make it stronger'). Asking is a
@@ -132,6 +158,12 @@ class DeltaProposal(BaseModel):
                     "catalog part type (a satellite, a drone frame, a robot arm, ...): decompose it "
                     "into several EXISTING subsystem types instead of refusing. Use move_instance to "
                     "reposition an ALREADY-PLACED instance (e.g. 'put the pod on top of the wing')")
+    connection_ops: list[ConnectionOp] = Field(
+        default_factory=list,
+        description="MATE two parts by wiring their declared interfaces (e.g. wing_left.root <-> "
+                    "bwb_fuselage.tip_left) instead of hand-computing a position — the engine derives "
+                    "the placement from the parts' own frames. PREFER this over computing x/y/z for a "
+                    "part that has a matching interface on its host")
 
 
 def parameter_delta_tool_schema() -> dict:

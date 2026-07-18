@@ -24,9 +24,16 @@ from enum import Enum
 
 from typing import Callable, Optional
 
-from packages.ledger.deltas import FeatureOp, InstanceOp, ParameterDelta, is_forbidden_target
+from packages.ledger.deltas import ConnectionOp, FeatureOp, InstanceOp, ParameterDelta, is_forbidden_target
 from packages.ledger.parameter import LockState, ParameterDef
-from packages.ledger.schema import CutFeature, Instance, MasterParametricLedger, Transform
+from packages.ledger.schema import (
+    Connection,
+    CutFeature,
+    Instance,
+    InterfaceRef,
+    MasterParametricLedger,
+    Transform,
+)
 
 MIN_WALL_MM = 0.8  # general FDM/FFF floor — applies to all printed part domains
 FEATURE_FIT_MARGIN_MM = 3.0  # coarse footprint-vs-host clearance for a proposed cut, mirrors
@@ -449,6 +456,10 @@ class InstanceOpOutcome:
     instance: Optional[Instance] = None  # the added/removed/moved instance — for move_instance, its
                                           # POST-move state (matches add_instance's "instance = the
                                           # resulting state" convention)
+    removed_connection_ids: list[str] = field(default_factory=list)  # remove_instance ONLY: ids of
+                                          # connections cascade-removed because they referenced the
+                                          # removed instance — the endpoint appends a CONNECTION_REMOVED
+                                          # event for each so the cascade survives replay (2026-07-19).
     previous_instance: Optional[Instance] = None  # move_instance ONLY: the PRE-move state, needed so
                                                     # the frontend can Undo a move by moving it back.
                                                     # add_instance/remove_instance leave this None.
@@ -521,8 +532,21 @@ def apply_instance_op(
         # it already prevents orphaning a template's or an explicitly-parented instance's dependents.
         new_instances = dict(ledger.instances)
         del new_instances[instance_id]
-        new_ledger = ledger.model_copy(update={"instances": new_instances})
+        # CASCADE-remove connections that reference the removed instance — otherwise they dangle, and
+        # because instance ids are reused (lowest-free), a later add of the SAME subsystem type would
+        # silently resurrect a stale connection onto an unrelated new part (wrong mate geometry + a
+        # false "joined" verdict that persists on replay) — 2026-07-19 review. Symmetric with the
+        # children guard above; the ids are returned so the endpoint persists a CONNECTION_REMOVED
+        # event for each (the cascade must survive replay, not just this fold).
+        removed_conn_ids = [c.id for c in ledger.connections
+                            if c.a.instance_id == instance_id or c.b.instance_id == instance_id]
+        update: dict = {"instances": new_instances}
+        if removed_conn_ids:
+            drop = set(removed_conn_ids)
+            update["connections"] = [c for c in ledger.connections if c.id not in drop]
+        new_ledger = ledger.model_copy(update=update)
         return new_ledger, InstanceOpOutcome(ApplyStatus.APPLIED, instance_id, instance=target,
+                                             removed_connection_ids=removed_conn_ids,
                                              message=f"removed {instance_id}")
 
     if op.op == "move_instance":
@@ -646,3 +670,90 @@ def apply_instance_op(
     return new_ledger, InstanceOpOutcome(ApplyStatus.APPLIED, instance_id,
                                          instance=new_ledger.instances[instance_id],
                                          message=message)
+
+
+@dataclass
+class ConnectionOpOutcome:
+    """ConnectionOp's analog of InstanceOpOutcome. Carries the resolved Connection (added or removed)."""
+
+    status: "ApplyStatus"
+    connection_id: Optional[str]
+    connection: Optional[Connection] = None
+    message: str = ""
+
+    @property
+    def changed(self) -> bool:
+        return self.status is ApplyStatus.APPLIED
+
+
+def _next_connection_id(ledger: MasterParametricLedger) -> str:
+    existing = {c.id for c in ledger.connections}
+    n = 1
+    while f"conn_{n}" in existing:
+        n += 1
+    return f"conn_{n}"
+
+
+def apply_connection_op(
+    ledger: MasterParametricLedger,
+    op: ConnectionOp,
+    interfaces_of: Callable[[str], frozenset[str]],
+) -> tuple[MasterParametricLedger, "ConnectionOpOutcome"]:
+    """Apply one ConnectionOp (add/remove a typed interface-to-interface join). Returns a NEW ledger +
+    outcome; original never mutated (same event-sourcing convention as apply_instance_op).
+
+    This package stays registry-free (`packages/ledger/CLAUDE.md`) — `interfaces_of(subsystem_type)`
+    is injected (frozenset of declared interface names for a type) so the op can REJECT an interface
+    the part doesn't declare, without importing the subsystem registry here. The LLM must only wire
+    interfaces that exist (listed in the part-types menu); a hallucinated interface fails loudly."""
+    if op.op == "remove_connection":
+        if not op.id:
+            return ledger, ConnectionOpOutcome(ApplyStatus.REJECTED, None,
+                                               message="remove_connection requires id")
+        match = next((c for c in ledger.connections if c.id == op.id), None)
+        if match is None:
+            return ledger, ConnectionOpOutcome(ApplyStatus.REJECTED, op.id,
+                                               message=f"unknown connection id {op.id!r}")
+        new = ledger.model_copy(update={"connections": [c for c in ledger.connections if c.id != op.id]})
+        return new, ConnectionOpOutcome(ApplyStatus.APPLIED, op.id, connection=match,
+                                        message=f"removed connection {op.id}")
+
+    if op.op != "add_connection":
+        return ledger, ConnectionOpOutcome(ApplyStatus.REJECTED, op.id, message=f"unknown op {op.op!r}")
+
+    # add_connection: all four endpoints required
+    missing = [f for f in ("a_instance", "a_interface", "b_instance", "b_interface") if getattr(op, f) is None]
+    if missing:
+        return ledger, ConnectionOpOutcome(ApplyStatus.REJECTED, op.id,
+                                           message=f"add_connection requires {', '.join(missing)}")
+    if op.id is not None and any(c.id == op.id for c in ledger.connections):
+        return ledger, ConnectionOpOutcome(ApplyStatus.REJECTED, op.id,
+                                           message=f"connection id {op.id!r} already exists")
+    if op.a_instance == op.b_instance:
+        return ledger, ConnectionOpOutcome(ApplyStatus.REJECTED, op.id,
+                                           message="a part cannot connect to itself")
+    # both instances must exist and declare the named interface
+    for iid, iface, side in ((op.a_instance, op.a_interface, "a"), (op.b_instance, op.b_interface, "b")):
+        inst = ledger.instances.get(iid)
+        if inst is None:
+            return ledger, ConnectionOpOutcome(ApplyStatus.REJECTED, op.id,
+                                               message=f"endpoint {side}: unknown instance {iid!r}")
+        if iface not in interfaces_of(inst.subsystem_type):
+            declared = sorted(interfaces_of(inst.subsystem_type))
+            return ledger, ConnectionOpOutcome(
+                ApplyStatus.REJECTED, op.id,
+                message=f"endpoint {side}: {inst.subsystem_type} has no interface {iface!r} "
+                        f"(declares: {declared or 'none'})")
+
+    conn_id = op.id if op.id is not None else _next_connection_id(ledger)
+    conn = Connection(
+        id=conn_id,
+        a=InterfaceRef(instance_id=op.a_instance, interface=op.a_interface),
+        b=InterfaceRef(instance_id=op.b_instance, interface=op.b_interface),
+        kind=op.kind or "mate",
+        gap_mm=op.gap_mm or 0.0,
+    )
+    new = ledger.model_copy(update={"connections": [*ledger.connections, conn]})
+    return new, ConnectionOpOutcome(ApplyStatus.APPLIED, conn_id, connection=conn,
+                                    message=f"connected {op.a_instance}.{op.a_interface} <-> "
+                                            f"{op.b_instance}.{op.b_interface}")
