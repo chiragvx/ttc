@@ -193,6 +193,30 @@ export interface ConnectionOpOutcome {
   message?: string;
 }
 
+// Wire a part's load to be derived from another part's condition (Phase 2b) — mirrors
+// packages/ledger/deltas.py::CouplingOp. Posted to POST /coupling_ops on accept, same "propose then
+// explicit accept" boundary as ConnectionOp above.
+export interface CouplingInputItem {
+  name: string;
+  value?: number | null;
+  from_instance?: string | null;
+  from_param?: string | null;
+}
+export interface CouplingOp {
+  op: "add_coupling" | "remove_coupling";
+  id?: string | null;              // required for remove_coupling; auto-generated for add
+  target_instance?: string | null;
+  relation?: string | null;
+  inputs?: CouplingInputItem[];
+  rationale?: string | null;
+}
+export interface CouplingOpOutcome {
+  op: CouplingOp;
+  status: "APPLIED" | "REJECTED" | "CONFLICT";
+  couplingId: string | null;
+  message?: string;
+}
+
 // What POST /instance_ops returns, reshaped for the UI — the InstanceOp analog of FeatureOpOutcome.
 export interface InstanceOpOutcome {
   op: InstanceOp;
@@ -232,7 +256,7 @@ export interface PickableFeature {
 // --- chat (SSE) ---
 export type ChatEvent =
   | { type: "token"; text: string }
-  | { type: "proposal"; deltas: ParameterDelta[]; feature_ops: FeatureOp[]; instance_ops: InstanceOp[]; connection_ops: ConnectionOp[]; clarification: string | null; suggestions: string[] }
+  | { type: "proposal"; deltas: ParameterDelta[]; feature_ops: FeatureOp[]; instance_ops: InstanceOp[]; connection_ops: ConnectionOp[]; coupling_ops: CouplingOp[]; clarification: string | null; suggestions: string[] }
   | { type: "no_llm" }
   | { type: "error"; message: string }
   | { type: "done" };
@@ -263,5 +287,7 @@ export interface ChatMessage {
   instanceOpOutcomes?: (InstanceOpOutcome | undefined)[];
   connectionOps?: ConnectionOp[];         // AI-proposed interface mates (Phase 1b) — auto-applied
   connectionOpOutcomes?: (ConnectionOpOutcome | undefined)[];
+  couplingOps?: CouplingOp[];             // AI-proposed load couplings (Phase 2b) — auto-applied
+  couplingOpOutcomes?: (CouplingOpOutcome | undefined)[];
   validation?: ValidationResult;          // self-check run after this turn's geometry changes (2026-07-19)
 }

@@ -32,9 +32,10 @@ from packages.subsystems import (
 )
 from packages.subsystems.assembly_template import reconcile_all, reconcile_children
 from packages.subsystems.base import seed_instance
-from packages.ledger.apply import apply_connection_op, apply_delta, apply_feature_op, apply_instance_op
+from packages.couplings import RELATION_REGISTRY
+from packages.ledger.apply import apply_connection_op, apply_coupling_op, apply_delta, apply_feature_op, apply_instance_op
 from packages.ledger.bom import BOM, Component, ComponentKind, material
-from packages.ledger.deltas import ConnectionOp, FeatureOp, InstanceOp, ParameterDelta
+from packages.ledger.deltas import ConnectionOp, CouplingOp, FeatureOp, InstanceOp, ParameterDelta
 from packages.ledger.events import EventLog
 from packages.ledger.derived_resolver import latest_verdict, ledger_with_derived
 from packages.ledger.fingerprint import fingerprint
@@ -1003,11 +1004,13 @@ def create_app() -> FastAPI:
                 state.log.append_instance_moved(outcome.instance_id, outcome.instance.transform,
                                                 actor="user", ts=_TS)
             else:
-                # persist the cascade-removed connections FIRST (a dangling connection resurrecting on
-                # an id-reused new part is exactly what this prevents — 2026-07-19 review), then the
-                # instance removal itself.
+                # persist the cascade-removed connections and couplings FIRST (a dangling connection/
+                # coupling resurrecting on an id-reused new part is exactly what this prevents —
+                # 2026-07-19 review), then the instance removal itself.
                 for cid in outcome.removed_connection_ids:
                     state.log.append_connection_removed(cid, actor="user", ts=_TS)
+                for coupling_id in outcome.removed_coupling_ids:
+                    state.log.append_coupling_removed(coupling_id, actor="user", ts=_TS)
                 state.log.append_instance_removed(outcome.instance_id, actor="user", ts=_TS)
                 if state.active_instance_id == outcome.instance_id:  # it just got removed -> fall
                     # back to whatever's left (None if the file is now empty) — no root to fall back to
@@ -1044,6 +1047,28 @@ def create_app() -> FastAPI:
             "status": outcome.status.value,
             "connection_id": outcome.connection_id,
             "connection": outcome.connection.model_dump(mode="json") if outcome.connection is not None else None,
+            "message": outcome.message,
+        }
+
+    @router.post("/coupling_ops")
+    def create_coupling_op(op: CouplingOp):
+        # Phase 2b (2026-07-19): add/remove a typed load coupling — the LLM WIRES a relation by name
+        # instead of stating a load scalar (Inversion #1). Relation validity is checked against the
+        # live registry (an unregistered relation name is rejected loudly).
+        def inputs_of(relation: str) -> frozenset[str]:
+            rel = RELATION_REGISTRY.get(relation)
+            return frozenset(rel.inputs) if rel is not None else frozenset()
+        _, outcome = apply_coupling_op(state.ledger(), op, frozenset(RELATION_REGISTRY), inputs_of)
+        if outcome.changed:
+            if op.op == "add_coupling":
+                state.log.append_coupling_added(outcome.coupling, actor="user", ts=_TS)
+            else:
+                state.log.append_coupling_removed(outcome.coupling_id, actor="user", ts=_TS)
+        return {
+            "ok": outcome.changed,
+            "status": outcome.status.value,
+            "coupling_id": outcome.coupling_id,
+            "coupling": outcome.coupling.model_dump(mode="json") if outcome.coupling is not None else None,
             "message": outcome.message,
         }
 
@@ -1305,6 +1330,7 @@ def create_app() -> FastAPI:
                                 "feature_ops": [fo.model_dump(mode="json") for fo in payload.feature_ops],
                                 "instance_ops": [io.model_dump(mode="json") for io in payload.instance_ops],
                                 "connection_ops": [co.model_dump(mode="json") for co in payload.connection_ops],
+                                "coupling_ops": [co.model_dump(mode="json") for co in payload.coupling_ops],
                                 "clarification": payload.request_clarification,
                                 "suggestions": payload.suggestions})
                 elif kind == "error":

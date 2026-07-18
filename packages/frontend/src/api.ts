@@ -1,4 +1,4 @@
-import type { ChatEvent, ConnectionOp, CutFeature, FeatureOp, InstanceOp, InstanceSnapshot, MeshData, PickableFeature, TelemetryDelta, ValidationResult } from "./types";
+import type { ChatEvent, ConnectionOp, CouplingOp, CutFeature, FeatureOp, InstanceOp, InstanceSnapshot, MeshData, PickableFeature, TelemetryDelta, ValidationResult } from "./types";
 import { loadSettings, type LlmSettings } from "./settings";
 
 // REST + SSE calls to the FastAPI backend (proxied by Vite in dev).
@@ -143,6 +143,25 @@ export async function applyConnectionOp(op: ConnectionOp): Promise<ConnectionOpA
   // a backend without this route (older build) returns 404/HTML — surface a clear message instead of
   // a cryptic JSON-parse error (2026-07-19 review)
   if (!res.ok) throw new Error(`connection endpoint unavailable (HTTP ${res.status})`);
+  return res.json();
+}
+
+// --- CouplingOp (Phase 2b): wire a part's load to be derived from another part's condition. Posted
+// VERBATIM as received in a "proposal" SSE event; mirrors applyConnectionOp above.
+export interface CouplingOpApplyResponse {
+  ok: boolean;
+  status: "APPLIED" | "REJECTED" | "CONFLICT";
+  coupling_id: string | null;
+  coupling: unknown | null;
+  message: string;
+}
+export async function applyCouplingOp(op: CouplingOp): Promise<CouplingOpApplyResponse> {
+  const res = await apiFetch("/coupling_ops", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(op),
+  });
+  // a backend without this route (older build) returns 404/HTML — surface a clear message instead of
+  // a cryptic JSON-parse error (mirrors applyConnectionOp's 2026-07-19 review fix)
+  if (!res.ok) throw new Error(`coupling endpoint unavailable (HTTP ${res.status})`);
   return res.json();
 }
 

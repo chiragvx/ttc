@@ -31,3 +31,31 @@ describe("summarizeOutcomes — connection ops (Phase 1b)", () => {
     expect(summarizeOutcomes(base)).toBeNull();
   });
 });
+
+describe("summarizeOutcomes — coupling ops (Phase 2b)", () => {
+  it("feeds a REJECTED coupling (with reason) back to the model so it doesn't re-propose the same wrong one", () => {
+    const m: ChatMessage = {
+      ...base,
+      couplingOps: [{ op: "add_coupling", target_instance: "bracket_1", relation: "load_from_motor_thrust", inputs: [{ name: "motor", from_instance: "motor_1", from_param: "thrust_n" }] }],
+      couplingOpOutcomes: [{ op: {} as any, status: "REJECTED", couplingId: null, message: "motor_1 has no param 'thrust_n' (declares: ['rpm', 'mass_g'])" }],
+    };
+    const s = summarizeOutcomes(m)!;
+    expect(s).toContain("REJECTED");
+    expect(s).toContain("no param 'thrust_n'");
+  });
+
+  it("feeds an APPLIED coupling's minted coupling_id back so a later remove can target it", () => {
+    const m: ChatMessage = {
+      ...base,
+      couplingOps: [{ op: "add_coupling", target_instance: "bracket_1", relation: "load_from_motor_thrust", inputs: [{ name: "motor", from_instance: "motor_1", from_param: "thrust_n" }] }],
+      couplingOpOutcomes: [{ op: {} as any, status: "APPLIED", couplingId: "coupling_1" }],
+    };
+    const s = summarizeOutcomes(m)!;
+    expect(s).toContain("coupling_id=coupling_1");
+    expect(s).toContain("couple bracket_1 <- load_from_motor_thrust");
+  });
+
+  it("returns null when there are no coupling outcomes either", () => {
+    expect(summarizeOutcomes({ ...base, couplingOps: [] })).toBeNull();
+  });
+});

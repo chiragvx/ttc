@@ -24,10 +24,14 @@ from enum import Enum
 
 from typing import Callable, Optional
 
-from packages.ledger.deltas import ConnectionOp, FeatureOp, InstanceOp, ParameterDelta, is_forbidden_target
+from pydantic import ValidationError
+
+from packages.ledger.deltas import ConnectionOp, CouplingOp, FeatureOp, InstanceOp, ParameterDelta, is_forbidden_target
 from packages.ledger.parameter import LockState, ParameterDef
 from packages.ledger.schema import (
     Connection,
+    Coupling,
+    CouplingInput,
     CutFeature,
     Instance,
     InterfaceRef,
@@ -460,6 +464,12 @@ class InstanceOpOutcome:
                                           # connections cascade-removed because they referenced the
                                           # removed instance — the endpoint appends a CONNECTION_REMOVED
                                           # event for each so the cascade survives replay (2026-07-19).
+    removed_coupling_ids: list[str] = field(default_factory=list)  # remove_instance ONLY: ids of
+                                          # couplings cascade-removed because they referenced the removed
+                                          # instance, either as target_instance OR as an input's
+                                          # from_instance (Phase 2b, 2026-07-19) — see apply_instance_op's
+                                          # remove_instance branch for why the check is wider than
+                                          # removed_connection_ids's.
     previous_instance: Optional[Instance] = None  # move_instance ONLY: the PRE-move state, needed so
                                                     # the frontend can Undo a move by moving it back.
                                                     # add_instance/remove_instance leave this None.
@@ -540,13 +550,29 @@ def apply_instance_op(
         # event for each (the cascade must survive replay, not just this fold).
         removed_conn_ids = [c.id for c in ledger.connections
                             if c.a.instance_id == instance_id or c.b.instance_id == instance_id]
+        # CASCADE-remove couplings that reference the removed instance — WIDER check than connections:
+        # a Coupling can reference the removed instance either as its `target_instance` OR as the
+        # `from_instance` of ANY of its `inputs`. Same id-reuse hazard as the connection cascade above
+        # (2026-07-19 review) but worse if missed: because instance ids are reused (lowest-free, see
+        # _next_instance_id), a later add of the same subsystem_type would silently make a stale
+        # coupling's source or target resolve against an UNRELATED NEW instance, fabricating a
+        # physically wrong but plausible-looking derived load instead of blocking as "unknown".
+        removed_coupling_ids = [
+            c.id for c in ledger.couplings
+            if c.target_instance == instance_id
+            or any(ci.from_instance == instance_id for ci in c.inputs.values())
+        ]
         update: dict = {"instances": new_instances}
         if removed_conn_ids:
             drop = set(removed_conn_ids)
             update["connections"] = [c for c in ledger.connections if c.id not in drop]
+        if removed_coupling_ids:
+            drop_c = set(removed_coupling_ids)
+            update["couplings"] = [c for c in ledger.couplings if c.id not in drop_c]
         new_ledger = ledger.model_copy(update=update)
         return new_ledger, InstanceOpOutcome(ApplyStatus.APPLIED, instance_id, instance=target,
                                              removed_connection_ids=removed_conn_ids,
+                                             removed_coupling_ids=removed_coupling_ids,
                                              message=f"removed {instance_id}")
 
     if op.op == "move_instance":
@@ -757,3 +783,135 @@ def apply_connection_op(
     return new, ConnectionOpOutcome(ApplyStatus.APPLIED, conn_id, connection=conn,
                                     message=f"connected {op.a_instance}.{op.a_interface} <-> "
                                             f"{op.b_instance}.{op.b_interface}")
+
+
+@dataclass
+class CouplingOpOutcome:
+    """CouplingOp's analog of ConnectionOpOutcome. Carries the resolved Coupling (added or removed)."""
+
+    status: ApplyStatus
+    coupling_id: Optional[str]
+    coupling: Optional[Coupling] = None
+    message: str = ""
+
+    @property
+    def changed(self) -> bool:
+        return self.status is ApplyStatus.APPLIED
+
+
+def _next_coupling_id(ledger: MasterParametricLedger) -> str:
+    existing = {c.id for c in ledger.couplings}
+    n = 1
+    while f"coupling_{n}" in existing:
+        n += 1
+    return f"coupling_{n}"
+
+
+def apply_coupling_op(
+    ledger: MasterParametricLedger,
+    op: CouplingOp,
+    known_relations: frozenset[str],
+    inputs_of: Callable[[str], frozenset[str]],
+) -> tuple[MasterParametricLedger, CouplingOpOutcome]:
+    """Apply one CouplingOp (add/remove a typed load coupling wiring a target's load to a registered
+    relation over source parts/duty). Returns a NEW ledger + outcome; original never mutated (same
+    event-sourcing convention as apply_connection_op).
+
+    This package stays registry-free (`packages/ledger/CLAUDE.md`) — `known_relations` (names only)
+    and `inputs_of(relation) -> frozenset[str]` (a relation's declared input quantity names) are
+    injected so this function can validate a relation/its inputs without importing
+    `packages.couplings` here. `inputs_of` is ONLY called after confirming `op.relation` is a member
+    of `known_relations` — never on a name that hasn't already been validated. The LLM must only wire
+    a relation that exists in the registry (Inversion #1 — it never authors the physics); a
+    hallucinated relation name fails loudly."""
+    if op.op == "remove_coupling":
+        if not op.id:
+            return ledger, CouplingOpOutcome(ApplyStatus.REJECTED, None,
+                                             message="remove_coupling requires id")
+        match = next((c for c in ledger.couplings if c.id == op.id), None)
+        if match is None:
+            return ledger, CouplingOpOutcome(ApplyStatus.REJECTED, op.id,
+                                             message=f"unknown coupling id {op.id!r}")
+        new = ledger.model_copy(update={"couplings": [c for c in ledger.couplings if c.id != op.id]})
+        return new, CouplingOpOutcome(ApplyStatus.APPLIED, op.id, coupling=match,
+                                      message=f"removed coupling {op.id}")
+
+    if op.op != "add_coupling":
+        return ledger, CouplingOpOutcome(ApplyStatus.REJECTED, op.id, message=f"unknown op {op.op!r}")
+
+    # add_coupling: target_instance and relation are required
+    missing_fields = [f for f in ("target_instance", "relation") if getattr(op, f) is None]
+    if missing_fields:
+        return ledger, CouplingOpOutcome(ApplyStatus.REJECTED, op.id,
+                                         message=f"add_coupling requires {', '.join(missing_fields)}")
+    if op.id is not None and any(c.id == op.id for c in ledger.couplings):
+        return ledger, CouplingOpOutcome(ApplyStatus.REJECTED, op.id,
+                                         message=f"coupling id {op.id!r} already exists")
+    if op.target_instance not in ledger.instances:
+        return ledger, CouplingOpOutcome(ApplyStatus.REJECTED, op.id,
+                                         message=f"unknown instance {op.target_instance!r}")
+    if op.relation not in known_relations:
+        return ledger, CouplingOpOutcome(
+            ApplyStatus.REJECTED, op.id,
+            message=f"unknown relation {op.relation!r} — must be a registered relation "
+                    f"(available: {sorted(known_relations)})")
+
+    required = inputs_of(op.relation)
+    names = [i.name for i in op.inputs]
+    given = set(names)
+    if len(names) != len(given):
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        return ledger, CouplingOpOutcome(
+            ApplyStatus.REJECTED, op.id,
+            message=f"duplicate input name(s) {dupes} — each relation input may be wired exactly once "
+                    f"(a repeat silently discards an earlier wiring, which this rejects instead)")
+    missing = required - given
+    extra = given - required
+    if missing or extra:
+        clauses = []
+        if missing:
+            clauses.append(f"missing {sorted(missing)}")
+        if extra:
+            clauses.append(f"unexpected {sorted(extra)}")
+        return ledger, CouplingOpOutcome(
+            ApplyStatus.REJECTED, op.id,
+            message=f"relation {op.relation!r} needs inputs {sorted(required)} — " + ", ".join(clauses))
+
+    # A sourced input's from_instance/from_param must reference something real RIGHT NOW — the same
+    # loud-fail-on-a-typo standard target_instance already gets above. Left unchecked, a hallucinated
+    # source silently persists as APPLIED and only degrades to "unknown" much later, at resolve time
+    # (packages/couplings/resolve.py) — technically safe (unknown still blocks export) but a
+    # misleading immediate signal that the wiring succeeded when it didn't (2026-07-19 review).
+    for item in op.inputs:
+        if item.from_instance is None:
+            continue
+        src = ledger.instances.get(item.from_instance)
+        if src is None:
+            return ledger, CouplingOpOutcome(
+                ApplyStatus.REJECTED, op.id,
+                message=f"input {item.name!r} sources from unknown instance {item.from_instance!r}")
+        if item.from_param not in src.params:
+            return ledger, CouplingOpOutcome(
+                ApplyStatus.REJECTED, op.id,
+                message=f"input {item.name!r} sources from {item.from_instance!r}.{item.from_param!r}, "
+                        f"which has no such param (has: {sorted(src.params)})")
+
+    try:
+        coupling_inputs = {
+            item.name: CouplingInput(value=item.value, from_instance=item.from_instance,
+                                     from_param=item.from_param)
+            for item in op.inputs
+        }
+    except ValidationError as exc:
+        return ledger, CouplingOpOutcome(ApplyStatus.REJECTED, op.id, message=str(exc))
+
+    coupling_id = op.id if op.id is not None else _next_coupling_id(ledger)
+    coupling = Coupling(
+        id=coupling_id,
+        target_instance=op.target_instance,
+        relation=op.relation,
+        inputs=coupling_inputs,
+    )
+    new_ledger = ledger.model_copy(update={"couplings": [*ledger.couplings, coupling]})
+    return new_ledger, CouplingOpOutcome(ApplyStatus.APPLIED, coupling.id, coupling=coupling,
+                                         message=f"coupled {op.target_instance} <- {op.relation}(...)")

@@ -10,7 +10,7 @@ import { ValidationCard } from "./ValidationCard";
 import { summarizeOutcomes } from "./summarizeOutcomes";
 import { streamChat } from "../api";
 import type { LlmSettings } from "../settings";
-import type { ChatEvent, ChatMessage, ConnectionOp, ConnectionOpOutcome, DeltaOutcome, FeatureOp, FeatureOpOutcome, InstanceOp, InstanceOpOutcome, ParameterDelta, ValidationResult } from "../types";
+import type { ChatEvent, ChatMessage, ConnectionOp, ConnectionOpOutcome, CouplingOp, CouplingOpOutcome, DeltaOutcome, FeatureOp, FeatureOpOutcome, InstanceOp, InstanceOpOutcome, ParameterDelta, ValidationResult } from "../types";
 
 interface Props {
   settings: LlmSettings;
@@ -19,6 +19,7 @@ interface Props {
   onApplyFeatureOp: (op: FeatureOp) => Promise<FeatureOpOutcome>;
   onApplyInstanceOp: (op: InstanceOp) => Promise<InstanceOpOutcome>;
   onApplyConnectionOp: (op: ConnectionOp) => Promise<ConnectionOpOutcome>;  // Phase 1b mate
+  onApplyCouplingOp: (op: CouplingOp) => Promise<CouplingOpOutcome>;  // Phase 2b load coupling
   onUndoFeatureOp: (outcome: FeatureOpOutcome) => Promise<FeatureOpOutcome>;
   onUndoInstanceOp: (outcome: InstanceOpOutcome) => Promise<InstanceOpOutcome>;
   // called once after a whole batch of feature_ops/instance_ops finishes applying (a full proposal,
@@ -39,7 +40,7 @@ const uid = () => (crypto?.randomUUID?.() ?? String(Math.random()));
 // cap so a design it can't satisfy never loops forever (or burns tokens indefinitely).
 const MAX_AUTO_ROUNDS = 2;
 
-export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInstanceOp, onApplyConnectionOp, onUndoFeatureOp, onUndoInstanceOp, onOpsApplied, onValidate, onOpenSettings, onUserMessage, onHoverInstance }: Props) {
+export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInstanceOp, onApplyConnectionOp, onApplyCouplingOp, onUndoFeatureOp, onUndoInstanceOp, onOpsApplied, onValidate, onOpenSettings, onUserMessage, onHoverInstance }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [undone, setUndone] = useState<Record<string, boolean>>({});
@@ -133,6 +134,18 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
             if (connOutcomes.some((o) => o?.status === "APPLIED")) appliedGeometry = true;
             await onOpsApplied();
           }
+          if (e.coupling_ops?.length) {
+            // AFTER connection_ops/instance_ops (the target instance must exist), same "propose then
+            // auto-apply" boundary as every other op kind.
+            const couplingOutcomes: (CouplingOpOutcome | undefined)[] = new Array(e.coupling_ops.length).fill(undefined);
+            patch(aid, (m) => ({ ...m, couplingOps: e.coupling_ops, couplingOpOutcomes: [...couplingOutcomes] }));
+            for (let i = 0; i < e.coupling_ops.length; i++) {
+              couplingOutcomes[i] = await onApplyCouplingOp(e.coupling_ops[i]);
+              patch(aid, (m) => ({ ...m, couplingOpOutcomes: [...couplingOutcomes] }));
+            }
+            if (couplingOutcomes.some((o) => o?.status === "APPLIED")) appliedGeometry = true;
+            await onOpsApplied();
+          }
           if (e.deltas.length) {
             const outcomes = await onApply(e.deltas);
             patch(aid, (m) => ({ ...m, outcomes }));
@@ -172,6 +185,8 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
               !m.outcomes?.length &&
               !m.featureOps?.length &&
               !m.instanceOps?.length &&
+              !m.connectionOps?.length &&
+              !m.couplingOps?.length &&
               !m.clarification &&
               !m.suggestions?.length;
             return nothingAdded
@@ -324,6 +339,29 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
               const color = o == null ? "#8b949e" : ok ? "#3fb950" : "#f85149";
               const label = op.op === "add_connection"
                 ? `${op.a_instance}.${op.a_interface} ↔ ${op.b_instance}.${op.b_interface}`
+                : `remove ${op.id}`;
+              return (
+                <div key={i} style={{ fontSize: 11, color: "#c9d1d9" }}>
+                  <span style={{ color }}>{o == null ? "…" : ok ? "✓" : "✕"}</span> {label}
+                  {o && !ok && o.message ? <span style={{ color: "#f85149" }}> — {o.message}</span> : null}
+                </div>
+              );
+            })}
+          </div>
+        ),
+      });
+    }
+    if (m.couplingOps && m.couplingOps.length > 0) {
+      sections.push({
+        label: "Loads",
+        content: (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {m.couplingOps.map((op, i) => {
+              const o = m.couplingOpOutcomes?.[i];
+              const ok = o?.status === "APPLIED";
+              const color = o == null ? "#8b949e" : ok ? "#3fb950" : "#f85149";
+              const label = op.op === "add_coupling"
+                ? `${op.target_instance} <- ${op.relation}`
                 : `remove ${op.id}`;
               return (
                 <div key={i} style={{ fontSize: 11, color: "#c9d1d9" }}>

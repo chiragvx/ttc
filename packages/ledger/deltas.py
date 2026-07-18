@@ -136,6 +136,37 @@ class ConnectionOp(BaseModel):
     rationale: Optional[str] = None
 
 
+class CouplingInputItem(BaseModel):
+    """One named input wired for a CouplingOp's relation — a LIST item (not a dict) so the tool-use
+    JSON schema stays flat, matching every other Op in this file. `name` must be one of the relation's
+    declared input quantity names (packages/couplings/relations.py::Relation.inputs)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    value: Optional[float] = None
+    from_instance: Optional[str] = None
+    from_param: Optional[str] = None
+
+
+class CouplingOp(BaseModel):
+    """Add/remove a typed LOAD COUPLING (Phase 2b, 2026-07-19) — the LLM WIRES a relation by name
+    (packages/couplings/relations.py), it never authors the physics (Inversion #1). For add_coupling:
+    `target_instance`, `relation`, and `inputs` (ALL of the relation's declared inputs, by name) are
+    REQUIRED — an incomplete wiring is rejected at apply time with the relation's full input list,
+    rather than silently creating a coupling doomed to resolve "unknown" forever. For remove_coupling:
+    `id` is REQUIRED."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["add_coupling", "remove_coupling"]
+    id: Optional[str] = None
+    target_instance: Optional[str] = None
+    relation: Optional[str] = None
+    inputs: list[CouplingInputItem] = Field(default_factory=list)
+    rationale: Optional[str] = None
+
+
 class DeltaProposal(BaseModel):
     """What the geometric agent returns. Either deltas to apply, or a clarification request when the
     natural-language intent is ambiguous (e.g. '6S', '2 inch', 'make it stronger'). Asking is a
@@ -164,6 +195,11 @@ class DeltaProposal(BaseModel):
                     "bwb_fuselage.tip_left) instead of hand-computing a position — the engine derives "
                     "the placement from the parts' own frames. PREFER this over computing x/y/z for a "
                     "part that has a matching interface on its host")
+    coupling_ops: list[CouplingOp] = Field(
+        default_factory=list,
+        description="wire a load onto a part FROM another part's condition via a registered relation "
+                    "(e.g. force_from_pressure_area) instead of stating a load scalar — use this when "
+                    "the load is CAUSED by another part, not a stated duty condition")
 
 
 def parameter_delta_tool_schema() -> dict:

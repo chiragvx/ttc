@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 
+from packages.couplings import RELATION_REGISTRY
 from packages.disciplines import active_discipline_fragments
 from packages.ledger.branch import iter_parameters
 from packages.ledger.nodes import BUILD_ORIENTATION, OPERATING_TEMP, POWER_DISSIPATION, SLIP_FIT
@@ -288,6 +289,69 @@ declare interfaces, connection_ops becomes the default way to assemble.
 - `remove_connection` (with the connection `id`) unmates two parts.\
 """
 
+
+def _coupling_ops_section() -> str:
+    """Builds `_COUPLING_OPS_SECTION` by iterating the REAL `RELATION_REGISTRY`
+    (packages/couplings/relations.py) at prompt-build time — the catalog listing is generated, never
+    hand-typed, so it can never drift from the actual registered relations as more are added later.
+    Called once at import time below (RELATION_REGISTRY is fully populated by the `register_relation`
+    calls that already ran when `packages.couplings.relations` was imported), same pattern as every
+    other *_SECTION constant in this module being a plain string."""
+    lines = [
+        "## Deriving a load from another part — `coupling_ops` (PREFER this over stating a load scalar)",
+        "",
+        "Some loads are not independent facts you state — they are CAUSED by another part's own "
+        "condition. When a load on part B is a direct physical consequence of a condition on part A "
+        "(a pump casing's chamber pressure driving the force on its own crank pin — grow the casing "
+        "and the crank force grows with it, which is exactly the failure that cracked the pump's "
+        "crankshaft), emit a `coupling_ops` entry on the SAME `propose_parameter_delta` call INSTEAD "
+        "of typing a load scalar for B: `{op:\"add_coupling\", target_instance:<B's id>, "
+        "relation:<registered relation name>, inputs:[{name:<relation input name>, "
+        "from_instance:<A's id>, from_param:<A's param path>}, ...]}`. The relation then DERIVES B's "
+        "load from A's live condition every time A changes, instead of a number that silently goes "
+        "stale after A gets resized.",
+        "",
+        "Worked example: the pump casing's `chamber_pressure_pa` drives the crank pin's force via "
+        "`force_from_pressure_area` — wire `inputs:[{name:\"pressure_pa\", from_instance:\"casing\", "
+        "from_param:\"chamber_pressure_pa\"}, {name:\"area_mm2\", from_instance:\"casing\", "
+        "from_param:\"piston_area_mm2\"}]` targeting the crank instance, rather than computing the "
+        "force yourself and proposing it as a stated load.",
+        "",
+        "Each `inputs` entry is EITHER a literal `value` (a stated duty condition — a g-load, an "
+        "ambient pressure — that genuinely isn't caused by another part in the file) OR a "
+        "`from_instance`+`from_param` source (the input is read live off another part) — never both, "
+        "never neither.",
+        "",
+        "Registered relation catalog — this is EVERY relation that exists right now "
+        "(`packages/couplings/relations.py::RELATION_REGISTRY`); nothing outside this list is real:",
+    ]
+    for rel in RELATION_REGISTRY.values():
+        lines.append(f"- **{rel.name}** — {rel.description}")
+        for iname, unit in rel.inputs.items():
+            lines.append(f"  - input `{iname}` ({unit})")
+        out_name, out_unit = rel.output
+        lines.append(f"  - output `{out_name}` ({out_unit})")
+    lines += [
+        "",
+        "Rules:",
+        "- `relation` must be one of the EXACT names listed above — never invent one, and never "
+        "approximate an uncovered physical effect with a close-sounding registered name. This is a "
+        "human wall (ENGINEERING_GRAPH_ARCHITECTURE.md): if the relationship the user describes isn't "
+        "in the catalog above (e.g. fatigue, anything needing an S-N curve or a stress-concentration "
+        "factor), propose it in prose and let a human wire a new relation — do not guess.",
+        "- Use each of the relation's `inputs` names EXACTLY as listed above (e.g. `pressure_pa`, "
+        "`area_mm2`) — these are the keys the relation function actually takes.",
+        "- A coupling whose relation can't be resolved, or whose inputs can't be resolved, derives "
+        "\"unknown\" for the target's load — this BLOCKS export like any other missing safety input "
+        "(see the hard constraints above). That is the correct, intended behavior, never something to "
+        "route around with a guessed literal `value` instead.",
+        "- `remove_coupling` (with the coupling `id`) un-wires a previously added coupling.",
+    ]
+    return "\n".join(lines)
+
+
+_COUPLING_OPS_SECTION = _coupling_ops_section()
+
 _FEATURE_OPS_SECTION = """\
 ## Cutting a hole, pocket, or slot — works on ANY part, this is NOT a per-subsystem capability
 
@@ -512,6 +576,7 @@ def build_system_prompt(subsystem_ctx: SubsystemContext | None, ledger: MasterPa
         sections.append(disciplines)
     sections.append(_instances_section(ledger))
     sections.append(_CONNECTION_OPS_SECTION)
+    sections.append(_COUPLING_OPS_SECTION)
     sections.append(_FEATURE_OPS_SECTION)
     if ledger.instances:
         relevant = _all_geometry_paths(ledger) | _CROSS_CUTTING

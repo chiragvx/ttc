@@ -54,6 +54,23 @@ export function summarizeOutcomes(m: ChatMessage): string | null {
       parts.push(entry);
     });
   }
+  // Phase 2b: coupling outcomes MUST reach the model too, symmetric with connection/instance/feature
+  // ops — otherwise a REJECTED coupling (e.g. a hallucinated relation or source param) never gets fed
+  // back and the model re-proposes the identical wrong wiring next turn, and an APPLIED coupling's
+  // minted coupling_id is never learned so it can't be referenced by a later remove_coupling.
+  if (m.couplingOps) {
+    m.couplingOps.forEach((op, i) => {
+      const outcome = m.couplingOpOutcomes?.[i];
+      if (!outcome) return;
+      const what = op.op === "add_coupling"
+        ? `couple ${op.target_instance} <- ${op.relation}`
+        : `remove_coupling ${op.id}`;
+      let entry = `${what} -> ${outcome.status}`;
+      if (outcome.status === "APPLIED" && outcome.couplingId) entry += ` (coupling_id=${outcome.couplingId})`;
+      if (outcome.message && outcome.status !== "APPLIED") entry += `: ${outcome.message}`;
+      parts.push(entry);
+    });
+  }
 
   return parts.length > 0 ? `[outcomes: ${parts.join("; ")}]` : null;
 }
