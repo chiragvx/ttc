@@ -301,4 +301,7 @@ WINGED_FUSELAGE = register_subsystem(Subsystem(
     # ogive_fuselage.py/naca_wing.py's own fea_eligible notes), and a fused wing-body compound
     # shape certainly doesn't either. FS honestly stays "unknown" for this part type.
     fea_eligible=False,
+    # 2026-07-19 (airframe-first pacing) — fuselage + wing fused into one body, the vehicle's own
+    # outer mold line by definition. See prompt_builder.py's "airframe-first pacing" section.
+    is_airframe_defining=True,
 ))

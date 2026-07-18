@@ -16,16 +16,18 @@ function apiFetch(url: string, init: RequestInit = {}): Promise<Response> {
   return fetch(url, { ...init, headers });
 }
 
-// the ACTIVE subsystem's geometry, tessellated from the current ledger (registry-driven backend)
-export async function fetchMesh(): Promise<MeshData> {
-  const res = await apiFetch(`/mesh`);
+// the ACTIVE subsystem's geometry, tessellated from the current ledger (registry-driven backend).
+// Optional AbortSignal is available for callers that want to drop a superseded response; the live-
+// drag viewport instead uses single-flight + a liveness flag (see Viewport.tsx), so it passes none.
+export async function fetchMesh(signal?: AbortSignal): Promise<MeshData> {
+  const res = await apiFetch(`/mesh`, { signal });
   if (!res.ok) throw new Error(`mesh failed: ${res.status}`);
   return res.json();
 }
 
 // rough click-to-select groundwork: every tagged geometric feature with a world-space point
-export async function fetchMeshFeatures(): Promise<PickableFeature[]> {
-  const res = await apiFetch(`/mesh/features`);
+export async function fetchMeshFeatures(signal?: AbortSignal): Promise<PickableFeature[]> {
+  const res = await apiFetch(`/mesh/features`, { signal });
   if (!res.ok) throw new Error(`mesh features failed: ${res.status}`);
   return (await res.json()).features;
 }
@@ -34,6 +36,12 @@ export async function fetchMeshFeatures(): Promise<PickableFeature[]> {
 export interface ParamSpec {
   node: string; value: number; min: number; max: number; step: number;
   unit: string; locked: boolean; label: string;
+  // PHYSICALLY-VALID slider clamp (2026-07-19) — the sub-range where the subsystem's cross-field
+  // invariants hold given every other param's current value (packages/subsystems/valid_ranges.py).
+  // NOT the advisory [min,max] recommended envelope: a value can be inside [valid_min,valid_max] but
+  // outside [min,max] (shows the ⚠ cue), never outside the valid range via a drag. Optional so an
+  // older backend / a cross-cutting param without a computed range falls back to [min,max].
+  valid_min?: number; valid_max?: number;
 }
 export interface SubsystemInfo { name: string; description: string; disciplines: string[]; }
 

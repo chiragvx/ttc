@@ -69,6 +69,64 @@ def test_tip_too_thin_violates_min_wall(base_ledger, seeded_with):
     assert any("max thickness at the tip" in r for r in reasons)
 
 
+def test_chord_and_thickness_schedule_peaks_at_centerline(base_ledger, seeded):
+    # THE regression this subsystem was fixed for this session: a real live build produced a
+    # "bowtie" -- thick at both outer span edges, pinched thin at the true centerline, exactly
+    # backwards from the intended thick-centerbody/thin-tip shape. Caught only by evaluating the
+    # chord/thickness schedule AT SPECIFIC SPAN POSITIONS and checking which value lands where --
+    # neither total volume nor the overall bounding box (both symmetric/position-agnostic) can ever
+    # tell "thick in the middle" apart from "thick at the edges" (same class of blind spot
+    # naca_wing.py's own reversed-taper fix found this session).
+    from packages.subsystems import get_subsystem_model
+    from packages.subsystems.base import Namespace
+    from packages.ledger.parameter import ParameterDef
+    from packages.subsystems.bwb_fuselage import _chord_at, _thickness_pct_at
+    sub = get_subsystem_model("bwb_fuselage")
+    resolved = {spec.name: ParameterDef(value=spec.value, unit=spec.unit, bounds=(spec.min, spec.max))
+                for spec in sub.params}
+    ns = Namespace(resolved)
+    half_span = ns.span_mm / 2.0
+    chord_at_center = _chord_at(0.0, ns)
+    chord_at_tip = _chord_at(half_span, ns)
+    thickness_at_center = _thickness_pct_at(0.0, ns)
+    thickness_at_tip = _thickness_pct_at(half_span, ns)
+    assert chord_at_center == pytest.approx(ns.centerbody_chord_mm, abs=0.5), (
+        f"expected the CENTERLINE (dist=0) to carry centerbody_chord_mm ({ns.centerbody_chord_mm}), "
+        f"got {chord_at_center:.1f} -- looks like the tip value landed at the center instead"
+    )
+    assert chord_at_tip == pytest.approx(ns.tip_chord_mm, abs=0.5), (
+        f"expected the TIP (dist=span_mm/2) to carry tip_chord_mm ({ns.tip_chord_mm}), got "
+        f"{chord_at_tip:.1f} -- looks like the centerbody value landed at the tip instead"
+    )
+    assert thickness_at_center == pytest.approx(ns.centerbody_thickness_pct, abs=0.5)
+    assert thickness_at_tip == pytest.approx(ns.tip_thickness_pct, abs=0.5)
+
+
+@pytest.mark.skipif(not HAS_B123D, reason="needs build123d")
+def test_real_build_is_widest_at_center_not_at_the_edges(base_ledger, seeded_with):
+    # Same regression as the pure-schedule check above, but against the REAL built solid: slice the
+    # solid's own geometry near the centerline vs near an outer edge and confirm the centerline
+    # cross-section is genuinely the bigger one -- catches a bug in the schedule-to-loft wiring even
+    # if _chord_at/_thickness_pct_at themselves were somehow correct.
+    import build123d as bd
+    led = seeded_with(base_ledger, "bwb_fuselage",
+                     span_mm=(800.0, 200.0, 3000.0), centerbody_chord_mm=(300.0, 50.0, 1500.0),
+                     tip_chord_mm=(80.0, 10.0, 600.0), blend_taper_mm=(300.0, 0.0, 1500.0),
+                     sweep_deg=(0.0, -30.0, 45.0), dihedral_deg=(0.0, -10.0, 20.0))
+    part = get_subsystem("bwb_fuselage").geometry_builder(led)
+    solid = part.solid
+    plane_center = bd.Plane(origin=(0, 0, 0), z_dir=(1, 0, 0))
+    plane_near_tip = bd.Plane(origin=(390, 0, 0), z_dir=(1, 0, 0))
+    section_center = solid.intersect(plane_center)
+    section_near_tip = solid.intersect(plane_near_tip)
+    area_center = section_center.area if section_center is not None else 0.0
+    area_near_tip = section_near_tip.area if section_near_tip is not None else 0.0
+    assert area_center > area_near_tip, (
+        f"expected the centerline cross-section ({area_center:.1f} mm^2) to be bigger than the "
+        f"near-tip cross-section ({area_near_tip:.1f} mm^2) -- got the reverse, the bowtie regression"
+    )
+
+
 @pytest.mark.skipif(not HAS_B123D, reason="needs build123d")
 def test_geometry_builds_at_defaults(base_ledger, seeded):
     led = seeded(base_ledger, "bwb_fuselage")

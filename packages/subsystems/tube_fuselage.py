@@ -205,4 +205,7 @@ TUBE_FUSELAGE = register_subsystem(Subsystem(
     # validated cantilever FS methodology (packages/truth_plane/solvers/fs.py) isn't a faithful
     # re-use here, same honest "unknown" stance every other lofted-body subsystem already takes.
     fea_eligible=False,
+    # 2026-07-19 (airframe-first pacing) — a fuselage sets the vehicle's own outer mold line. See
+    # prompt_builder.py's "airframe-first pacing" section.
+    is_airframe_defining=True,
 ))

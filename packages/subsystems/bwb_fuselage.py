@@ -32,12 +32,32 @@ wing its sharp, flat-faceted taper; a BWB wants the smooth continuous surface `r
 matching `lofted_spindle.py`/`ogive_fuselage.py`'s own body-of-revolution choice, not `naca_wing.py`'s
 wing-panel choice.
 
-Verified directly in build123d 0.10.0 this session, swept across station counts 6-20 (same rigor as
-`tube_fuselage.py`'s own station-count sweep): valid, single-solid, and the closed-form estimate
-(disk-integrated `_naca_airfoil.naca4_half_thickness` area, exactly mirroring `naca_wing.py`'s own
-`_airfoil_area`) stayed under ~1% error THE ENTIRE SWEEP — far tighter than `tube_fuselage.py`'s own
-~13-21% (an airfoil cross-section is much thinner relative to its chord than a fat elliptical tube is
-relative to its diameter, so there is much less smooth-loft-vs-sampled-station bulge to begin with).
+CONFIRMED BUG, fixed 2026-07-18 (found live, from a rendered screenshot showing a "bowtie" -- thick at
+both outer span edges, pinched thin at the true centerline, exactly backwards): `_chord_at`/
+`_thickness_pct_at` fed `dist_from_center` (which only ranges `[0, span_mm/2]`) into `ease_at` as if
+it still ran the FULL `[0, span_mm]` one-directional axis `tube_fuselage.py`'s nose-to-tail schedule
+uses -- a units/convention mismatch, not a build123d issue. Every station landed inside what `ease_at`
+treated as its "start taper zone" (rising FROM the tip value TO the centerbody value as `dist`
+increased away from 0), so the centerline (`dist=0`) got the TIP value and both outer edges (`dist`
+near `span_mm/2`) got the CENTERBODY value -- inverted. See `_chord_at`'s own docstring for the fixed,
+single-taper-zone formula (`ease_at`'s "end taper zone" alone, `x_a=0.0` disabling the "start" branch
+entirely). Caught only by DIRECTLY evaluating `_chord_at`/`_thickness_pct_at` at specific span
+positions and comparing against `centerbody_chord_mm`/`tip_chord_mm` by NAME, not by any aggregate
+check (volume, overall bounding box) -- exactly the same class of blind spot `naca_wing.py`'s own
+reversed-taper fix already found this session (an aggregate integral is symmetric/position-agnostic by
+construction, so it cannot tell "thick at the middle" from "thick at the edges" apart). See
+`tests/subsystems/test_bwb_fuselage.py::test_chord_and_thickness_schedule_peaks_at_centerline` for the
+now-permanent regression test targeting this exact failure mode.
+
+Verified directly in build123d 0.10.0 this session (re-verified against the CORRECTED geometry after
+the bug above was fixed -- the figures below are NOT the pre-fix numbers), swept across station counts
+6-20 (same rigor as `tube_fuselage.py`'s own station-count sweep): valid, single-solid, and the
+closed-form estimate (disk-integrated `_naca_airfoil.naca4_half_thickness` area, exactly mirroring
+`naca_wing.py`'s own `_airfoil_area`) stayed under ~1.5% error THE ENTIRE SWEEP, converging smoothly
+(1.45% at 6 stations down to 0.46% at 20) rather than the non-monotonic "loft instability" every other
+sibling in this file family discloses at high station counts -- far tighter than `tube_fuselage.py`'s
+own ~13-21% (an airfoil cross-section is much thinner relative to its chord than a fat elliptical tube
+is relative to its diameter, so there is much less smooth-loft-vs-sampled-station bulge to begin with).
 Also checked directly: `blend_taper_mm` at its own upper invariant bound (no flat centerbody span left
 at all — the whole body is one continuous taper) and a combined sweep+dihedral case both still build
 one valid solid.
@@ -103,17 +123,31 @@ _POINT_EPS_MM = 1e-6
 
 
 def _chord_at(dist_from_center: float, p) -> float:
-    x_a = p.blend_taper_mm
-    x_b = p.span_mm - p.blend_taper_mm
-    return ease_at(dist_from_center, x_a, x_b, p.span_mm,
-                    p.tip_chord_mm, p.centerbody_chord_mm, p.tip_chord_mm)
+    """`dist_from_center` ranges `[0, span_mm/2]` (0 at the centerline, `span_mm/2` at either tip) --
+    NOT `[0, span_mm]`, so this is a SINGLE taper zone (`ease_at`'s "end taper zone" only, `x_a=0.0`
+    disables its "start taper zone" branch entirely), not the three-zone start/plateau/end schedule
+    `tube_fuselage.py`'s one-directional nose-to-tail axis uses. CONFIRMED BUG, fixed 2026-07-18 (live,
+    from a rendered screenshot: a "bowtie" shape, thick at both outer span edges and pinched thin at
+    the true centerline -- the exact opposite of the intended thick-centerbody/thin-tip shape): the
+    original version passed `dist_from_center` into `ease_at`'s `length` slot as if it still ran the
+    full `[0, span_mm]` range, and used `x_a=blend_taper_mm`/`x_b=span_mm-blend_taper_mm` as if this
+    were that same one-directional axis -- since `dist_from_center` never actually exceeds `span_mm/2`,
+    it could never reach that stale `x_b` (typically > `span_mm/2` for any real `blend_taper_mm`), so
+    every station landed in what `ease_at` treated as the START taper zone: value RISING from
+    `tip_chord_mm` at `dist=0` up to `centerbody_chord_mm` at `dist=blend_taper_mm` and then WRONGLY
+    staying at `centerbody_chord_mm` (the "plateau") all the way to the tip -- precisely inverted."""
+    half_span = p.span_mm / 2.0
+    x_b = half_span - p.blend_taper_mm
+    return ease_at(dist_from_center, 0.0, x_b, half_span,
+                    p.centerbody_chord_mm, p.centerbody_chord_mm, p.tip_chord_mm)
 
 
 def _thickness_pct_at(dist_from_center: float, p) -> float:
-    x_a = p.blend_taper_mm
-    x_b = p.span_mm - p.blend_taper_mm
-    return ease_at(dist_from_center, x_a, x_b, p.span_mm,
-                    p.tip_thickness_pct, p.centerbody_thickness_pct, p.tip_thickness_pct)
+    """Same single-taper-zone fix as `_chord_at` above -- see that function's docstring."""
+    half_span = p.span_mm / 2.0
+    x_b = half_span - p.blend_taper_mm
+    return ease_at(dist_from_center, 0.0, x_b, half_span,
+                    p.centerbody_thickness_pct, p.centerbody_thickness_pct, p.tip_thickness_pct)
 
 
 def _stations(p) -> list[float]:
@@ -265,4 +299,7 @@ BWB_FUSELAGE = register_subsystem(Subsystem(
     # FS methodology (packages/truth_plane/solvers/fs.py) isn't a faithful re-use here, same honest
     # "unknown" stance every other lofted-body subsystem in this package already takes.
     fea_eligible=False,
+    # 2026-07-19 (airframe-first pacing) — the whole point of a BWB is that the body IS the wing,
+    # setting the vehicle's own outer mold line. See prompt_builder.py's "airframe-first pacing".
+    is_airframe_defining=True,
 ))

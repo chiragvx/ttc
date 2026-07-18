@@ -8,7 +8,7 @@ from packages.agents.runtime import CoModelingSession
 from packages.ledger.events import EventLog
 from packages.ledger.nodes import SKIN
 from packages.ledger.schema import ReviewState
-from packages.subsystems import get_subsystem
+from packages.subsystems import add_instance, get_subsystem
 from packages.transport.app import make_demo_ledger
 
 TS = "2026-06-28T00:00:00Z"
@@ -116,6 +116,35 @@ def test_system_prompt_does_not_duplicate_params_for_already_instantiated_subsys
     # (proving no duplication) while the qualified form must be present (proving it's still covered).
     assert "- `instances.root.params.skin_thickness_mm` (mm, recommended [1.0, 5.0])" in prompt
     assert "- `skin_thickness_mm` (mm, recommended" not in prompt
+
+
+def test_system_prompt_paces_a_vague_whole_vehicle_request_on_an_empty_file():
+    # Live user feedback this session: a vague "build me a flying wing UAV" made the copilot add the
+    # wing AND an electronics bay AND two spars in the same turn — the user wants the airframe
+    # (outer mold line) established first, systems/mounting parts only once that shape exists.
+    empty_ledger = make_demo_ledger()
+    prompt = build_system_prompt(None, empty_ledger)
+    assert "Airframe-first pacing" in prompt
+    assert "Airframe already established" not in prompt
+    # the real airframe-defining type names must be named so the copilot knows which ones count
+    for name in ("naca_wing", "bwb_fuselage", "tube_fuselage", "ogive_fuselage", "winged_fuselage"):
+        assert name in prompt
+
+
+def test_system_prompt_stays_paced_with_only_a_non_airframe_part_present(base_ledger):
+    # base_ledger's root instance is a plain "bracket" — not airframe-defining. The pacing rule must
+    # still apply (a bracket existing doesn't mean the vehicle's shape is established).
+    prompt = build_system_prompt(get_subsystem("bracket"), base_ledger)
+    assert "Airframe-first pacing" in prompt
+    assert "Airframe already established" not in prompt
+
+
+def test_system_prompt_lifts_pacing_once_an_airframe_part_exists():
+    led = make_demo_ledger()
+    led = add_instance(led, "naca_wing", "main_wing")
+    prompt = build_system_prompt(get_subsystem("naca_wing"), led)
+    assert "Airframe already established" in prompt
+    assert "Airframe-first pacing" not in prompt
 
 
 def test_eval_harness_computes_metrics(stub_provider):

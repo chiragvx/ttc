@@ -52,12 +52,29 @@ class CascadeEffect(_Msg):
     reason: str
 
 
+class ValidRange(_Msg):
+    """The PHYSICALLY-VALID slider range for one geometry param, given every OTHER param's current
+    value (2026-07-19). Pure closed-form from the subsystem's own cross-field invariants
+    (packages/subsystems/valid_ranges.py) -- NOT the advisory recommended `bounds` (those stay a soft
+    envelope the copilot may exceed; see parameter.py). The frontend hard-clamps a slider to
+    [valid_min, valid_max] so a human drag can never reach a CONFLICT (e.g. blend_taper_mm past
+    span_mm/2). Rides on every Tier-0 mutation response so all sliders' clamps stay live as other
+    params change -- microsecond-cheap, no kernel/solver."""
+    node: str
+    valid_min: float
+    valid_max: float
+
+
 class CascadeUpdate(_Msg):
     """Tier 0 response: rules-validated mutation + analytic telemetry (no kernel/solver in this path)."""
     event_type: Literal["PARAMETER_CASCADE_UPDATE"] = "PARAMETER_CASCADE_UPDATE"
     mutations_applied: list[MutationApplied]
     cascades_applied: list[CascadeEffect] = Field(default_factory=list)
     telemetry_delta: TelemetryDelta
+    # Refreshed slider clamps for EVERY geometry param of the active instance (not just the mutated
+    # one — changing span_mm shifts blend_taper_mm's own valid max, so all must refresh together).
+    # Empty when the active instance has no geometry params / no registered model. See ValidRange.
+    valid_ranges: list[ValidRange] = Field(default_factory=list)
 
 
 class MutationRejected(_Msg):

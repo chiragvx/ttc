@@ -318,6 +318,86 @@ integral). `naca_wing.py`'s private `_sweep_dihedral_offset` was promoted to a s
 duplicate copy, not a new capability. Full suite green throughout: 1537 passed after `tube_fuselage`
 landed, **1550 passed, 27 skipped** with `bwb_fuselage` added.
 
+**2026-07-19 — two live bugs found in `bwb_fuselage` while dogfooding it, plus a first-time-ever
+"/mesh hangs the whole server" bug, plus airframe-first pacing.** Three separate findings from live
+UAV-building sessions, all fixed:
+
+1. **`/mesh` tessellation was hardcoded at a 0.2mm absolute deflection tolerance** — fine for the
+   catalog's original small printable parts (tens of mm), pathological for the fuselage-class
+   subsystems added 2026-07-18 (up to 3000mm). Reproduced directly: a ~1800mm `bwb_fuselage` alone
+   took **235 seconds** to tessellate (590,500 triangles), blocking the ENTIRE backend process for
+   that whole time — not just the one request, since a sync FastAPI route's threadpool worker held
+   the lock the whole time. Fixed: `/mesh` now scales the tolerance to 0.1% of the part's own largest
+   bounding-box dimension, clamped `[0.1mm, 2.0mm]`. Same 1800mm part now tessellates in ~9 seconds.
+2. **`bwb_fuselage`'s chord/thickness taper was inverted** — thick at both outer span edges, pinched
+   thin at the true centerline, exactly backwards. Root cause: `_chord_at`/`_thickness_pct_at` fed
+   `dist_from_center` (which only ranges `[0, span_mm/2]`) into `ease_at` as if it still ran the FULL
+   `[0, span_mm]` one-directional axis `tube_fuselage.py`'s nose-to-tail schedule uses — a units
+   mismatch, not a build123d issue. Caught only by evaluating the schedule AT SPECIFIC positions and
+   checking by NAME which value landed where — total volume and overall bounding box are both
+   symmetric/position-agnostic and provably cannot catch this, the same blind spot `naca_wing.py`'s
+   own reversed-taper fix already found this session. Fixed (single-taper-zone formula, `x_a=0.0`
+   disabling `ease_at`'s "start zone" branch entirely) and given a permanent two-layer regression test
+   (`test_chord_and_thickness_schedule_peaks_at_centerline` checking the pure schedule, plus
+   `test_real_build_is_widest_at_center_not_at_the_edges` slicing the REAL built solid at two span
+   positions and comparing cross-sectional area).
+3. **`render_assembly()`'s per-instance exception handling was completely silent** — `except
+   Exception: continue`, no logging anywhere — so if any instance in a multi-part assembly failed to
+   build, the WHOLE assembly's mesh came back empty with zero trace, indistinguishable from "nothing
+   to render." Added `logging.exception`/`logging.warning` calls (kept the same defensive
+   per-instance isolation — one broken part still shouldn't blank the whole scene — just made it
+   diagnosable instead of invisible).
+
+**Airframe-first pacing** (live user feedback, explicitly likened to Claude Code's own plan-mode →
+execution split): a vague whole-vehicle request ("build me a flying wing UAV") used to make the
+copilot propose the wing/fuselage AND every systems/mounting part (electronics bay, spars, motor
+mounts) in the same turn. This is Stage 3 (`AIRCRAFT_DESIGN_PROCESS.md`) one level down — the SAME
+"explore cheaply, checkpoint, then commit to detail" logic §7 already established between whole
+program stages, applied WITHIN Stage 3 instead: propose the airframe (outer mold line) alone first,
+pause, then move to systems once that shape exists. Mechanism: a new opt-in `Subsystem.
+is_airframe_defining` field (same stance as `fea_eligible` — never inferred from shape/size), tagged
+on the 7 real wing/fuselage-class subsystems (`naca_wing`, `bwb_fuselage`, `tube_fuselage`,
+`ogive_fuselage`, `winged_fuselage`, `lofted_spindle`, `lofted_hull`). `prompt_builder.py`'s new
+`_airframe_pacing_section` reads this off `ledger.instances` directly each turn — no new stored mode,
+nothing to desync if the airframe part is later deleted. Deliberately NOT a hard blocking gate (this
+project's 2026-07-04 policy: every proposal auto-applies immediately, Undo is the safety net) — this
+only paces what gets PROPOSED in one turn; a fully-specified request ("wing plus an electronics bay
+and two spars, now") is honored directly, and the rule never applies to an already-narrow request.
+Regression-tested in `tests/backend/test_agents.py` (pacing text present/absent by ledger state) and
+`tests/subsystems/test_subsystems.py` (the exact tagged-subsystem set, pinned by name).
+
+**2026-07-19 — parameter sliders: live-drag geometry + can't-reach-invalid clamps.** Two live
+complaints ("changes do not reflect instantly on 3D", "I dragged the slider... make it instant" and
+the earlier `blend_taper_mm` CONFLICT). Both fixed, staying inside the three-tier "single clock"
+doctrine (the kernel must never sit in the 30Hz loop):
+- **Live-drag regen** (`packages/frontend/src/Viewport.tsx`): replaced the release-only 200ms debounce
+  with **single-flight, latest-wins** — at most one `/mesh` regen in flight at a time, and the instant
+  it returns, if the slider advanced while it ran, it immediately regens for the newest state. Wedge
+  parts (50-170ms full rebuild+tessellate, measured) refresh ~10x/s so the viewport tracks the drag
+  live; big lofted bodies refresh as fast as the kernel sustains and NEVER pile up (the pile-up was the
+  earlier whole-server freeze). The slider + HUD stay on the instant Tier-0 WS path; the kernel runs
+  one-at-a-time, opportunistically — not in the 30Hz loop.
+- **Invariant-valid slider clamps** (`packages/subsystems/valid_ranges.py`, new): each slider is
+  hard-clamped to the PHYSICALLY-VALID sub-range where the subsystem's own cross-field invariants hold,
+  given every other param's current value — NOT the advisory recommended bounds (those stay a soft
+  envelope the copilot may exceed, per parameter.py; the ⚠ cue still flags outside-recommended
+  separately). You can no longer drag `blend_taper_mm` past `span_mm/2`. Pure closed-form (~1.5ms for
+  an 11-param subsystem, sub-µs per invariant eval) so it rides on every Tier-0 WS mutation response
+  (`protocol.py` `CascadeUpdate.valid_ranges`) — all sliders' clamps stay live as other params change,
+  no kernel call, no extra round trip. `/mesh` tessellation tolerance also retuned (0.1%→0.2% of the
+  part's largest dim, cap 2→4mm) after measuring OCCT's per-shape speed cliff — same triangle count,
+  3-7x faster on the fuselage-scale bodies.
+- **An adversarial-review workflow (5 finder agents + per-finding skeptic verification) caught a
+  critical regression in the first draft of the live-drag loop before it shipped**: the effect cleanup
+  aborted the in-flight fetch on EVERY slider tick (not just unmount), killing the catch-up re-pump, so
+  the viewport froze on a stale mesh the moment you stopped dragging. Confirmed with the exact failing
+  interleaving and fixed (no per-tick abort; a liveness flag guards only true unmount). The same review
+  found a boundary bug in the valid-range sampler (returned the search bound without invariant-testing
+  it) — also fixed, both regression-tested (`tests/subsystems/test_valid_ranges.py`,
+  `packages/frontend/src/sliderRange.test.ts`, `tests/backend/test_app.py`). Two PRE-EXISTING
+  HARD_LOCK/unlock UI-desync bugs it also surfaced are documented but deliberately left for a separate
+  focused pass.
+
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
 validated none of it. It's now split across 7 logical commits (ledger → truth-plane →

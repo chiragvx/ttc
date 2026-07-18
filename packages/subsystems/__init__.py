@@ -70,6 +70,9 @@ class SubsystemContext:
     # 2026-07-03 — see Subsystem.cascades: an optional packages.ledger.apply.CascadeRule this part
     # declares (e.g. bracket's edge-distance rule cascades plate_depth_mm). None = no cascades.
     cascades: Optional[Callable[..., list]] = None
+    # 2026-07-19 — see Subsystem.is_airframe_defining: True only for a wing/fuselage-class part that
+    # sets the vehicle's own outer mold line. False (default) -> an ordinary systems/structural part.
+    is_airframe_defining: bool = False
 
 
 SUBSYSTEM_REGISTRY: dict[str, SubsystemContext] = {}
@@ -149,6 +152,7 @@ def register_subsystem(sub: Subsystem) -> Subsystem:
         seed_defaults=_seed,
         fea_eligible=sub.fea_eligible,
         cascades=sub.cascades,
+        is_airframe_defining=sub.is_airframe_defining,
     )
     SUBSYSTEM_MODELS[sub.name] = sub
     return sub

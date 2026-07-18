@@ -150,6 +150,61 @@ assembly). Position: `x_mm` near the tail (e.g. ~88% of the fuselage's own `leng
 surface" — good enough without evaluating that fuselage's exact taper formula inline). Give \
 `naca_wing` a much smaller `span_mm` than a main wing (a real vertical stabilizer is far shorter than \
 the wingspan) — e.g. 200-350mm for a fuselage in the many-hundred-mm range.
+- **Worked, VERIFIED recipe — a BWB centerbody with continuing outer wing panels** (verified directly \
+this session, rebuilding this exact composition in build123d and slicing across the seam to confirm \
+the join lines up): a real blended-wing-body is often built as THREE separate parts — a `bwb_fuselage` \
+scoped down to just the thick centerbody, plus a `naca_wing` panel on EACH side continuing the taper \
+out to the real wingtip — not one `bwb_fuselage` spanning the whole vehicle. Reach for this specifically \
+when the user distinguishes "the body" from "the wings" as separate things (e.g. wants them "as \
+separate parts", or describes a body that should stay compact while the wings extend further), rather \
+than one continuous BWB shape end to end.
+  - **MUST be TWO SEPARATE TURNS, never one — this is not optional.** CONFIRMED LIVE FAILURE (this \
+  session): a single turn that both resized an EXISTING body's `span_mm`/`blend_taper_mm` AND added both \
+  wings at once produced a body resize that silently hit an invariant CONFLICT (never retried) plus two \
+  wings added with NO position and NO sizing deltas at all — every number the wings needed depends on \
+  the body's post-resize state, and deltas + `instance_ops` in ONE proposal are all emitted together \
+  BEFORE any of them are actually applied, so nothing in that same turn can react to whether an earlier \
+  one in it landed, was clamped, or was rejected. The fix is procedural, not a wording tweak: \
+  - **Turn 1** — get the body (`bwb_fuselage`) to its final centerbody proportions ONLY: either \
+  `add_instance` it fresh with its sizing `deltas` in the same call (safe — a fresh instance's own \
+  deltas targeting ITS OWN new id in the same proposal is the normal, already-supported pattern), or, if \
+  it already exists, propose ONLY the resize `deltas` — do not also add either wing this turn, even if \
+  the user's request describes the whole vehicle at once. Say plainly in your reply that the wings come \
+  next once the body's real proportions are confirmed.
+  - **Turn 2** (the FOLLOWING message, after the resize/add has actually landed) — re-read the body's \
+  REAL, now-committed `tip_chord_mm`/`tip_thickness_pct`/`sweep_deg`/`span_mm` from "Current parts in \
+  this file" / the live ledger JSON (never the value you PROPOSED last turn, in case it was clamped to \
+  an `APPLIED_ADVISORY` value or partially rejected) and ONLY THEN add both `naca_wing` panels, sized \
+  and positioned from those real numbers per the formulas below.
+  - Give `bwb_fuselage` a `span_mm` covering ONLY the centerbody + its own blend taper — NOT the full \
+  vehicle span (e.g. 500-800mm for a centerbody, not the 1500-1800mm a whole-vehicle BWB would use).
+  - Each `naca_wing`'s `root_chord_mm` = the body's OWN (real, committed) `tip_chord_mm` value (copy the \
+  number — this is what makes the wing's root match the body's own taper endpoint; there is no live \
+  link, so if the body's `tip_chord_mm` changes again later, the wing's `root_chord_mm` must be updated \
+  to match again, same as any other REFINING edit). Each wing's `thickness_pct` = the body's own \
+  `tip_thickness_pct`. Each wing's `sweep_deg` = the body's own `sweep_deg` (continues the same \
+  leading-edge sweep line — do NOT give the wings a different sweep unless the user explicitly asks for \
+  a kinked sweep).
+  - Position EACH wing (both sides use the SAME formula — do NOT flip any sign between left and right; \
+  `naca_wing` is symmetric about its own root, so the identical unmirrored part works on both sides): \
+  `x_mm = ±(body's span_mm / 2)` (positive for the right wing, negative for the left), \
+  `y_mm = (body's span_mm / 2) * tan(body's sweep_deg in radians)`, \
+  `z_mm = (body's span_mm / 2) * tan(body's dihedral_deg in radians)` — SAME `y_mm`/`z_mm` value on \
+  BOTH sides, only `x_mm`'s sign differs. No `rx_deg`/`ry_deg`/`rz_deg` — `bwb_fuselage` and `naca_wing` \
+  already share the identical span=local-X/chord=local-Y/thickness=local-Z convention, so this is pure \
+  translation, unlike the vertical-stabilizer recipe above which needs a 90° reorientation. Both \
+  `add_instance` entries for the wings MUST carry this position AND the sizing deltas above in the SAME \
+  call — an add with no position/sizing falls back to auto-layout at generic catalog defaults, which is \
+  the exact live failure this two-turn rule exists to prevent.
+  - Worked numbers (from this session's verification): body `span_mm=600`, `sweep_deg=20`, \
+  `dihedral_deg=2`, `tip_chord_mm=120`, `tip_thickness_pct=12` → each wing gets `root_chord_mm=120`, \
+  `thickness_pct=12`, `sweep_deg=20`, and is placed at `x_mm=±300`, `y_mm=300*tan(20°)≈109.2`, \
+  `z_mm=300*tan(2°)≈10.5`.
+  - Be upfront about ONE real limitation, do not silently paper over it: both parts use the identical \
+  NACA cross-section formula, so the chord/thickness match EXACTLY at the seam (no visible step) — but \
+  `bwb_fuselage`'s own taper curve (a smooth cosine-ease) and `naca_wing`'s taper (a straight line) do \
+  not necessarily share the same SLOPE at that junction, so a subtle kink in the outline's curvature at \
+  the seam is possible even though the sizes line up perfectly.
 
 Single tapered body vs. segmented skeleton — pick the recipe that actually matches the request. Not \
 every "fuselage" (or similar streamlined shape) needs the bulkhead_frame+longeron recipe above: for a \
@@ -312,6 +367,65 @@ def _subsystems_section(active: str | None, ledger: MasterParametricLedger | Non
     return "\n".join(lines)
 
 
+def _airframe_pacing_section(ledger: MasterParametricLedger) -> str:
+    """Airframe-first pacing (2026-07-19): a vague whole-vehicle request ("build me a flying wing
+    UAV") used to make the copilot propose the wing/fuselage AND every systems/mounting part
+    (electronics bay, spars, motor mounts...) in the SAME turn -- live user feedback: "the first
+    prompt (vague prompt) is meant to define the shape of the plane... [then] user might ask for room
+    for electronics or smth", explicitly likened to Claude Code's own plan-mode-then-execution split.
+    Mirrors `AIRCRAFT_DESIGN_PROCESS.md` §7's low-fidelity-exploration -> approval-gate ->
+    high-fidelity-validation logic one level down, applied WITHIN Stage 3 (Geometry generation)
+    instead of between whole stages -- not a new phase, a finer-grained pacing rule for the same
+    "explore cheaply, checkpoint, then commit to detail" idea that section already established for
+    the whole program.
+
+    Whether an "airframe" already exists is read directly from `ledger.instances` (via each
+    instance's registered `Subsystem.is_airframe_defining` flag -- see `packages/subsystems/base.py`),
+    never a separately-stored mode -- nothing to get out of sync if the airframe part is later
+    deleted, no migration, no new ledger event kind. This deliberately does NOT reintroduce a hard
+    blocking gate (this project's own 2026-07-04 policy: every proposal auto-applies immediately,
+    Undo is the safety net, never a click-to-approve step) -- it only paces what gets PROPOSED in one
+    turn; the airframe part itself still applies instantly like anything else."""
+    has_airframe = False
+    for inst in ledger.instances.values():
+        try:
+            if get_subsystem_model(inst.subsystem_type).is_airframe_defining:
+                has_airframe = True
+                break
+        except KeyError:
+            continue
+    if has_airframe:
+        return (
+            "## Airframe already established\n"
+            "This file already has an airframe-defining part (a wing/fuselage-class instance — see "
+            "\"Current parts in this file\" below). The shape/outer-mold-line question is settled: "
+            "propose systems, structural, and mounting parts (electronics bays, spars, motor mounts, "
+            "fasteners, ...) freely and immediately, exactly like any other request — do NOT hold "
+            "back or re-ask about the shape again."
+        )
+    return (
+        "## Airframe-first pacing — a vague whole-vehicle request needs the SHAPE before the SYSTEMS\n"
+        "This file has NO airframe-defining part yet (no wing/fuselage-class instance — "
+        "naca_wing/bwb_fuselage/tube_fuselage/ogive_fuselage/winged_fuselage/lofted_spindle/"
+        "lofted_hull are the airframe-defining types in the part types menu above). If the user's "
+        "request is a VAGUE, WHOLE-VEHICLE ask (\"build me a UAV\", \"design a flying wing\", \"make "
+        "an aircraft\" — no explicit list of every part they want), propose ONLY the airframe-defining "
+        "part(s) that set the outer mold line/overall silhouette THIS TURN — do NOT also add "
+        "electronics bays, spars, motor mounts, or other systems/mounting parts in the same proposal, "
+        "even though a full aircraft would eventually need them. In your reply, say plainly that this "
+        "is a first pass at the shape, and ask whether to refine it (dimensions, sweep, taper, "
+        "dihedral) or move on to adding systems/structural parts next — do not silently decide for "
+        "the user.\n"
+        "This is a DEFAULT PACING for vague asks, not a hard rule: if the user's own wording already "
+        "asks for the systems/mounting parts too (\"...with an electronics bay and two spars\", \"give "
+        "me the whole thing now\"), honor that directly in one turn — do not invent a pause the user "
+        "didn't ask for. Likewise, a request that is ALREADY narrow (\"add a wing spar\" on an empty "
+        "file) is not a whole-vehicle ask and this pacing rule does not apply to it at all.\n"
+        "This never blocks anything — the airframe part still applies immediately like any other "
+        "proposal (Undo is always available). This only paces what gets PROPOSED in this one turn."
+    )
+
+
 def _instances_section(ledger: MasterParametricLedger) -> str:
     """Compact instance-id listing so the copilot can pick a real `instance_id` for `feature_ops` (or
     any other instance-targeted delta) instead of guessing. Stable-ish content — the instance set
@@ -356,7 +470,8 @@ def build_system_prompt(subsystem_ctx: SubsystemContext | None, ledger: MasterPa
     instructions. Does NOT include the live ledger JSON — the caller appends that so the stable
     prefix stays cacheable."""
     active_name = subsystem_ctx.name if subsystem_ctx is not None else None
-    sections = [_BASE_RULES, _subsystems_section(active_name, ledger), _INSTANCE_OPS_SECTION]
+    sections = [_BASE_RULES, _subsystems_section(active_name, ledger), _INSTANCE_OPS_SECTION,
+                _airframe_pacing_section(ledger)]
     if subsystem_ctx is not None:
         sections.append(subsystem_ctx.prompt_fragment)
     disciplines = active_discipline_fragments(ledger)

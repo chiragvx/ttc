@@ -59,10 +59,38 @@ from packages.transport.protocol import (
     MutationRejected,
     ParamMutationRequest,
     TelemetryDelta,
+    ValidRange,
 )
 
 _PROFILE = "PLA"
 _TS = "2026-06-28T00:00:00Z"
+
+# /mesh tessellation tolerance: SCALES with the part's own size instead of a fixed absolute
+# deflection. A flat 0.2mm was fine for the catalog's original small printable parts (tens of mm)
+# but is pathological for the fuselage-class subsystems (tube_fuselage/bwb_fuselage/ogive_fuselage,
+# up to 3000mm) added 2026-07-18 -- discovered live: a ~1800mm bwb_fuselage's tessellate(0.2) never
+# returned in over 3 minutes (still running when this fix landed), freezing the whole server (a sync
+# FastAPI route runs in a threadpool, but a single genuinely-runaway native OCCT call still starves
+# the viewport with no error, no timeout, nothing — see the investigation in this session's history
+# for the full trace). 0.1% of the part's own largest bounding-box dimension, clamped to
+# [_MIN_TESSELLATE_TOL_MM, _MAX_TESSELLATE_TOL_MM] so a tiny part stays reasonably fine-grained and a
+# huge one stays reasonably fast, instead of one fixed number that can't serve both.
+#
+# 2026-07-19 retune: measured directly (build123d 0.10.0) across ogive_fuselage/tube_fuselage (400mm),
+# naca_wing (500mm), and bwb_fuselage (828mm default, 1800mm large case) that OCCT's tessellate() has
+# a real speed CLIFF at some absolute tolerance threshold per shape — BELOW it, compute time is
+# 3-7x higher for the EXACT SAME resulting triangle count (verified: 108,844 tris at both 0.8mm/6.94s
+# and 1.6mm/1.83s on the same bwb_fuselage body — the coarser call is strictly faster for zero visual
+# cost, not a quality tradeoff). The cliff point scales with part size/complexity (roughly 1.0mm at
+# 400-500mm, 1.6mm at 828mm, >2.07mm but <=3.0mm at 1800mm) -- 0.001 fraction / 2.0mm cap (this
+# constant's ORIGINAL 2026-07-19 value, from the very first "the server hangs" fix earlier the same
+# day) still landed inside the slow zone for a bwb_fuselage at its own default size, which is exactly
+# why a live multi-delta chat edit still felt slow after that first fix (confirmed directly: 0.83mm
+# landed 6.94s, the same 828mm body tessellates in 1.83s at 1.6mm — same triangle count either way).
+# Doubled: 0.2% fraction, 4.0mm cap -- verified past the cliff for every case above.
+_MIN_TESSELLATE_TOL_MM = 0.1
+_MAX_TESSELLATE_TOL_MM = 4.0
+_TESSELLATE_TOL_FRACTION = 0.002
 
 
 def _pd(value, lo, hi, lock=LockState.DYNAMIC):
@@ -184,6 +212,32 @@ def _telemetry(ledger: MasterParametricLedger, instance_id: str | None = None) -
         estimated_print_time_s=round(vol_for_print / 5.0, 1),
         estimated_cost_usd=round(cost_usd(ledger), 2),  # analytic — Cost discipline
     )
+
+
+def _valid_ranges(ledger: MasterParametricLedger, instance_id: str | None) -> list[ValidRange]:
+    """PHYSICALLY-VALID slider clamp per geometry param of `instance_id` (default: whatever the caller
+    passes as active) — the sub-range where the subsystem's own cross-field invariants hold, given
+    every other param's current value (packages/subsystems/valid_ranges.py). Pure closed-form (Tier 0,
+    no kernel/solver) — safe to compute on every WS mutation response and in /params. Returns [] for an
+    empty file, a cross-cutting-only mutation with no instance, or an unregistered/param-less type."""
+    if instance_id is None:
+        return []
+    inst = ledger.instances.get(instance_id)
+    if inst is None:
+        return []
+    try:
+        model = get_subsystem_model(inst.subsystem_type)
+    except KeyError:
+        return []
+    if not model.params:
+        return []
+    from packages.subsystems.valid_ranges import valid_param_ranges
+    ranges = valid_param_ranges(model, ledger, instance_id)
+    return [
+        ValidRange(node=f"instances.{instance_id}.params.{spec.name}",
+                   valid_min=ranges[spec.name][0], valid_max=ranges[spec.name][1])
+        for spec in model.params
+    ]
 
 
 class ProposeRequest(BaseModel):
@@ -426,6 +480,9 @@ class FileState:
                 cascades_applied=[CascadeEffect(node=c.target, value=c.new_value, old_value=c.old_value,
                                                 reason=c.reason) for c in outcome.cascades],
                 telemetry_delta=_telemetry(new, self.active_instance_id),
+                # refreshed slider clamps for the ACTIVE instance — changing one param can shift
+                # another's valid range (span_mm shifts blend_taper_mm's max), so all refresh together
+                valid_ranges=_valid_ranges(new, self.active_instance_id),
             )
         return MutationRejected(target_node=outcome.target, status=outcome.status.value,
                                 reason=outcome.message or outcome.status.value)
@@ -712,12 +769,17 @@ def create_app() -> FastAPI:
         model = get_subsystem_model(inst.subsystem_type)
         relevant = (set(geometry_paths(model, inst.id))
                    | {BUILD_ORIENTATION, SLIP_FIT, OPERATING_TEMP, POWER_DISSIPATION})
+        # invariant-valid slider clamps, keyed by dotted path (empty for a cross-cutting param that
+        # isn't one of this subsystem's geometry params — those just fall back to their own bounds)
+        valid = {vr.node: (vr.valid_min, vr.valid_max) for vr in _valid_ranges(led, inst.id)}
         rows = []
         for path, pd in iter_parameters(led):
             if path not in relevant:
                 continue
             lo, hi = pd.bounds
+            vlo, vhi = valid.get(path, (lo, hi))
             rows.append({"node": path, "value": pd.value, "min": lo, "max": hi,
+                         "valid_min": vlo, "valid_max": vhi,
                          "step": 0.1 if (hi - lo) <= 15 else 1.0, "unit": pd.unit,
                          "locked": pd.is_locked, "label": _param_label(path)})
         return {"subsystem": sub.name, "instance_id": inst.id, "params": rows}
@@ -1189,8 +1251,12 @@ def create_app() -> FastAPI:
             bodies = [part.solid]
         if not bodies:  # some build123d versions return empty for a bare Solid
             bodies = [part.solid]
+        bbox_size = part.solid.bounding_box().size
+        largest_dim = max(bbox_size.X, bbox_size.Y, bbox_size.Z, 1.0)
+        tol = min(_MAX_TESSELLATE_TOL_MM,
+                  max(_MIN_TESSELLATE_TOL_MM, largest_dim * _TESSELLATE_TOL_FRACTION))
         for body in bodies:
-            verts, tris = body.tessellate(0.2)
+            verts, tris = body.tessellate(tol)
             base = len(positions) // 3
             positions.extend(c for v in verts for c in (v.X, v.Y, v.Z))
             indices.extend(int(i) + base for t in tris for i in t)

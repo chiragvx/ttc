@@ -368,4 +368,8 @@ LOFTED_HULL = register_subsystem(Subsystem(
     # re-use here, same call lofted_spindle.py/saddle_clamp.py already made for their own shapes.
     # FS honestly stays "unknown" for this part type.
     fea_eligible=False,
+    # 2026-07-19 (airframe-first pacing) — same harmless over-inclusion reasoning as
+    # lofted_spindle.py's own comment: a cross-industry hull/body shape that can act as a fuselage.
+    # See prompt_builder.py's "airframe-first pacing" section.
+    is_airframe_defining=True,
 ))

@@ -123,6 +123,16 @@ class Subsystem:
     # of its own, it's an organizational/master-param node whose children carry the real geometry.
     # None (default) = an ordinary subsystem, unaffected — reconcile_children() is a no-op for it.
     assembly_children: Optional[Callable[[Namespace], list["ChildSpec"]]] = None
+    # 2026-07-19 (airframe-first pacing): True only for a part that sets the vehicle's own outer mold
+    # line / overall silhouette — a wing or fuselage-class body (naca_wing, bwb_fuselage,
+    # tube_fuselage, ogive_fuselage, winged_fuselage, lofted_spindle/lofted_hull when used as a body).
+    # `packages/agents/prompt_builder.py` reads this (via every registered subsystem, not a hardcoded
+    # name list) to decide whether a file's shape is established yet, and paces a vague whole-vehicle
+    # request accordingly (propose the airframe alone first, ask before adding systems/mounting
+    # parts) — see that file's own "airframe-first pacing" section for the full rule. False (default)
+    # means an ordinary systems/structural/mounting part — same deliberately-opt-in-per-subsystem
+    # stance as `fea_eligible`, not inferred from shape or size.
+    is_airframe_defining: bool = False
 
     def defaults(self) -> dict[str, ParameterDef]:
         """Materialised ParameterDefs keyed by name — used to seed the ledger's geometry bag."""

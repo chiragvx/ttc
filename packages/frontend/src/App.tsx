@@ -18,6 +18,9 @@ export default function App() {
   const [params, setParams] = useState<Record<string, number>>({});
   const [locked, setLocked] = useState<Record<string, boolean>>({});
   const [specs, setSpecs] = useState<ParamSpec[]>([]);
+  // live invariant-valid slider clamps by node (2026-07-19) — seeded from /params, refreshed on every
+  // WS mutation response so a slider can never be dragged into a CONFLICT (see sliderRange.ts)
+  const [validRanges, setValidRanges] = useState<Record<string, { min: number; max: number }>>({});
   const [subsystems, setSubsystems] = useState<SubsystemInfo[]>([]);
   const [active, setActive] = useState<string | null>(null);  // null = empty file, no part yet
   const [instances, setInstances] = useState<InstanceRow[]>([]);
@@ -56,9 +59,14 @@ export default function App() {
       setInstances(inst.instances);
       const vals: Record<string, number> = {};
       const lk: Record<string, boolean> = {};
-      for (const sp of p.params) { vals[sp.node] = sp.value; lk[sp.node] = sp.locked; }
+      const vr: Record<string, { min: number; max: number }> = {};
+      for (const sp of p.params) {
+        vals[sp.node] = sp.value; lk[sp.node] = sp.locked;
+        if (sp.valid_min != null && sp.valid_max != null) vr[sp.node] = { min: sp.valid_min, max: sp.valid_max };
+      }
       setParams(vals);
       setLocked(lk);
+      setValidRanges(vr);
       setMeshKey((k) => k + 1);
       const e = await exportCheck();
       setAnalysis((a) => ({ ...a, exportStatus: e.status }));
@@ -140,8 +148,19 @@ export default function App() {
     }
   };
 
-  // every parameter change — from a slider OR the chat — goes through the rules-validated WS path
-  const mutate = async (node: string, value: number, lock?: string | null): Promise<ServerMessage> => {
+  // every parameter change — from a slider OR the chat — goes through the rules-validated WS path.
+  // `refresh=false` (used ONLY by applyDeltas/undo's own multi-delta loops below) skips the
+  // per-call viewport/geometry refresh — see those functions' own comments for why: bumping meshKey
+  // once per delta in a multi-delta batch queues up one expensive /mesh tessellation per delta (the
+  // 200ms debounce in Viewport.tsx's Part effect only cancels the REACT STATE UPDATE for a stale
+  // fetch, not the already-dispatched server-side request/computation itself — a real, confirmed
+  // "large lofted body, multi-delta chat proposal" repro left the viewport showing nothing for tens
+  // of seconds while several overlapping multi-second tessellations piled up server-side). Exactly
+  // the same bug class refreshAfterOps below was already built to fix for instance_ops/feature_ops
+  // batches — this extends that same "refresh once per batch, not once per item" fix to deltas.
+  const mutate = async (
+    node: string, value: number, lock?: string | null, refresh: boolean = true,
+  ): Promise<ServerMessage> => {
     const resp = await send({ target_node: node, requested_value: value, set_lock: lock ?? null });
     if (resp.event_type === "PARAMETER_CASCADE_UPDATE") {
       setParams((p) => {
@@ -151,17 +170,30 @@ export default function App() {
         for (const c of resp.cascades_applied) next[c.node] = c.value;
         return next;
       });
-      setMeshKey((k) => k + 1);
-      void onGeometryChanged();
+      // refresh every slider's valid clamp — a change to one param can shift another's valid range
+      // (e.g. raising span_mm widens blend_taper_mm's valid max), so all update together, live
+      if (resp.valid_ranges && resp.valid_ranges.length) {
+        setValidRanges((vr) => {
+          const next = { ...vr };
+          for (const r of resp.valid_ranges!) next[r.node] = { min: r.valid_min, max: r.valid_max };
+          return next;
+        });
+      }
+      if (refresh) {
+        setMeshKey((k) => k + 1);
+        void onGeometryChanged();
+      }
     }
     return resp;
   };
 
+  // Refreshes the viewport/geometry-derived state ONCE, not once per delta in the loops below — see
+  // mutate()'s own comment for the confirmed repro this fixes.
   const applyDeltas = async (deltas: ParameterDelta[]): Promise<DeltaOutcome[]> => {
     const out: DeltaOutcome[] = [];
     for (const d of deltas) {
       try {
-        const resp = await mutate(d.target_node, d.requested_value, d.set_lock ?? null);
+        const resp = await mutate(d.target_node, d.requested_value, d.set_lock ?? null, false);
         if (resp.event_type === "PARAMETER_CASCADE_UPDATE") {
           const m = resp.mutations_applied[0];
           out.push({ node: d.target_node, requested: d.requested_value, applied: m.value, oldValue: m.old_value ?? null, status: m.status as DeltaOutcome["status"], cascades: resp.cascades_applied });
@@ -172,12 +204,24 @@ export default function App() {
         out.push({ node: d.target_node, requested: d.requested_value, applied: null, oldValue: null, status: "REJECTED", reason: String(e) });
       }
     }
+    if (deltas.length) {
+      setMeshKey((k) => k + 1);
+      void onGeometryChanged();
+    }
     return out;
   };
 
   const undo = async (outcomes: DeltaOutcome[]) => {
+    let touched = false;
     for (const o of outcomes) {
-      if (o.oldValue != null) await mutate(o.node, o.oldValue);
+      if (o.oldValue != null) {
+        await mutate(o.node, o.oldValue, undefined, false);
+        touched = true;
+      }
+    }
+    if (touched) {
+      setMeshKey((k) => k + 1);
+      void onGeometryChanged();
     }
   };
 
@@ -463,6 +507,7 @@ export default function App() {
             specs={specs}
             values={params}
             locked={locked}
+            validRanges={validRanges}
             requirements={requirements}
             onSelect={selectInstance}
             onAdd={addPart}

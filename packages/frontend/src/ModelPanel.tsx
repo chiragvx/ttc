@@ -3,6 +3,7 @@ import type { InstanceRow, ParamSpec, RequirementsData, SubsystemInfo } from "./
 import { PartDetail } from "./PartDetail";
 import { partLabel } from "./partLabel";
 import { RequirementsCard } from "./RequirementsCard";
+import { computeSliderRange } from "./sliderRange";
 
 // Redesign (2026-07-04): the left sidebar is chat-only now — "Parts in this project" used to sit
 // above the chat and, with a real design's worth of parts, could push the conversation down to a
@@ -39,6 +40,7 @@ export function ModelPanel({
   specs,
   values,
   locked,
+  validRanges,
   requirements,
   onSelect,
   onAdd,
@@ -53,6 +55,9 @@ export function ModelPanel({
   specs: ParamSpec[];
   values: Record<string, number>;
   locked: Record<string, boolean>;
+  // live invariant-valid slider clamps, keyed by node — freshest source (updated on every WS
+  // mutation); falls back to each ParamSpec's own valid_min/valid_max, then to recommended bounds.
+  validRanges: Record<string, { min: number; max: number }>;
   requirements: RequirementsData | null;
   onSelect: (id: string) => void;
   onAdd: (subsystemType: string) => void;
@@ -125,10 +130,12 @@ export function ModelPanel({
           {specs.map((b) => {
             const v = values[b.node] ?? b.value;
             const isLocked = locked[b.node] ?? b.locked;
-            const outside = v < b.min || v > b.max;
-            const headroom = Math.max(b.step, (b.max - b.min) * 0.1);
-            const sliderMin = outside ? Math.min(b.min, v - headroom) : b.min;
-            const sliderMax = outside ? Math.max(b.max, v + headroom) : b.max;
+            // freshest valid clamp: live WS-driven range, else the ParamSpec's own valid_min/max
+            const valid = validRanges[b.node]
+              ?? (b.valid_min != null && b.valid_max != null
+                    ? { min: b.valid_min, max: b.valid_max } : undefined);
+            const { sliderMin, sliderMax, outsideRecommended: outside } =
+              computeSliderRange(v, b.min, b.max, valid, b.step);
             return (
               <div key={b.node} style={{ marginBottom: 12 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 2 }}>

@@ -21,6 +21,7 @@ the kernel for pure-Python callers (schema validation, tests without build123d, 
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Optional
 
 from packages.subsystems import get_subsystem
@@ -29,6 +30,8 @@ from packages.subsystems.compose import compose, place
 if TYPE_CHECKING:
     from packages.ledger.schema import MasterParametricLedger
     from packages.truth_plane.regen.templated import TaggedPart
+
+_logger = logging.getLogger(__name__)
 
 # Auto-layout tuning (Phase G): a fixed gap between successive auto-placed siblings, and a fallback
 # spacing used when an instance's real Y-extent can't be measured (no geometry_builder, or the build
@@ -51,6 +54,8 @@ def _y_extent_mm(ledger: "MasterParametricLedger", instance_id: str) -> float:
             return _FALLBACK_SPACING_MM
         return float(part.solid.bounding_box().size.Y)
     except Exception:
+        _logger.exception("auto-layout: %s (%s) failed to build; falling back to %.0fmm spacing",
+                           instance_id, inst.subsystem_type, _FALLBACK_SPACING_MM)
         return _FALLBACK_SPACING_MM
 
 
@@ -131,11 +136,22 @@ def render_assembly(ledger: "MasterParametricLedger") -> "TaggedPart":
         try:
             builder = get_subsystem(inst.subsystem_type).geometry_builder
             if builder is None:
+                _logger.warning("assembly render: %s (%s) has no geometry_builder; skipping",
+                                 instance_id, inst.subsystem_type)
                 continue
             part = builder(ledger, instance_id)
         except Exception:
+            # Defensive per-instance isolation is intentional (one broken part must not blank the
+            # whole assembly) -- but silently swallowing the exception with no trace anywhere made a
+            # real build123d failure indistinguishable from "nothing to render" at every layer above
+            # this (HTTP 200 with empty positions/indices, no error surfaced to the chat or the
+            # viewport). Logging keeps the isolation but makes the failure diagnosable.
+            _logger.exception("assembly render: %s (%s) failed to build; skipping this instance",
+                               instance_id, inst.subsystem_type)
             continue
         if part is None:
+            _logger.warning("assembly render: %s (%s) geometry_builder returned None; skipping",
+                             instance_id, inst.subsystem_type)
             continue
         x, y, z = offsets[instance_id]
         rx = ry = rz = 0.0

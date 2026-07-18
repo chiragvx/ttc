@@ -263,4 +263,12 @@ LOFTED_SPINDLE = register_subsystem(Subsystem(
     # cantilever FS methodology (packages/truth_plane/solvers/fs.py) isn't a faithful re-use here.
     # FS honestly stays "unknown" for this part type, same call saddle_clamp.py made.
     fea_eligible=False,
+    # 2026-07-19 (airframe-first pacing) — a cross-industry primitive (bottle/handle/shaft/spindle/
+    # fuselage), but when used as a fuselage body it sets the vehicle's own outer mold line, the same
+    # role its aerospace-shaped siblings (ogive_fuselage/tube_fuselage) play. No per-instance way to
+    # distinguish "used as a bottle" from "used as a fuselage" at this static, per-subsystem-type
+    # granularity — tagging it True is a harmless over-inclusion (see prompt_builder.py's
+    # "airframe-first pacing" section: the pacing rule only ever surfaces on a whole-VEHICLE request,
+    # so a bottle build is never affected by this flag either way).
+    is_airframe_defining=True,
 ))

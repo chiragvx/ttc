@@ -1,6 +1,6 @@
 import { Canvas, type ThreeEvent } from "@react-three/fiber";
 import { Bounds, OrbitControls, useBounds } from "@react-three/drei";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import type { Mesh } from "three";
 import { fetchMesh, fetchMeshFeatures, type InstanceRow } from "./api";
@@ -48,23 +48,60 @@ function Part({
   const centerOffset = useRef(new THREE.Vector3());
   const lastFitSize = useRef(0);
 
+  // LIVE-DRAG REGEN (2026-07-19): single-flight, latest-wins — NOT a fixed debounce. `refreshKey`
+  // bumps on every slider tick (~30-60/s during a drag); the OLD code waited 200ms after the LAST
+  // bump then fetched once (release-only), so the 3D never moved while you dragged. Instead: keep at
+  // most ONE /mesh regen in flight at a time, and the instant it returns, if `refreshKey` advanced
+  // while it ran, immediately regen for the newest state. This self-paces to whatever the kernel can
+  // sustain — a wedge part (~60ms full rebuild+tessellate) refreshes ~10x/s so the viewport tracks
+  // the drag live; a big lofted body (~2s) refreshes as fast as it can and converges on release —
+  // and it NEVER piles up N stale tessellations server-side (the failure mode that used to freeze
+  // the whole backend). This respects the three-tier doctrine: the kernel is NOT in the 30Hz loop
+  // (the slider + HUD run on the instant WS path); it runs one-at-a-time, opportunistically.
+  const latestKey = useRef(refreshKey);
+  const inFlight = useRef(false);
+  // Liveness, NOT per-fetch abort. An earlier version aborted the in-flight fetch in the [refreshKey]
+  // effect's CLEANUP — but that cleanup runs on EVERY refreshKey bump, not just unmount, so every
+  // slider tick aborted the running fetch AND (via a `!aborted` guard) killed the .finally re-pump
+  // that is the whole catch-up mechanism. Result: the moment you stopped dragging with a fetch still
+  // in flight, nothing re-pumped and the viewport froze on a stale mesh until the next interaction
+  // (found by the 2026-07-19 adversarial review — a real, critical regression). Fix: never abort
+  // per-tick. `aliveRef` only guards setState/re-pump against a true unmount; the re-pump condition
+  // no longer references any abort state, so it always fires when the key advanced mid-fetch.
+  const aliveRef = useRef(true);
+
+  const pump = useCallback(() => {
+    if (inFlight.current || !aliveRef.current) return; // one running (it re-pumps if behind), or dead
+    const startedKey = latestKey.current;
+    inFlight.current = true;
+    Promise.all([fetchMesh(), fetchMeshFeatures().catch(() => [])])
+      .then(([d, f]) => {
+        if (!aliveRef.current) return; // component unmounted while this was in flight
+        setMesh(d);
+        setFeatures(f);
+      })
+      .catch(() => {})
+      .finally(() => {
+        inFlight.current = false;
+        // edits landed while this fetch was in flight → immediately regen for the newest state
+        if (aliveRef.current && latestKey.current !== startedKey) pump();
+      });
+  }, []);
+
   useEffect(() => {
-    let cancelled = false;
-    const t = setTimeout(() => {
-      Promise.all([fetchMesh(), fetchMeshFeatures().catch(() => [])])
-        .then(([d, f]) => {
-          if (cancelled) return;
-          setMesh(d);
-          setFeatures(f);
-        })
-        .catch(() => {});
-    }, 200);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-      onSelect(null); // a geometry refresh invalidates whatever was selected on the old mesh
-    };
-  }, [refreshKey]);
+    latestKey.current = refreshKey;
+    onSelect(null); // a geometry refresh invalidates whatever was selected on the old mesh
+    pump();
+    // NO cleanup here — cleanup runs on every refreshKey bump, and aborting/tearing down per-tick is
+    // exactly what caused the freeze above. Unmount handling lives in its own effect below.
+  }, [refreshKey, pump, onSelect]);
+
+  // Unmount-only liveness. Set true on (re)mount so a StrictMode double-mount or a part-switch remount
+  // starts alive again; false on unmount so an in-flight fetch can't setState on a dead component.
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => { aliveRef.current = false; };
+  }, []);
 
   const geom = useMemo(() => {
     if (!mesh || mesh.positions.length === 0) return null;

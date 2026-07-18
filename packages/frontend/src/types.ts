@@ -31,11 +31,21 @@ export interface CascadeEffect {
   reason: string;
 }
 
+export interface ValidRange {
+  node: string;
+  valid_min: number;
+  valid_max: number;
+}
+
 export interface CascadeUpdate {
   event_type: "PARAMETER_CASCADE_UPDATE";
   mutations_applied: MutationApplied[];
   cascades_applied: CascadeEffect[];
   telemetry_delta: TelemetryDelta;
+  // refreshed invariant-valid slider clamps for every geometry param of the active instance — a drag
+  // on one param can shift another's valid range, so all refresh together (2026-07-19). Optional so
+  // an older backend response without it doesn't break parsing.
+  valid_ranges?: ValidRange[];
 }
 
 export interface MutationRejected {

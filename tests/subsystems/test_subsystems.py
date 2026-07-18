@@ -41,6 +41,23 @@ def test_default_subsystem_type_is_bracket(base_ledger):
     assert base_ledger.project_metadata.subsystem_type == "bracket"
 
 
+def test_is_airframe_defining_flags_exactly_the_wing_and_fuselage_class_parts():
+    # 2026-07-19 (airframe-first pacing): a wing/fuselage-class part sets the vehicle's own outer
+    # mold line — prompt_builder.py reads this flag off every registered subsystem to decide whether
+    # a file's shape is established yet. Deliberately opt-in per subsystem (same stance as
+    # fea_eligible), so this pins the exact expected set rather than inferring it from name/shape.
+    expected = {
+        "naca_wing", "bwb_fuselage", "tube_fuselage", "ogive_fuselage", "winged_fuselage",
+        "lofted_spindle", "lofted_hull",
+    }
+    actual = {name for name, sub in SUBSYSTEM_REGISTRY.items() if sub.is_airframe_defining}
+    assert actual == expected
+    # a sample of ordinary systems/structural/mounting parts must NOT be flagged
+    for name in ("bracket", "enclosure", "standoff", "motor_mount", "battery_tray", "wing_spar"):
+        if name in SUBSYSTEM_REGISTRY:
+            assert not SUBSYSTEM_REGISTRY[name].is_airframe_defining, f"{name} must not be airframe-defining"
+
+
 def test_prompt_uses_subsystem_and_disciplines(base_ledger):
     prompt = build_system_prompt(get_subsystem("bracket"), base_ledger)
     assert "Subsystem: Mounting Bracket" in prompt

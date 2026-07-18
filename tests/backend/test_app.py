@@ -450,3 +450,42 @@ def test_instance_op_replay_from_log_reconstructs_instance():
     from packages.ledger.events import EventKind
     kinds = [ev.kind for ev in session.log.events()]
     assert EventKind.INSTANCE_ADDED in kinds
+
+
+def test_params_endpoint_carries_invariant_valid_ranges():
+    # 2026-07-19: /params must include a per-param invariant-valid [valid_min, valid_max] clamp so the
+    # frontend slider can't be dragged into a CONFLICT. bwb_fuselage.blend_taper_mm at span=600 must
+    # clamp to ~[0,300] (span/2), tighter than its recommended [0,1500].
+    c = TestClient(create_app())
+    r = c.post("/instances", json={"subsystem_type": "bwb_fuselage"}).json()
+    iid = r["instance_id"]
+    span_node = f"instances.{iid}.params.span_mm"
+    with c.websocket_connect("/ws") as ws:
+        ws.send_json({"target_node": span_node, "requested_value": 600.0})
+        ws.receive_json()
+    rows = {row["node"]: row for row in c.get("/params").json()["params"]}
+    bt = rows[f"instances.{iid}.params.blend_taper_mm"]
+    assert bt["min"] == 0.0 and bt["max"] == 1500.0          # advisory recommended, unchanged
+    assert bt["valid_min"] == 0.0 and 299.0 <= bt["valid_max"] <= 300.0  # physically-valid clamp
+
+
+def test_ws_mutation_response_carries_refreshed_valid_ranges():
+    # the WS cascade response must carry refreshed valid ranges for EVERY geometry param, so a drag
+    # on span_mm live-updates blend_taper_mm's slider clamp without a /params round trip.
+    c = TestClient(create_app())
+    r = c.post("/instances", json={"subsystem_type": "bwb_fuselage"}).json()
+    iid = r["instance_id"]
+    span_node = f"instances.{iid}.params.span_mm"
+    with c.websocket_connect("/ws") as ws:
+        ws.send_json({"target_node": span_node, "requested_value": 600.0})
+        resp = ws.receive_json()
+        assert resp["event_type"] == "PARAMETER_CASCADE_UPDATE"
+        vr = {v["node"]: v for v in resp["valid_ranges"]}
+        bt = vr[f"instances.{iid}.params.blend_taper_mm"]
+        assert 299.0 <= bt["valid_max"] <= 300.0
+        # raising span widens blend_taper's valid max, live in the next response
+        ws.send_json({"target_node": span_node, "requested_value": 1600.0})
+        resp2 = ws.receive_json()
+        vr2 = {v["node"]: v for v in resp2["valid_ranges"]}
+        bt2 = vr2[f"instances.{iid}.params.blend_taper_mm"]
+        assert 799.0 <= bt2["valid_max"] <= 800.0

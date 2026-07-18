@@ -300,4 +300,7 @@ NACA_WING = register_subsystem(Subsystem(
     # methodology exists for a wing panel yet. FS honestly stays "unknown" for this part type, same
     # honesty stance lofted_hull.py/lofted_spindle.py already take for their own shapes.
     fea_eligible=False,
+    # 2026-07-19 (airframe-first pacing) — a wing panel sets the vehicle's own outer mold line. See
+    # packages/agents/prompt_builder.py's "airframe-first pacing" section.
+    is_airframe_defining=True,
 ))
