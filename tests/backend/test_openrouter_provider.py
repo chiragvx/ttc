@@ -130,6 +130,35 @@ def test_stream_chat_yields_tokens_then_proposal():
     assert events[-1] == ("done", None)
 
 
+def test_stream_chat_yields_a_proposal_for_scope_connection_or_coupling_ops_alone():
+    # 2026-07-19 review (HIGH): the proposal-yield gate's OR-chain listed deltas/feature_ops/
+    # instance_ops/request_clarification/suggestions but omitted connection_ops, coupling_ops, AND
+    # scope_proposal — a tool call whose ONLY populated field was one of those three was silently
+    # dropped, never reaching app.py's /chat SSE handler, with no error (a fully silent turn if the
+    # model also emitted no prose). This was a PRE-EXISTING gap for connection_ops/coupling_ops
+    # (Phase 1b/2b), only surfaced when Phase 5 added a fourth omitted field and a review caught the
+    # whole pattern. One case per field, each with every other DeltaProposal field empty.
+    for field, payload in (
+        ("connection_ops", {"connection_ops": [{"op": "add_connection", "a_instance": "a", "a_interface": "root",
+                                                 "b_instance": "b", "b_interface": "tip_right"}]}),
+        ("coupling_ops", {"coupling_ops": [{"op": "add_coupling", "target_instance": "crank",
+                                            "relation": "force_from_pressure_area", "inputs": []}]}),
+        ("scope_proposal", {"scope_proposal": {"goal": "make a drone", "parts": [
+            {"subsystem_type": "bracket", "role": "frame"}]}}),
+    ):
+        arguments = json.dumps({"deltas": [], **payload})
+
+        def fake_stream(*, url, headers, json, _arguments=arguments):
+            yield {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"arguments": _arguments}}]}}]}
+
+        prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+        events = list(prov.stream_chat(messages=[{"role": "user", "content": "do it"}], ledger_json="{}"))
+        proposals = [p for k, p in events if k == "proposal"]
+        assert proposals, f"{field}-only proposal was dropped by the yield gate"
+        assert getattr(proposals[0], field), f"{field} was empty on the yielded proposal"
+
+
 def test_stream_chat_no_key_errors():
     prov = OpenRouterDeltaProvider(api_key="")
     events = list(prov.stream_chat(messages=[{"role": "user", "content": "x"}], ledger_json="{}"))

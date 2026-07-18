@@ -210,6 +210,7 @@ class OpenRouterDeltaProvider(LLMProvider):
                 yield ("error", "the model's proposal could not be parsed — try rephrasing or asking again")
                 continue
             if proposal.deltas or proposal.feature_ops or proposal.instance_ops \
+                    or proposal.connection_ops or proposal.coupling_ops or proposal.scope_proposal \
                     or proposal.request_clarification or proposal.suggestions:
                 saw_proposal = True
                 yield ("proposal", proposal)

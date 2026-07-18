@@ -167,6 +167,10 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
             if (featureOpOutcomes.some((o) => o?.status === "APPLIED")) appliedGeometry = true;
             await onOpsApplied();
           }
+          if (e.scope_proposal) {
+            // Pure display data — no apply loop, no outcomes array (unlike every op kind above).
+            patch(aid, (m) => ({ ...m, scopeProposal: e.scope_proposal }));
+          }
           if (e.clarification || e.suggestions.length) {
             patch(aid, (m) => ({ ...m, clarification: e.clarification, suggestions: e.suggestions }));
           }
@@ -187,6 +191,7 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
               !m.instanceOps?.length &&
               !m.connectionOps?.length &&
               !m.couplingOps?.length &&
+              !m.scopeProposal &&
               !m.clarification &&
               !m.suggestions?.length;
             return nothingAdded
@@ -370,6 +375,41 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
                 </div>
               );
             })}
+          </div>
+        ),
+      });
+    }
+    if (m.scopeProposal) {
+      const scope = m.scopeProposal;
+      sections.push({
+        label: "Scope",
+        content: (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{ fontSize: 11, color: "#c9d1d9" }}>{scope.goal}</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {scope.parts.map((p, i) => (
+                <div key={i} style={{ fontSize: 11, color: "#c9d1d9" }}>
+                  <strong>{p.role}</strong> — {p.subsystem_type} × {p.count}
+                  {p.operating_conditions.length > 0 ? ` (${p.operating_conditions.join(", ")})` : ""}
+                  {p.rationale ? <div style={{ color: "#8b949e" }}>{p.rationale}</div> : null}
+                </div>
+              ))}
+            </div>
+            {scope.out_of_scope.length > 0 && (
+              <div style={{ fontSize: 11, color: "#8b949e" }}>
+                Out of scope: {scope.out_of_scope.join(", ")}
+              </div>
+            )}
+            {scope.open_questions.length > 0 && (
+              <div style={{ fontSize: 11, color: "#8b949e" }}>
+                Open questions:
+                <ul style={{ margin: "2px 0 0 16px", padding: 0 }}>
+                  {scope.open_questions.map((q, i) => (
+                    <li key={i}>{q}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         ),
       });

@@ -167,6 +167,38 @@ class CouplingOp(BaseModel):
     rationale: Optional[str] = None
 
 
+class ScopePartProposal(BaseModel):
+    """One row of a `ScopeProposal`'s part manifest — a proposed decomposition entry, not an op (no
+    apply/outcome; see `ScopeProposal` docstring below). Flat, no nested dicts, same precedent as
+    `CouplingInputItem` — `operating_conditions` is a plain list of human-readable strings, not a
+    dict, purely for display; nothing downstream parses individual entries in v1."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    subsystem_type: str
+    role: str                              # short human label, e.g. "left wing", "battery bay"
+    count: int = Field(default=1, ge=1)
+    operating_conditions: list[str] = Field(default_factory=list)
+    rationale: Optional[str] = None
+
+
+class ScopeProposal(BaseModel):
+    """A structured part-manifest SUMMARY for a big/ambiguous multi-part ask ('make a drone', 'make a
+    satellite') — pure DISPLAY data, unlike `FeatureOp`/`InstanceOp`/`ConnectionOp`/`CouplingOp`: it
+    has no `op`, no REST endpoint, no APPLIED/REJECTED outcome, nothing to apply. It is ADDITIVE, not
+    a gate (packages/agents/CLAUDE.md's 2026-07-04 policy is unchanged: a proposal auto-applies the
+    instant it arrives; Undo is the safety net, not a pre-apply confirmation click). See
+    `DeltaProposal.scope_proposal`'s field description for exactly how it pairs with `instance_ops`
+    (confident case) vs. `request_clarification`+`suggestions` (genuinely unsure case)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    goal: str                              # echoes the stated intent back
+    parts: list[ScopePartProposal] = Field(default_factory=list)
+    out_of_scope: list[str] = Field(default_factory=list)
+    open_questions: list[str] = Field(default_factory=list)
+
+
 class DeltaProposal(BaseModel):
     """What the geometric agent returns. Either deltas to apply, or a clarification request when the
     natural-language intent is ambiguous (e.g. '6S', '2 inch', 'make it stronger'). Asking is a
@@ -200,6 +232,13 @@ class DeltaProposal(BaseModel):
         description="wire a load onto a part FROM another part's condition via a registered relation "
                     "(e.g. force_from_pressure_area) instead of stating a load scalar — use this when "
                     "the load is CAUSED by another part, not a stated duty condition")
+    scope_proposal: Optional[ScopeProposal] = Field(
+        default=None,
+        description="a structured part-manifest summary for a BIG or AMBIGUOUS multi-part ask ('make "
+                    "a drone', 'make a satellite') — additive, NOT a gate: if confident, also emit "
+                    "instance_ops in the SAME turn (they still auto-apply immediately, unchanged); if "
+                    "genuinely unsure of the decomposition, pair this with request_clarification and "
+                    "suggestions instead of instance_ops, and wait for the user's next message")
 
 
 def parameter_delta_tool_schema() -> dict:

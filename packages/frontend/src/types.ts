@@ -217,6 +217,24 @@ export interface CouplingOpOutcome {
   message?: string;
 }
 
+// A proposed part manifest for a big/ambiguous "make an X" request (Phase 5, 2026-07-19) — PURE
+// DISPLAY DATA, unlike ConnectionOp/CouplingOp: there is no apply endpoint, no outcome/status to
+// track, no Undo. It just shows what the copilot intends to build before/alongside actually
+// building it. Mirrors whatever packages/agents emits as ScopeProposal/ScopePartProposal.
+export interface ScopePartProposal {
+  subsystem_type: string;
+  role: string;
+  count: number;
+  operating_conditions: string[];
+  rationale?: string | null;
+}
+export interface ScopeProposal {
+  goal: string;
+  parts: ScopePartProposal[];
+  out_of_scope: string[];
+  open_questions: string[];
+}
+
 // What POST /instance_ops returns, reshaped for the UI — the InstanceOp analog of FeatureOpOutcome.
 export interface InstanceOpOutcome {
   op: InstanceOp;
@@ -272,7 +290,7 @@ export interface ManufacturingManifest {
 // --- chat (SSE) ---
 export type ChatEvent =
   | { type: "token"; text: string }
-  | { type: "proposal"; deltas: ParameterDelta[]; feature_ops: FeatureOp[]; instance_ops: InstanceOp[]; connection_ops: ConnectionOp[]; coupling_ops: CouplingOp[]; clarification: string | null; suggestions: string[] }
+  | { type: "proposal"; deltas: ParameterDelta[]; feature_ops: FeatureOp[]; instance_ops: InstanceOp[]; connection_ops: ConnectionOp[]; coupling_ops: CouplingOp[]; scope_proposal: ScopeProposal | null; clarification: string | null; suggestions: string[] }
   | { type: "no_llm" }
   | { type: "error"; message: string }
   | { type: "done" };
@@ -305,5 +323,6 @@ export interface ChatMessage {
   connectionOpOutcomes?: (ConnectionOpOutcome | undefined)[];
   couplingOps?: CouplingOp[];             // AI-proposed load couplings (Phase 2b) — auto-applied
   couplingOpOutcomes?: (CouplingOpOutcome | undefined)[];
+  scopeProposal?: ScopeProposal | null;   // proposed part manifest for a big/ambiguous ask (Phase 5) — display only, no outcomes
   validation?: ValidationResult;          // self-check run after this turn's geometry changes (2026-07-19)
 }

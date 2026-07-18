@@ -1370,6 +1370,7 @@ def create_app() -> FastAPI:
                                 "instance_ops": [io.model_dump(mode="json") for io in payload.instance_ops],
                                 "connection_ops": [co.model_dump(mode="json") for co in payload.connection_ops],
                                 "coupling_ops": [co.model_dump(mode="json") for co in payload.coupling_ops],
+                                "scope_proposal": payload.scope_proposal.model_dump(mode="json") if payload.scope_proposal else None,
                                 "clarification": payload.request_clarification,
                                 "suggestions": payload.suggestions})
                 elif kind == "error":

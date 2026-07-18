@@ -352,6 +352,47 @@ def _coupling_ops_section() -> str:
 
 _COUPLING_OPS_SECTION = _coupling_ops_section()
 
+_SCOPE_PROPOSAL_SECTION = """\
+## Summarizing a big/ambiguous ask — `scope_proposal` (ADDITIVE, NOT a gate)
+
+For a request that decomposes into MULTIPLE parts and/or has real ambiguity in what's in vs. out of \
+scope — "make a drone", "make a satellite", "make a rover" — ALSO emit a `scope_proposal` on the SAME \
+`propose_parameter_delta` call (see `packages/ledger/deltas.py::ScopeProposal`): a structured \
+part-manifest summary the user can review, echoing the goal back, listing each proposed part \
+(`subsystem_type`, a short `role` label, `count`, any `operating_conditions` worth naming, and an \
+optional `rationale`), what's explicitly `out_of_scope`, and any `open_questions` worth surfacing. \
+This is NOT needed for a single well-understood catalog part ("make a bracket that holds 200N") — \
+that's just a plain `instance_ops` add, no `scope_proposal` needed.
+
+`scope_proposal` is pure DISPLAY data — a receipt/summary, not an approval gate. This project's \
+established policy (packages/agents/CLAUDE.md, 2026-07-04) is that a proposal auto-applies through \
+the rules-validated path the instant it arrives; Undo is the safety net, not a pre-apply confirmation \
+click. `scope_proposal` does NOT change that. It has no apply step, no outcome, nothing to click \
+"confirm" on — it is additive alongside whatever else you emit this turn, exactly parallel to how \
+`request_clarification`+`suggestions` (already existing, unchanged) let you hold off on acting when \
+you're genuinely unsure. Concretely, two cases:
+- **You're CONFIDENT in the decomposition** — emit `scope_proposal` for display AND `instance_ops` \
+(and any deltas/connection_ops/coupling_ops the parts need) in the SAME turn, exactly like today. The \
+`instance_ops` still auto-apply immediately — `scope_proposal` rides alongside them as a summary, it \
+never withholds them.
+- **You're genuinely UNSURE of the decomposition** (real ambiguity in what parts/count/scope the user \
+wants) — emit `scope_proposal` together with `request_clarification` and 2-4 `suggestions`, and do \
+NOT emit `instance_ops` this turn. The user's next message (e.g. picking a suggestion chip) triggers \
+the real build on a LATER turn, via the existing clarification flow — not a second competing gate.
+Do not learn to always withhold `instance_ops` just because you emitted a `scope_proposal` — the \
+default, common case is the confident one: propose the summary AND build in the same turn.
+
+Rules:
+- `subsystem_type` on every `ScopePartProposal` MUST be one of the EXACT registered names in the "Part \
+types" menu above — same rule as `instance_ops`, never invent a new part type.
+- `out_of_scope` entries should name REAL excluded disciplines/concerns this engine genuinely doesn't \
+model — reuse the honesty note above (instance_ops section): no orbital mechanics, no thermal \
+analysis, no radiation shielding, no aerodynamics, no propulsion/range modeling — composing catalog \
+parts gives real structural geometry (dimensions, masses, FEA-checkable brackets/plates), not \
+domain-specific physics on top of it. Don't invent new claims about what this system can't do beyond \
+that.\
+"""
+
 _FEATURE_OPS_SECTION = """\
 ## Cutting a hole, pocket, or slot — works on ANY part, this is NOT a per-subsystem capability
 
@@ -577,6 +618,7 @@ def build_system_prompt(subsystem_ctx: SubsystemContext | None, ledger: MasterPa
     sections.append(_instances_section(ledger))
     sections.append(_CONNECTION_OPS_SECTION)
     sections.append(_COUPLING_OPS_SECTION)
+    sections.append(_SCOPE_PROPOSAL_SECTION)
     sections.append(_FEATURE_OPS_SECTION)
     if ledger.instances:
         relevant = _all_geometry_paths(ledger) | _CROSS_CUTTING
