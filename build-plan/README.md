@@ -544,6 +544,7 @@ build-plan/
   reference/
     TECH_PLAN.md                       ← recommended final tech plan (architecture, stack, tiers, event-sourcing)
     ENGINEERING_GRAPH_ARCHITECTURE.md  ← 2026-07-19 DIRECTION doc: prompt-to-CAD → problem-to-part; typed graph (component/interface/connection/COUPLING), 2-tier checking, reductive fidelity ladder, containment-as-connection, never-fuse, certification-as-a-pass. Marks BUILT/DESIGNED/OPEN honestly.
+    ENGINEERING_GRAPH_PLAN.md          ← 2026-07-19 phased implementation plan for the above. P1 (interfaces+connections, the substrate) specced to schema level; P2–P7 sketched. Build P1 next, then re-plan from what it teaches.
     DOMAIN_TAXONOMY.md                 ← disciplines × subsystems matrix; the wedge→recon-UAV bridge (grounded, not guessing)
     SCALABLE_SUBSYSTEM_REFACTOR.md     ← 2026-07-02: ParamSpec/Subsystem model + generic Domains.geometry bag; supersedes prd4 §1
     INSTANCE_GRAPH_REFACTOR.md         ← 2026-07-02: instance-tree ledger (Phase G) — supersedes the flat geometry bag with instances[<id>].params
