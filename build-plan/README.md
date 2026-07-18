@@ -543,6 +543,7 @@ build-plan/
     SPIKE_5_two_plane_latency.md
   reference/
     TECH_PLAN.md                       ← recommended final tech plan (architecture, stack, tiers, event-sourcing)
+    ENGINEERING_GRAPH_ARCHITECTURE.md  ← 2026-07-19 DIRECTION doc: prompt-to-CAD → problem-to-part; typed graph (component/interface/connection/COUPLING), 2-tier checking, reductive fidelity ladder, containment-as-connection, never-fuse, certification-as-a-pass. Marks BUILT/DESIGNED/OPEN honestly.
     DOMAIN_TAXONOMY.md                 ← disciplines × subsystems matrix; the wedge→recon-UAV bridge (grounded, not guessing)
     SCALABLE_SUBSYSTEM_REFACTOR.md     ← 2026-07-02: ParamSpec/Subsystem model + generic Domains.geometry bag; supersedes prd4 §1
     INSTANCE_GRAPH_REFACTOR.md         ← 2026-07-02: instance-tree ledger (Phase G) — supersedes the flat geometry bag with instances[<id>].params
