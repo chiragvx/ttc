@@ -240,6 +240,16 @@ def _valid_ranges(ledger: MasterParametricLedger, instance_id: str | None) -> li
     ]
 
 
+def _all_gate_findings(ledger):
+    """Combined export-gate `extra_findings`: discipline gates (thermal, …) PLUS Phase-2 coupling gates
+    (an unknown derived load blocks, same as an unknown FS). One injected callable so both gate call
+    sites stay identical."""
+    from packages.couplings import coupling_gate_findings
+    r1, u1 = all_discipline_findings(ledger)
+    r2, u2 = coupling_gate_findings(ledger)
+    return r1 + r2, u1 + u2
+
+
 class ProposeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     intent: str
@@ -410,7 +420,26 @@ class FileState:
         # mirrors effective_fs_floor: the solver's applied load is whatever the goal stated (2026-07-15
         # fix — previously every /analyze and /optimize call solved a hardcoded default load no matter
         # what the user actually asked for, so a "holds 200 N" goal got a real-but-wrong-load FS back).
-        return self.stated_load_n if self.stated_load_n is not None else default
+        #
+        # Phase 2 (2026-07-19): a DERIVED coupling load grounds the active part's load from a relation
+        # (e.g. pressure x area on the crank pin). It is combined with any stated scalar CONSERVATIVELY —
+        # max(derived, stated) — the same "worst case wins" posture as effective_fs_floor: a coupling
+        # deriving 50 N must NEVER silently lower a part below a user-stated "holds 200 N" and let it pass
+        # at the lighter load (2026-07-19 review). A coupling that's UNKNOWN doesn't fake a number here —
+        # it's surfaced as a blocking gate finding (coupling_gate_findings), so FS never comes back
+        # "grounded" for an ungrounded load.
+        from packages.couplings import derived_load_n
+        grounded: list[float] = []
+        if self.stated_load_n is not None:
+            grounded.append(self.stated_load_n)
+        inst = self.active_instance()
+        if inst is not None:
+            coupled, _reason = derived_load_n(self.ledger(), inst.id)
+            if coupled is not None:
+                grounded.append(coupled)
+        # worst case of the REAL sources (stated + derived); the fabricated `default` is only a
+        # last-resort fallback when neither a stated load nor a coupling grounds the load.
+        return max(grounded) if grounded else default
 
     def resolved_ledger(self) -> MasterParametricLedger:
         # the export gate sees `derived` resolved from the latest matching analysis verdict for the
@@ -1023,7 +1052,7 @@ def create_app() -> FastAPI:
         # derived is resolved from the latest matching analysis verdict (stale -> unknown -> blocked);
         # discipline gates (thermal, …) are injected so a thermal-limited part also blocks honestly.
         return evaluate_export_gates(
-            state.resolved_ledger(), extra_findings=all_discipline_findings
+            state.resolved_ledger(), extra_findings=_all_gate_findings
         ).model_dump(mode="json")
 
     def _requirements_payload() -> dict:
@@ -1206,7 +1235,7 @@ def create_app() -> FastAPI:
         # Inversion #1's enforcement point: a missing/failing safety gate BLOCKS export, here — not
         # just in the advisory POST /export/check that a client can choose not to call. Same gate
         # evaluation export_check uses, so "checked eligible" and "will actually export" never diverge.
-        gate = evaluate_export_gates(state.resolved_ledger(), extra_findings=all_discipline_findings)
+        gate = evaluate_export_gates(state.resolved_ledger(), extra_findings=_all_gate_findings)
         if not gate.eligible:
             return JSONResponse(
                 status_code=409,

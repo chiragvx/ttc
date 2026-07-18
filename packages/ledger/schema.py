@@ -189,6 +189,43 @@ class Connection(_Strict):
     gap_mm: float = 0.0
 
 
+class CouplingInput(_Strict):
+    """One input to a coupling's relation (Phase 2, 2026-07-19): EITHER a literal stated value (a duty
+    condition — g-load, operating pressure), OR sourced from a part's own param (`from_instance` +
+    `from_param`). Exactly one form, enforced below. The LLM sets these; it never writes the relation
+    math (Inversion #1 — see packages/couplings/relations.py)."""
+
+    value: Optional[float] = None
+    from_instance: Optional[str] = None
+    from_param: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _one_form(self) -> "CouplingInput":
+        literal = self.value is not None
+        sourced = self.from_instance is not None and self.from_param is not None
+        if literal == sourced:  # neither, or both
+            raise ValueError("CouplingInput must be EITHER a literal `value` OR a "
+                             "`from_instance`+`from_param` source, not both/neither")
+        return self
+
+
+class Coupling(_Strict):
+    """A typed edge that DERIVES a load on `target_instance` from a registered deterministic relation
+    (Phase 2 — ENGINEERING_GRAPH_ARCHITECTURE.md §2). The load stops being a stated scalar and becomes
+    a graph output: change a source part/param -> the relation re-runs -> the target's load updates ->
+    its grounding re-flags (the pump's "casing pressure change cracked the crank" behaviour).
+
+    `relation` names a registered relation (packages/couplings/relations.py); `inputs` map the
+    relation's declared input quantities to `CouplingInput`s. The LLM WIRES this; it never authors the
+    physics — a relation not in the registry makes the target's load `"unknown"`, which blocks the
+    green light rather than fabricating one."""
+
+    id: str
+    target_instance: str
+    relation: str
+    inputs: dict[str, CouplingInput] = Field(default_factory=dict)
+
+
 class MasterParametricLedger(_Strict):
     project_metadata: ProjectMetadata
     global_constraints: GlobalConstraints = Field(default_factory=GlobalConstraints)
@@ -202,5 +239,8 @@ class MasterParametricLedger(_Strict):
     # the mate solver, not by a hand-set transform (which still works as a fallback/override). Empty
     # for every design that predates this — fully backward-compatible.
     connections: list[Connection] = Field(default_factory=list)
+    # Phase 2 (2026-07-19) — typed load couplings: a target's load DERIVED from a registered relation
+    # over source parts/duty, instead of a stated scalar. Empty for every pre-Phase-2 design.
+    couplings: list[Coupling] = Field(default_factory=list)
     derived: DerivedSafety = Field(default_factory=DerivedSafety)
     review: Review = Field(default_factory=Review)
