@@ -260,6 +260,64 @@ Known, disclosed consequence, same shape as the UAV entry: the copilot's "part t
 prompt section grows again, from 143 to a 264-entry catalog — still the static, cacheable prompt
 prefix, so this is a real, disclosed base-size increase and not a hidden one or a per-turn cost.
 
+**2026-07-18 — two proper fuselage subsystems, replacing "just reuse lofted_spindle" as the default
+fuselage answer.** User pushback this session, verbatim: a fuselage built from `lofted_spindle` "looks
+stupid" — and the underlying complaint was structural, not aesthetic tuning: real fuselage design
+starts from REQUIREMENTS (airliner-tube vs. blended-wing-body are built completely differently), and
+`lofted_spindle`/`ogive_fuselage` force every body through ONE global analytic taper curve over pure
+circle/ellipse cross-sections, which can't represent either real approach. Two new subsystems, chosen
+via `AskUserQuestion` ("both, tube-style first, reuse the plumbing for BWB right after"):
+
+- **`tube_fuselage`** — an airliner-style body: independently-named nose-taper / constant-diameter
+  parallel-mid-body / tail-taper regions (not one shared curve) plus a flattened-belly KEEL line across
+  the parallel run, all lofted through in a single smooth `bd.loft()` pass. New shared plumbing:
+  `_cross_sections.py` (`keeled_ellipse_face`/`station_face`, build123d-dependent) and
+  `_loft_profiles.ellipse_segment_kept_area` (pure-python closed-form counterpart).
+- **`bwb_fuselage`** — a blended-wing-body: ONE continuous full-span loft (not a separate body + wing)
+  through real NACA 4-digit airfoil cross-sections (`_naca_airfoil.py`, the same profile family
+  `naca_wing` uses) — thick/"bulgy" at the centerline, smoothly tapering (chord AND thickness_pct
+  together) to thin wing-like tips. Deliberately reuses `_loft_profiles.ease_at`/`taper_stations` (the
+  SAME cosine-ease `lofted_spindle` uses for its own body) rather than `naca_wing`'s plain-linear taper
+  or `ogive_fuselage`'s power-law curve — a BWB's whole premise is a smooth, seamless body/wing blend,
+  the exact shape `ease_at` produces and the exact shape a conventional wing's sharp taper (`naca_wing`)
+  or a fuselage nose's immediate flare (`ogive_fuselage`) both deliberately avoid.
+
+Four real bugs caught, all verified directly against build123d before landing (not just reasoned
+about):
+- A hollow (shell) build of `tube_fuselage` — same outer-loft-minus-inner-loft technique
+  `lofted_spindle` uses — was numerically UNSTABLE on this keeled, large-diameter, thin-wall shape:
+  a station-count sweep produced a broken 2-solid result at 12 stations, `is_valid=False` at 16, 40%+
+  error at 20. A SOLID body at the identical proportions was stable across the entire 6-16 sweep
+  (~20.5-20.7% error, one valid solid, every time) — so `tube_fuselage` builds solid, same "shell it
+  later" deferral `ogive_fuselage`/`winged_fuselage` already established, and empirically the right
+  call here too, not just a consistency choice.
+- The first keel-cut implementation flattened the TOP instead of the bottom — `build123d`'s
+  `Rotation(0, 90, 0)` maps local +X to global **-Z**, not +Z as assumed; verified directly
+  (`Rotation(0,90,0) * Pos(10,0,0) * Vertex(0,0,0)` lands at global `(0,0,-10)`). Fixed in
+  `_cross_sections.keeled_ellipse_face`, with the sign now documented inline.
+- The closed-form ellipse-segment area formula (`ellipse_segment_kept_area`) had kept/removed area
+  swapped — traced by comparing its output directly against a real build123d face's own `.area` at a
+  known cut, not caught by the loft-volume tolerance test alone (that test only checks the END-TO-END
+  number, so a two-sided formula bug could partially cancel there).
+- `ogive_fuselage.py`'s own module docstring claimed a stale ~5.4% volume-approximation figure from
+  earlier in that file's development; re-measured directly this session at ~13% (still comfortably
+  inside its actual enforced `< 0.15` test bound — the shipped behavior was never wrong, only the
+  comment).
+
+Verified for real, not LLM-judged, exactly like every other subsystem in this catalog:
+`tube_fuselage` swept station counts 6-20, solid-only, stable at ~13-21% closed-form-vs-real error
+(disclosed, not hidden — an inherent property of a keeled loft at these proportions, flat across the
+whole sweep, not a coarse-sampling artifact); `bwb_fuselage` swept the same range and stayed under
+~1% the entire time (an airfoil section is thin relative to its chord, leaving little room for the
+smooth loft to bulge past its sampled stations) — both now regression-tested
+(`tests/subsystems/test_tube_fuselage.py`, `tests/subsystems/test_bwb_fuselage.py`), including the
+same reversed-taper pointwise check `naca_wing.py`'s own fix established this session (`bwb_fuselage`
+checks it on BOTH chord and thickness_pct independently, since neither is caught by any aggregate
+integral). `naca_wing.py`'s private `_sweep_dihedral_offset` was promoted to a shared
+`_naca_airfoil.sweep_dihedral_offset` once `bwb_fuselage` needed the identical math — one fewer
+duplicate copy, not a new capability. Full suite green throughout: 1537 passed after `tube_fuselage`
+landed, **1550 passed, 27 skipped** with `bwb_fuselage` added.
+
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
 validated none of it. It's now split across 7 logical commits (ledger → truth-plane →

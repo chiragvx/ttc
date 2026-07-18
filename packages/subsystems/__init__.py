@@ -492,3 +492,11 @@ from packages.subsystems import sensor_mount_pair as _sensor_mount_pair  # noqa:
 from packages.subsystems import clamp_two_halves as _clamp_two_halves  # noqa: E402, F401
 from packages.subsystems import flanged_socket_and_peg as _flanged_socket_and_peg  # noqa: E402, F401
 from packages.subsystems import bearing_block_and_cap as _bearing_block_and_cap  # noqa: E402, F401
+
+# Airliner-style tube fuselage (2026-07-18) -- named nose/parallel-body/tail stations + keel line,
+# lofted in one smooth pass. `ogive_fuselage`'s sibling; see tube_fuselage.py's module docstring.
+from packages.subsystems import tube_fuselage as _tube_fuselage  # noqa: E402, F401
+
+# Blended-wing-body fuselage (2026-07-18) -- ONE continuous full-span loft, thick airfoil centerbody
+# blending to thin wing-like tips. `naca_wing`'s sibling; see bwb_fuselage.py's module docstring.
+from packages.subsystems import bwb_fuselage as _bwb_fuselage  # noqa: E402, F401

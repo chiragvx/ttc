@@ -66,6 +66,20 @@ def naca4_half_thickness(x: float, chord: float, thickness_pct: float) -> float:
     return max(0.0, yt)
 
 
+def sweep_dihedral_offset(dist_from_center: float, sweep_deg: float, dihedral_deg: float) -> tuple[float, float]:
+    """(y_offset, z_offset) from sweep/dihedral for a station `dist_from_center` (>= 0, distance from
+    a lofted panel's own centerline toward EITHER end) -- a plain `distance * tan(angle)` shift, so at
+    `dist_from_center == 0` both are exactly 0.0 regardless of angle, and both ends (equal
+    `dist_from_center`, opposite sign of the raw loft-axis coordinate) get the SAME shift -- the
+    physically-correct "both ends sweep aft / rise up relative to the centerline" shape, not a
+    one-sided skew. Shared by `naca_wing.py` and `bwb_fuselage.py` -- factored out here (rather than
+    each file keeping its own private copy) once a second caller needed the identical math, matching
+    this package's own `_loft_profiles.py`/`_cross_sections.py` shared-plumbing precedent."""
+    y_offset = dist_from_center * math.tan(math.radians(sweep_deg))
+    z_offset = dist_from_center * math.tan(math.radians(dihedral_deg))
+    return y_offset, z_offset
+
+
 def naca4_profile_points(
     x_station: float,
     chord: float,

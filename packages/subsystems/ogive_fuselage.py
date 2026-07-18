@@ -35,14 +35,18 @@ for the outer-loft/inner-loft hollowing technique if it's needed again.
 
 Volume-fidelity finding this session (mirrors `lofted_spindle.py`'s own disclosed-approximation
 note): measured directly against `_volume`'s 200-step disk integration at this subsystem's default
-(`taper_power=0.5`) params, the real built shell UNDERSHOOTS the closed-form estimate by ~5.4% at
+(`taper_power=0.5`) params, the real built solid UNDERSHOOTS the closed-form estimate by ~13.1% at
 `_N_TAPER_STATIONS=10` (the smooth B-spline loft rounds off the power-law curve's steep near-tip rise
-rather than reproducing that sharp initial slope exactly) — same order of magnitude as
-`lofted_spindle`'s own disclosed 3.7-9.1% figures, not a regression from switching curve families.
-Checked directly at higher station counts too: the gap does NOT monotonically shrink (n=16 -> -6.45%,
-n=24 -> -6.78%, n=40 -> flips to +7.66%, likely loft instability rather than genuine convergence —
-`lofted_spindle.py`'s own module docstring reports the same non-monotonic breakdown at high counts on
-its own curve) — `_N_TAPER_STATIONS=10` is kept rather than chasing a count that doesn't converge.
+rather than reproducing that sharp initial slope exactly) — re-measured directly again on 2026-07-18
+while building `tube_fuselage.py` (this file's sibling): the actual figure is ~13%, not the ~5.4% this
+docstring previously claimed (a stale number from earlier in this subsystem's development that was
+never re-checked after a later change) — `test_volume_approximates_real_build_within_tolerance`'s own
+enforced `< 0.15` bound is what actually matters and the current ~13% still clears it, so nothing
+about the shipped behavior was ever wrong, only this comment's specific percentage. Checked directly
+at higher station counts too: the gap does NOT monotonically shrink (n=16 -> -6.45%, n=24 -> -6.78%,
+n=40 -> flips to +7.66%, likely loft instability rather than genuine convergence — `lofted_spindle.py`'s
+own module docstring reports the same non-monotonic breakdown at high counts on its own curve) —
+`_N_TAPER_STATIONS=10` is kept rather than chasing a count that doesn't converge.
 """
 
 from __future__ import annotations
@@ -58,8 +62,11 @@ A streamlined body-of-revolution primitive for aircraft/rocket fuselages, nacell
 `lofted_spindle`'s sibling, purpose-built so nose/tail tips flare away from the tip immediately (an
 ogive/paraboloid nose, a tailcone narrowing to a real point) instead of `lofted_spindle`'s bottle-
 shoulder-into-a-neck look. Reach for THIS subsystem (or `winged_fuselage`, which already uses it)
-whenever the part is described as a fuselage, an airframe body, a nose cone, or a nacelle; reach for
-plain `lofted_spindle` for a bottle, a handle, a shaft, or anything NOT meant to look aerodynamic.
+whenever the part is described as a fuselage, an airframe body, a nose cone, or a nacelle and no real
+constant-diameter run/keel line is called for; reach for plain `lofted_spindle` for a bottle, a
+handle, a shaft, or anything NOT meant to look aerodynamic; reach for `tube_fuselage` instead of THIS
+subsystem specifically when the request describes an airliner-style body — distinct nose/parallel-
+body/tail proportions (not one smooth taper start-to-end) or a flattened cargo-floor keel line.
 SOLID, not hollow — no `wall_thickness_mm` param; a shell/hollow-out pass is a separate, not-yet-built
 feature for later, not something this subsystem's loft does today.
 - **length_mm** — overall length along the axis.

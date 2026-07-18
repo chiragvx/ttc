@@ -90,3 +90,31 @@ def taper_stations(length: float, start_taper: float, end_taper: float, n_taper_
     else:
         xs += end_xs
     return xs
+
+
+def ellipse_segment_kept_area(w_half: float, h_half: float, keel_flat_mm: float) -> float:
+    """Area of an ellipse (`w_half` x `h_half`, full size `2*w_half` x `2*h_half`) with its bottom
+    (the `h_half` axis's negative side) sliced off flat by `keel_flat_mm` -- the closed-form
+    counterpart of `_cross_sections.keeled_ellipse_face` (pure python, no OCCT, so this can run on
+    the interactive plane per CLAUDE.md's tier split; both this and the build123d face are driven by
+    the exact same `keel_flat_mm` definition so they can never silently drift apart).
+
+    Derived by normalizing the ellipse to a unit circle along the h_half axis (x' = x / h_half): a
+    flat cut at local `X = -h_half + keel_flat_mm` becomes a chord at `c = -1 + keel_flat_mm/h_half`
+    on the unit circle. The area of a unit-circle cap `x' > c` is the standard closed-form circular
+    segment result `acos(c) - c*sqrt(1-c^2)` (integrate `2*sqrt(1-x^2) dx` from `c` to `1`); scaling
+    that unit-circle cap area by the two semi-axes (`w_half * h_half`) gives the kept ellipse area.
+    Verified directly against a real build123d face (`Ellipse & Rectangle`) at several `keel_flat_mm`
+    values, including the `keel_flat_mm=0` (plain ellipse, matches `pi*w_half*h_half` exactly) and
+    near-fully-flattened edges.
+    """
+    if h_half <= _EPS_MM:
+        return 0.0
+    d = min(1.0, max(0.0, keel_flat_mm) / h_half)
+    if d <= 0.0:
+        return math.pi * w_half * h_half
+    if d >= 2.0:
+        return 0.0
+    c = max(-1.0, min(1.0, -1.0 + d))
+    kept_unit_area = math.acos(c) - c * math.sqrt(max(0.0, 1.0 - c * c))
+    return kept_unit_area * w_half * h_half

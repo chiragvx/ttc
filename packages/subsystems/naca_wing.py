@@ -50,14 +50,20 @@ from __future__ import annotations
 import math
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
-from packages.subsystems._naca_airfoil import naca4_half_thickness, naca4_profile_points
+from packages.subsystems._naca_airfoil import (
+    naca4_half_thickness,
+    naca4_profile_points,
+    sweep_dihedral_offset,
+)
 
 _FRAGMENT = """\
 ## Subsystem: NACA wing
 A single continuous, full-span wing panel (tip-to-tip in ONE loft — not a half-span panel mirrored
 separately), lofted through a REAL NACA 4-digit SYMMETRIC airfoil cross-section (the default
 thickness_pct=12.0 is the classic NACA0012) — not a generic lens/biconvex placeholder. SOLID, not
-hollow — a real wing plank. Maximum chord/thickness sits at the panel's own CENTERLINE (the "root"),
+hollow — a real wing plank. Reach for `bwb_fuselage` instead of THIS subsystem when the request wants
+a thick "bulgy" blended center body (a cabin/cargo volume) smoothly merging into the wing, rather than
+a constant-thickness_pct panel throughout. Maximum chord/thickness sits at the panel's own CENTERLINE (the "root"),
 tapering dead straight out to a tip chord/thickness at EACH end (a real straight-tapered wing's
 leading/trailing edges are straight lines meeting at a sharp point at the root — not a smoothly
 domed/curved bulge), at a CONSTANT thickness_pct so the airfoil shape stays self-similar as the chord
@@ -115,14 +121,10 @@ def _chord_at(dist_from_center: float, p) -> float:
 
 
 def _sweep_dihedral_offset(dist_from_center: float, p) -> tuple[float, float]:
-    """(y_offset, z_offset) added to a station's profile from sweep/dihedral — both are a plain
-    `distance-from-centerline * tan(angle)` shift, so at `dist_from_center == 0` (the centerline)
-    both are exactly 0.0 regardless of angle, and BOTH tips (equal `dist_from_center`, opposite sign
-    of the raw span coordinate) get the SAME shift — the physically-correct "both tips sweep aft /
-    rise up relative to the root" shape, not a one-sided skew."""
-    y_offset = dist_from_center * math.tan(math.radians(p.sweep_deg))
-    z_offset = dist_from_center * math.tan(math.radians(p.dihedral_deg))
-    return y_offset, z_offset
+    """Thin wrapper over the shared `_naca_airfoil.sweep_dihedral_offset` (factored out once
+    `bwb_fuselage.py` needed the identical math) -- see that function's docstring for the shift
+    convention."""
+    return sweep_dihedral_offset(dist_from_center, p.sweep_deg, p.dihedral_deg)
 
 
 def _stations(p) -> list[float]:
