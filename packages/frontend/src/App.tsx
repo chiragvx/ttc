@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { activateInstance, addInstance, analyze, analyzeStatus, applyFeatureOp as postFeatureOp, applyConnectionOp as postConnectionOp, applyCouplingOp as postCouplingOp, applyInstanceOp as postInstanceOp, createFile, exportCheck, fetchTelemetry, getParams, getRequirements, getSubsystems, listFiles, listInstances, openFile, optimize, optimizeStatus, removeInstance, runValidate, setGoal, signoff, type FileRow, type InstanceRow, type ParamSpec, type RequirementsData, type SubsystemInfo } from "./api";
+import { activateInstance, addInstance, analyze, analyzeStatus, applyFeatureOp as postFeatureOp, applyConnectionOp as postConnectionOp, applyCouplingOp as postCouplingOp, applyInstanceOp as postInstanceOp, createFile, exportCheck, fetchTelemetry, getManufacturingManifest, getParams, getRequirements, getSubsystems, listFiles, listInstances, openFile, optimize, optimizeStatus, removeInstance, runValidate, setGoal, signoff, type FileRow, type InstanceRow, type ParamSpec, type RequirementsData, type SubsystemInfo } from "./api";
 import { AnalysisBar, type AnalysisState } from "./AnalysisBar";
 import { OptimizeResult, type OptimizeResultData } from "./OptimizeResult";
 import { Chat } from "./chat/Chat";
@@ -9,7 +9,7 @@ import { SettingsModal } from "./SettingsModal";
 import { Viewport } from "./Viewport";
 import { loadSettings, type LlmSettings } from "./settings";
 import { useCadSocket } from "./useCadSocket";
-import { type ConnectionOp, type ConnectionOpOutcome, type CouplingOp, type CouplingOpOutcome, type DeltaOutcome, type FeatureOp, type FeatureOpOutcome, type InstanceOp, type InstanceOpOutcome, type ParameterDelta, type ServerMessage } from "./types";
+import { type ConnectionOp, type ConnectionOpOutcome, type CouplingOp, type CouplingOpOutcome, type DeltaOutcome, type FeatureOp, type FeatureOpOutcome, type InstanceOp, type InstanceOpOutcome, type ManufacturingManifest, type ParameterDelta, type ServerMessage } from "./types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -36,9 +36,16 @@ export default function App() {
   });
   const [optimizeResult, setOptimizeResult] = useState<OptimizeResultData | null>(null);
   const [requirements, setRequirements] = useState<RequirementsData | null>(null);
+  // Phase 6 (manufacturability outputs): read-only make-manifest — material/process per part plus
+  // the assembly steps derived from the connection graph. Fetched/refreshed symmetrically with
+  // `requirements` above — same triggers, no separate refresh path invented.
+  const [manufacturingManifest, setManufacturingManifest] = useState<ManufacturingManifest | null>(null);
 
   const refreshRequirements = async () => {
     try { setRequirements(await getRequirements()); } catch { /* ignore */ }
+  };
+  const refreshManufacturingManifest = async () => {
+    try { setManufacturingManifest(await getManufacturingManifest()); } catch { /* ignore */ }
   };
   const applyGoal = async (goal: string) => {
     try { setRequirements(await setGoal(goal)); } catch { /* ignore */ }
@@ -71,6 +78,7 @@ export default function App() {
       const e = await exportCheck();
       setAnalysis((a) => ({ ...a, exportStatus: e.status }));
       void refreshRequirements();
+      void refreshManufacturingManifest();
       void refreshFiles();
       // adding/removing a part is a REST call, not a WS mutation — the socket never sees it, so
       // Mass/CG/Print/Cost would otherwise sit on stale (or "—") numbers until the next slider
@@ -143,6 +151,7 @@ export default function App() {
       const e = await exportCheck();
       setAnalysis((a) => ({ ...a, exportStatus: e.status, status: a.status === "done" ? "stale" : a.status }));
       void refreshRequirements();
+      void refreshManufacturingManifest();
     } catch {
       /* ignore */
     }
@@ -381,6 +390,7 @@ export default function App() {
         solverSeconds: verdict?.solver_seconds ?? null, exportStatus: e.status,
       });
       void refreshRequirements(); // FS is now grounded -> the compliance readout can go green
+      void refreshManufacturingManifest();
     } catch {
       setAnalysis((a) => ({ ...a, status: "error" }));
     }
@@ -425,6 +435,7 @@ export default function App() {
       setOptimizeResult({ variants: result.variants, bestValue: result.best_value, bestMass: result.best_mass_g, paramName: result.param_name ?? null });
       setAnalysis({ status: "done", fs: best?.fs ?? null, solverSeconds: null, exportStatus: e.status });
       void refreshRequirements();
+      void refreshManufacturingManifest();
     } catch {
       setAnalysis((a) => ({ ...a, status: "error" }));
     }
@@ -535,6 +546,7 @@ export default function App() {
             locked={locked}
             validRanges={validRanges}
             requirements={requirements}
+            manufacturingManifest={manufacturingManifest}
             onSelect={selectInstance}
             onAdd={addPart}
             onRemove={removePart}

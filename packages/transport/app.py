@@ -426,7 +426,7 @@ class FileState:
         goal = self.strategic.floor_fs(self.matrix)
         return max(base, goal) if goal is not None else base
 
-    def effective_load_n(self, default: float) -> float:
+    def effective_load_n(self, default: float, instance_id: str | None = None) -> float:
         # mirrors effective_fs_floor: the solver's applied load is whatever the goal stated (2026-07-15
         # fix — previously every /analyze and /optimize call solved a hardcoded default load no matter
         # what the user actually asked for, so a "holds 200 N" goal got a real-but-wrong-load FS back).
@@ -442,7 +442,7 @@ class FileState:
         grounded: list[float] = []
         if self.stated_load_n is not None:
             grounded.append(self.stated_load_n)
-        inst = self.active_instance()
+        inst = self.ledger().instances.get(instance_id) if instance_id is not None else self.active_instance()
         if inst is not None:
             coupled, _reason = derived_load_n(self.ledger(), inst.id)
             if coupled is not None:
@@ -451,7 +451,7 @@ class FileState:
         # last-resort fallback when neither a stated load nor a coupling grounds the load.
         return max(grounded) if grounded else default
 
-    def resolved_ledger(self) -> MasterParametricLedger:
+    def resolved_ledger(self, instance_id: str | None = None) -> MasterParametricLedger:
         # the export gate sees `derived` resolved from the latest matching analysis verdict for the
         # ACTIVE instance's OWN params (not a hardcoded bracket list), AND the FS floor RAISED to
         # whatever the stated goal demands. Both are resolved at read time on a fresh fold; neither is
@@ -468,12 +468,21 @@ class FileState:
         # normal testing). "PLA"/40.0 mirror /analyze's OWN literal defaults (material is not yet
         # threaded from ledger.domains.structure.material_profile into analysis anywhere in this
         # pipeline — a separate, pre-existing gap, not fixed here to keep this change minimal).
-        inst = self.active_instance()
+        #
+        # 2026-07-19 review (CRITICAL): `instance_id` lets a caller (per-part export) resolve `derived`
+        # for a SPECIFIC part instead of whatever happens to be ACTIVE — omitted, this is unchanged
+        # (falls back to active_instance, every pre-existing caller). Without this, a per-part export
+        # gate-checked whatever part was active, not the part actually being exported: sign off an
+        # analyzed part, activate it just long enough to re-sign-off, then export a DIFFERENT,
+        # never-analyzed instance_id — its own factor_of_safety is unknown but the gate saw the active
+        # part's grounded verdict and passed it. Exactly the fabricated-green-light failure Inversion #1
+        # exists to prevent.
+        inst = self.ledger().instances.get(instance_id) if instance_id is not None else self.active_instance()
         gp = geometry_paths(get_subsystem_model(inst.subsystem_type), inst.id) if inst is not None else None
         led = ledger_with_derived(self.ledger(), self.verdict_store.verdicts(self.file_id),
                                   fingerprint=fingerprint(), geometry_params=gp,
                                   instance_id=inst.id if inst is not None else None,
-                                  material="PLA", load_n=self.effective_load_n(40.0))
+                                  material="PLA", load_n=self.effective_load_n(40.0, instance_id=instance_id))
         floor = self.effective_fs_floor()
         if floor > led.global_constraints.factor_of_safety_floor:
             gc = led.global_constraints.model_copy(update={"factor_of_safety_floor": floor})
@@ -602,8 +611,8 @@ class SessionState:
     def ledger(self): return self.active_file().ledger()
     def current_params(self): return self.active_file().current_params()
     def effective_fs_floor(self): return self.active_file().effective_fs_floor()
-    def effective_load_n(self, default): return self.active_file().effective_load_n(default)
-    def resolved_ledger(self): return self.active_file().resolved_ledger()
+    def effective_load_n(self, default, instance_id=None): return self.active_file().effective_load_n(default, instance_id)
+    def resolved_ledger(self, instance_id=None): return self.active_file().resolved_ledger(instance_id)
     def signoff(self, reviewer): return self.active_file().signoff(reviewer)
     def mutate(self, req): return self.active_file().mutate(req)
     def metrics(self): return self.active_file().metrics()
@@ -1265,11 +1274,16 @@ def create_app() -> FastAPI:
         return {"ok": True}
 
     @router.get("/export/step")
-    def export_step():
+    def export_step(instance_id: str | None = None):
         # Inversion #1's enforcement point: a missing/failing safety gate BLOCKS export, here — not
         # just in the advisory POST /export/check that a client can choose not to call. Same gate
         # evaluation export_check uses, so "checked eligible" and "will actually export" never diverge.
-        gate = evaluate_export_gates(state.resolved_ledger(), extra_findings=_all_gate_findings)
+        #
+        # 2026-07-19 review (CRITICAL): the gate must be scoped to the REQUESTED instance_id, not
+        # whatever the session's active instance happens to be — see resolved_ledger()'s own comment.
+        # A per-part export of an unanalyzed part must not ride on a DIFFERENT (active, signed-off)
+        # part's grounded verdict.
+        gate = evaluate_export_gates(state.resolved_ledger(instance_id), extra_findings=_all_gate_findings)
         if not gate.eligible:
             return JSONResponse(
                 status_code=409,
@@ -1278,13 +1292,29 @@ def create_app() -> FastAPI:
             )
         # geometry is resolved from the WHOLE assembly once a project holds more than one instance
         # (packages/subsystems/assembly.py::render_assembly), else exactly the active instance's own
-        # geometry — see _render_geometry.
+        # geometry — see _render_geometry. An explicit instance_id (Phase 6) instead exports that ONE
+        # part's own geometry — additive, fully backward-compatible (omitted -> identical to before).
         from packages.truth_plane.regen.export import export_part
         led = state.ledger()
-        part = _render_geometry(led, state.active_instance_id)
+        if instance_id is not None:
+            inst = led.instances.get(instance_id)
+            if inst is None:
+                return JSONResponse(status_code=404, content={"status": "error",
+                    "message": f"unknown instance_id {instance_id!r}"})
+            sub = get_subsystem(inst.subsystem_type)
+            if sub.geometry_builder is None:
+                return {"status": "error", "message": "instance has no buildable geometry"}
+            part = sub.geometry_builder(led, inst.id)
+        else:
+            part = _render_geometry(led, state.active_instance_id)
+        # `name` computed only AFTER confirming `part` exists (2026-07-19 review, HIGH: the no-instance_id
+        # branch used to compute this unconditionally, so a zero-instance project raised an unhandled
+        # AttributeError on state.active_instance() being None instead of the clean "no geometry to
+        # export" response below — a regression this restores the original ordering to avoid).
         if part is None:
             return {"status": "error", "message": "no geometry to export"}
-        name = "assembly" if len(led.instances) > 1 else get_subsystem(state.active_instance().subsystem_type).name
+        name = instance_id if instance_id is not None else (
+            "assembly" if len(led.instances) > 1 else get_subsystem(state.active_instance().subsystem_type).name)
         fd, path = tempfile.mkstemp(suffix=".step")
         os.close(fd)
         export_part(part.solid, path)
@@ -1388,6 +1418,16 @@ def create_app() -> FastAPI:
         # beyond what /mesh itself already pays (same geometry_builder calls).
         from packages.subsystems.features import list_pickable_features
         return {"features": list_pickable_features(state.ledger())}
+
+    @router.get("/manufacturing/manifest")
+    def manufacturing_manifest():
+        # Always-available planning/informational artifact (no export-gate check — unlike
+        # /export/step, this is not the actual export deliverable) computed from the live ledger.
+        from packages.manufacturing.manifest import build_manifest
+        m = build_manifest(state.ledger())
+        return {"material": m.material,
+                "parts": [dataclasses.asdict(p) for p in m.parts],
+                "assembly_steps": m.assembly_steps}
 
     @router.get("/blueprint")
     async def blueprint():

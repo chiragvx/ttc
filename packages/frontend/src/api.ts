@@ -1,4 +1,4 @@
-import type { ChatEvent, ConnectionOp, CouplingOp, CutFeature, FeatureOp, InstanceOp, InstanceSnapshot, MeshData, PickableFeature, TelemetryDelta, ValidationResult } from "./types";
+import type { ChatEvent, ConnectionOp, CouplingOp, CutFeature, FeatureOp, InstanceOp, InstanceSnapshot, ManufacturingManifest, MeshData, PickableFeature, TelemetryDelta, ValidationResult } from "./types";
 import { loadSettings, type LlmSettings } from "./settings";
 
 // REST + SSE calls to the FastAPI backend (proxied by Vite in dev).
@@ -220,6 +220,17 @@ export async function getRequirements(): Promise<RequirementsData> {
 }
 export async function signoff(): Promise<void> {
   await apiFetch("/signoff?reviewer=engineer", { method: "POST" });
+}
+
+// --- manufacturability outputs (Phase 6) — READ-ONLY make-manifest: each part's material/process
+// plus the assembly steps derived from the connection graph. Mirrors getRequirements() above.
+export async function getManufacturingManifest(): Promise<ManufacturingManifest> {
+  const res = await apiFetch("/manufacturing/manifest");
+  // a backend without this route (older build) returns 404/HTML — surface a clear message instead of
+  // silently parsing an error body as a valid manifest (2026-07-19 review, mirrors applyConnectionOp's
+  // same-day fix — fetch() only rejects on network failure, never on a non-2xx status).
+  if (!res.ok) throw new Error(`manufacturing manifest unavailable (HTTP ${res.status})`);
+  return res.json();
 }
 
 // Self-check the current assembly (2026-07-19). Geometric check always runs (no model); the visual

@@ -253,6 +253,22 @@ export interface PickableFeature {
   meta: Record<string, unknown>;
 }
 
+// --- manufacturability outputs (Phase 6) — READ-ONLY: material/process per part plus the assembly
+// order derived from the connection graph. Always backend-computed (GET /manufacturing/manifest);
+// the frontend never derives material/process/assembly-order itself. Mirrors whatever
+// packages/transport/app.py's manifest route returns.
+export interface ManufacturingPart {
+  instance_id: string;
+  subsystem_type: string;
+  material: string;
+  process: "CNC" | "print";
+}
+export interface ManufacturingManifest {
+  material: string;
+  parts: ManufacturingPart[];
+  assembly_steps: string[];
+}
+
 // --- chat (SSE) ---
 export type ChatEvent =
   | { type: "token"; text: string }

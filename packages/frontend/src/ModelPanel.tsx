@@ -1,9 +1,11 @@
 import { useState } from "react";
 import type { InstanceRow, ParamSpec, RequirementsData, SubsystemInfo } from "./api";
+import { ManufacturingCard } from "./ManufacturingCard";
 import { PartDetail } from "./PartDetail";
 import { partLabel } from "./partLabel";
 import { RequirementsCard } from "./RequirementsCard";
 import { computeSliderRange } from "./sliderRange";
+import type { ManufacturingManifest } from "./types";
 
 // Redesign (2026-07-04): the left sidebar is chat-only now — "Parts in this project" used to sit
 // above the chat and, with a real design's worth of parts, could push the conversation down to a
@@ -42,6 +44,7 @@ export function ModelPanel({
   locked,
   validRanges,
   requirements,
+  manufacturingManifest,
   onSelect,
   onAdd,
   onRemove,
@@ -59,6 +62,9 @@ export function ModelPanel({
   // mutation); falls back to each ParamSpec's own valid_min/valid_max, then to recommended bounds.
   validRanges: Record<string, { min: number; max: number }>;
   requirements: RequirementsData | null;
+  // Phase 6: read-only make-manifest (material/process per part + assembly steps), refreshed
+  // symmetrically with `requirements` — see App.tsx.
+  manufacturingManifest: ManufacturingManifest | null;
   onSelect: (id: string) => void;
   onAdd: (subsystemType: string) => void;
   onRemove: (id: string) => void;
@@ -166,6 +172,10 @@ export function ModelPanel({
 
       <Section title="Goal & compliance" defaultOpen={!!requirements?.goal_set}>
         <RequirementsCard data={requirements} onOptimize={onOptimize} bare />
+      </Section>
+
+      <Section title="Manufacturing" defaultOpen={!!manufacturingManifest?.parts?.length}>
+        <ManufacturingCard data={manufacturingManifest} bare />
       </Section>
     </div>
   );
