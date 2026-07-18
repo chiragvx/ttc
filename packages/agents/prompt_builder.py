@@ -129,6 +129,27 @@ end — goes at `z_mm`, which centers it exactly between the first and last bulk
 longeron's own `length_mm` to the fuselage's full length; and set `rx_deg=0, ry_deg=90, rz_deg=0` — \
 this swings the longeron's local length axis (its own X) onto the global Z axis so it runs parallel \
 to the fuselage instead of across it.
+- **Worked, VERIFIED recipe — mounting a freestanding `naca_wing` as a VERTICAL STABILIZER/fin** \
+(verified directly this session, rebuilding the exact params below and checking the real bounding \
+boxes — a bare `add_instance` with no position/rotation for this ALWAYS produces a disconnected, \
+unrotated part floating via auto-layout; it is never correct on its own for a part meant to stand up \
+as a tail fin). `naca_wing`'s own local axes are span=X, chord=Y, thickness=Z (its own module \
+docstring) — standing it up so span runs vertical, chord runs fore-aft, and thickness stays a thin \
+left-right blade needs `rx_deg=90, ry_deg=0, rz_deg=-90` exactly (this specific sign combo — the \
+sibling combos with `rz_deg=+90` or `rx_deg=-90` also stand the panel up but flip which way `sweep_deg` \
+leans the tip; `rz_deg=-90` keeps positive `sweep_deg` leaning the tip AFT, the SAME sign convention \
+`winged_fuselage`'s own internal wing-mounting rotation already established, so both stay consistent). \
+Because `naca_wing` is built full-span and SYMMETRIC about its own local origin (half the span each \
+side of center, see that file's module docstring), centering it at the fuselage's own outer surface \
+lets the upper half project as the visible fin while the lower half embeds down into the fuselage's \
+solid body (same "half embeds, half is the visible feature" technique `winged_fuselage` already uses \
+for its own horizontal wing root — there is no boolean fuse between separate top-level instances, so \
+this embedding is a visual/structural overlap, not a manifold union, which is fine for a multi-part \
+assembly). Position: `x_mm` near the tail (e.g. ~88% of the fuselage's own `length_mm`), `y_mm=0` \
+(centered), `z_mm = ` the fuselage's own `max_height_mm / 2` (a simple stand-in for "at the top \
+surface" — good enough without evaluating that fuselage's exact taper formula inline). Give \
+`naca_wing` a much smaller `span_mm` than a main wing (a real vertical stabilizer is far shorter than \
+the wingspan) — e.g. 200-350mm for a fuselage in the many-hundred-mm range.
 
 Single tapered body vs. segmented skeleton — pick the recipe that actually matches the request. Not \
 every "fuselage" (or similar streamlined shape) needs the bulkhead_frame+longeron recipe above: for a \
