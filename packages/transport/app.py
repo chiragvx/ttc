@@ -243,12 +243,21 @@ def _valid_ranges(ledger: MasterParametricLedger, instance_id: str | None) -> li
 
 def _all_gate_findings(ledger):
     """Combined export-gate `extra_findings`: discipline gates (thermal, …) PLUS Phase-2 coupling gates
-    (an unknown derived load blocks, same as an unknown FS). One injected callable so both gate call
-    sites stay identical."""
+    (an unknown derived load blocks, same as an unknown FS) PLUS Phase-3 connection-graph topology
+    legality (dangling refs, rotation-needed mates, over-constrained/unsatisfied connections). One
+    injected callable so both gate call sites stay identical.
+
+    connection_issues() (packages/subsystems/placement.py) already fed the ADVISORY /validate
+    self-check — a design with a genuinely broken connection graph could still pass the EXPORT gate
+    silently, which is exactly the "invalid should block, not silently pass" gap this closes (2026-07-19,
+    ENGINEERING_GRAPH_PLAN.md P3 topology-legality). Every issue it reports is a real graph invalidity
+    (not a missing-data case), so all go to `reasons` (blocking) — there's no `unknowns` counterpart."""
     from packages.couplings import coupling_gate_findings
+    from packages.subsystems.placement import connection_issues
     r1, u1 = all_discipline_findings(ledger)
     r2, u2 = coupling_gate_findings(ledger)
-    return r1 + r2, u1 + u2
+    r3 = connection_issues(ledger)
+    return r1 + r2 + r3, u1 + u2
 
 
 class ProposeRequest(BaseModel):

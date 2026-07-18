@@ -150,6 +150,27 @@ def test_export_step_enforces_gates_server_side():
     assert any("not engineer-reviewed" in r for r in body["reasons"])
 
 
+def test_export_check_blocks_on_an_over_constrained_connection():
+    # Phase 3 (2026-07-19, ENGINEERING_GRAPH_PLAN.md P3 topology-legality): connection_issues() already
+    # fed the ADVISORY /validate self-check but a broken connection graph could still pass the EXPORT
+    # gate silently — closed by folding connection_issues() into _all_gate_findings. Both add_connection
+    # calls below succeed individually (real instances, real interfaces — apply_connection_op has no
+    # reason to reject either), but the SECOND one conflicts with the first (the v1 solver already
+    # placed the wing by its first mate, first-reached-wins — mirrors
+    # tests/subsystems/test_placement.py::test_over_constrained_connection_is_flagged_not_silently_dropped,
+    # here proven through the live REST -> gate path instead of calling connection_issues() directly).
+    c = _client()
+    body = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "bwb_fuselage"}).json()["instance_id"]
+    wing = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "wing_panel"}).json()["instance_id"]
+    c.post("/connection_ops", json={"op": "add_connection", "a_instance": wing, "a_interface": "root",
+                                    "b_instance": body, "b_interface": "tip_right"})
+    c.post("/connection_ops", json={"op": "add_connection", "a_instance": wing, "a_interface": "root",
+                                    "b_instance": body, "b_interface": "tip_left"})
+    res = c.post("/export/check").json()
+    assert res["status"] == "EXPORT_BLOCKED"
+    assert any("do not meet" in r for r in res["reasons"])
+
+
 def test_propose_without_key_returns_no_llm(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     res = _client().post("/propose", json={"intent": "make the skin 3 mm"}).json()
