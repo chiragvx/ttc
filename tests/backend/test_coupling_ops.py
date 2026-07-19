@@ -49,6 +49,26 @@ def test_add_coupling_applies_and_persists_through_replay():
     assert any(cpl["id"] == cid for cpl in led["couplings"])
 
 
+def test_add_coupling_accepts_a_per_input_rationale():
+    """2026-07-19 live fix: the copilot naturally wants to explain EACH input separately (why this
+    mass, why this acceleration) — CouplingInputItem used to have no `rationale` slot at all, so
+    extra="forbid" rejected the WHOLE tool call the moment it tried. Never persisted/read anywhere
+    (same as ParameterDelta.rationale) — this only confirms it's accepted, not silently dropped as an
+    unknown-field crash."""
+    c = _client()
+    _, crank = _two_bars(c)
+    r = c.post("/coupling_ops", json={
+        "op": "add_coupling",
+        "target_instance": crank,
+        "relation": "force_from_pressure_area",
+        "inputs": [
+            {"name": "pressure_pa", "value": 2000000.0, "rationale": "rated burst pressure"},
+            {"name": "area_mm2", "value": 500.0, "rationale": "bore cross-section"},
+        ],
+    }).json()
+    assert r["ok"] and r["status"] == "APPLIED"
+
+
 def test_add_coupling_with_unregistered_relation_is_rejected():
     c = _client()
     _, crank = _two_bars(c)

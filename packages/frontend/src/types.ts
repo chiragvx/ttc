@@ -201,6 +201,7 @@ export interface CouplingInputItem {
   value?: number | null;
   from_instance?: string | null;
   from_param?: string | null;
+  rationale?: string | null; // never persisted/read — a legal place for the LLM's per-input reasoning
 }
 export interface CouplingOp {
   op: "add_coupling" | "remove_coupling";

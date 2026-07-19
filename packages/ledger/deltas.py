@@ -152,6 +152,13 @@ class CouplingInputItem(BaseModel):
     value: Optional[float] = None
     from_instance: Optional[str] = None
     from_param: Optional[str] = None
+    # 2026-07-19 — live failure: the model tried to explain EACH input separately ("battery mass: 3kg",
+    # "8g launch accel") and got REJECTED wholesale by extra="forbid" since only CouplingOp itself (not
+    # its individual inputs) had a rationale slot. Never read anywhere (same as ParameterDelta.rationale
+    # and CouplingOp.rationale below — grep confirms zero readers in packages/ledger or packages/transport)
+    # — purely a legal place for the LLM to put its per-input reasoning instead of crashing the whole
+    # tool call trying to smuggle it into a field that doesn't exist.
+    rationale: Optional[str] = None
 
 
 class CouplingOp(BaseModel):
