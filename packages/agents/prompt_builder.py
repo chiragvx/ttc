@@ -77,7 +77,10 @@ none of them naming a `parent_id`.
 - "a robot arm" -> a `t_bar` or `flat_bar` for each link, `hub`s or `shaft_collar`s at the joints, a \
 `motor_mount` where a motor attaches.
 These are illustrative, not a fixed recipe — choose whichever real subsystems in the menu above best \
-match what the user described.
+match what the user described. ALL FOUR of these are FUNCTIONAL-ASSEMBLY decompositions (the parts are \
+meant to physically join into one mechanism, not just coexist in the same file) — see "Loose kit vs. \
+functional assembly" further below for what that means for how you position them and what your reply \
+must say.
 
 Rules for `instance_ops`, non-negotiable:
 - `subsystem_type` on every `add_instance` MUST be one of the EXACT names already listed in the "Part \
@@ -287,6 +290,41 @@ places it. Setting both a position AND a connection is contradictory.
 - Only reach for explicit x/y/z when the parts genuinely have no matching interface. As more parts \
 declare interfaces, connection_ops becomes the default way to assemble.
 - `remove_connection` (with the connection `id`) unmates two parts.\
+"""
+
+
+_ASSEMBLY_CONNECTIVITY_SECTION = """\
+## Loose kit vs. functional assembly — when auto-layout alone is NOT enough
+
+Adding several parts in one turn (a decomposed multi-part request — a satellite, a drone frame, a \
+robot arm, an intake manifold, ...) splits into two genuinely different cases, and treating them the \
+same is a real, previously-live bug: an AI-decomposed "intake manifold" (a plenum + 4 runner tubes + a \
+mounting flange) looked like a finished assembly in the 3D viewport, but 5 of the 6 parts were floating \
+6-15mm apart with ZERO physical connection between them — because none of those part types declare \
+interfaces, and the reply never said the layout was rough. Don't repeat this.
+
+- **A LOOSE KIT** — independent parts that just need to coexist in the same file, with no requirement \
+that they physically touch (e.g. "give me a bracket and a standoff"). Auto-layout (omitting \
+`x_mm`/`y_mm`/`z_mm`, per the rules above) is fine here — no caveat needed.
+- **A FUNCTIONAL ASSEMBLY** — parts that only work AS one mechanism because they physically join: a \
+bracket bolted to an enclosure, an arm attached to a frame, a runner feeding a plenum, a flange \
+mounting to a manifold. If the request implies parts that pass force/motion/fluid/fasteners between \
+each other — which most "make a <compound thing>" decompositions do, including every worked example \
+above — this is the case that applies, not the loose-kit one.
+
+For a FUNCTIONAL ASSEMBLY, auto-layout ALONE is never sufficient — it only guarantees parts don't \
+overlap; it has no notion of "these two should touch." Two paths:
+1. If BOTH sides of a join have a declared interface (check the "interfaces (mate points for \
+`connection_ops`)" line under each part type in the menu above), use `connection_ops` — see that \
+section below. This is the exact, preferred answer whenever it's available.
+2. If EITHER side has no declared interface (true for most of the catalog today — only a handful of \
+parts declare interfaces so far), you do NOT have enough grounded geometric information to reliably \
+hand-compute a genuinely touching position for an arbitrary part pair — guessing one risks a \
+confident-looking but WRONG placement, which is worse than an honestly-scattered one. Add the parts via \
+auto-layout as a first pass, but SAY SO PLAINLY in your reply: state that these parts are placed as a \
+rough, unjoined first pass — not yet mechanically connected — and ask or offer to align/position them \
+once the part list itself is confirmed. NEVER present a multi-part auto-layout result as if it were a \
+finished, physically joined assembly — that is exactly the failure described above.\
 """
 
 
@@ -617,6 +655,7 @@ def build_system_prompt(subsystem_ctx: SubsystemContext | None, ledger: MasterPa
         sections.append(disciplines)
     sections.append(_instances_section(ledger))
     sections.append(_CONNECTION_OPS_SECTION)
+    sections.append(_ASSEMBLY_CONNECTIVITY_SECTION)
     sections.append(_COUPLING_OPS_SECTION)
     sections.append(_SCOPE_PROPOSAL_SECTION)
     sections.append(_FEATURE_OPS_SECTION)
