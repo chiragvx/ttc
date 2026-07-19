@@ -414,13 +414,18 @@ from "P1 specced, P2-P7 sketched" to six phases built, tested, and adversarially
   cracks the crankshaft) made computable and verified end-to-end. `"unknown"` (an unregistered relation,
   an unresolvable input) blocks export, same as an unknown FS. **P2b** wired `CouplingOp` into LLM
   tool-use + REST + event persistence, mirroring P1b's own pattern.
-- **P3 (partial) — topology-legality:** a broken connection graph (dangling refs, rotation-needed mates,
-  over-constrained/unsatisfied connections) now blocks `/export/step`, not just the advisory `/validate`
-  self-check. The gross-error (closed-form spar-sizing) and rating-check (interface capacity) slices of
-  P3 were deliberately NOT built — reusing the validated Euler-Bernoulli cantilever oracle
-  (`packages/truth_plane/solvers/cases.py`) against a bounding-box approximation is defensible but is an
-  engineering judgment call, not plumbing, so it needs an explicit human decision rather than
-  self-certification (`CLAUDE.md`'s FEA-correctness human-wall clause).
+- **P3 (partial) — topology-legality + gross-error:** a broken connection graph (dangling refs,
+  rotation-needed mates, over-constrained/unsatisfied connections) now blocks `/export/step`, not just
+  the advisory `/validate` self-check. A coarse gross-error pre-check followed, after an explicit
+  human decision (asked, not assumed) on methodology: for any instance carrying a KNOWN
+  coupling-derived force load, approximate it as a cantilever over its own bounding box (worst-plausible
+  orientation) and reuse the ALREADY-VALIDATED Euler-Bernoulli oracle
+  (`packages/truth_plane/solvers/cases.py`) — never new physics — blocking only at an extreme shortfall
+  (FS < 1.0 under the crude model). The rating-check slice (interface capacity — wire-gauge/current
+  ceilings) remains deliberately deferred: it needs real reference numbers (ampacity tables, connector
+  ratings) that don't exist in this codebase yet, the same "no external-standards sourcing yet"
+  gap `packages/catalog` already discloses for materials/DFM data — building it now would mean
+  fabricating plausible-looking numbers, not grounding them.
 - **P5 — `ScopeSpec`:** an additive part-manifest summary (goal/parts/operating-conditions/out-of-scope)
   the copilot can emit for a big/ambiguous "make an X" ask. Deliberately NOT a new pre-apply confirmation
   gate — `packages/agents/CLAUDE.md`'s 2026-07-04 policy ("a proposal auto-applies immediately, Undo is
@@ -446,10 +451,11 @@ found real, confirmed bugs — never a clean first pass. Two worth flagging spec
   two full phases. Fixed for all three (`connection_ops`/`coupling_ops`/`scope_proposal`) and
   regression-tested — the first test coverage this gate has ever had for any of them.
 
-Full suite green throughout: **1665 backend passed / 27 skipped, 26 frontend passed** after P5 (the last
-phase landed). Deliberately not attempted this session: **P4** (whole-system Solver Tab + fatigue
-methodology) and **P7** (certification pass) — both need handbook-sourced golden values/criteria, not a
-self-certified approximation, per the same human-wall clause P3's deferred slice cites.
+Full suite green throughout: **1668 backend passed / 27 skipped, 26 frontend passed** after the
+gross-error check (the last piece landed). Deliberately not attempted this session: **P4** (whole-system
+Solver Tab + fatigue methodology) and **P7** (certification pass) — both need handbook-sourced golden
+values/criteria, not a self-certified approximation, per the same human-wall clause the rating-check
+slice cites.
 
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
