@@ -33,7 +33,7 @@ def main() -> int:
 
     n_datasets = 0
     for key in ("manufacturing.clearance_holes_mm", "manufacturing.wall_thickness_mm",
-               "cost.machine_rates_usd_per_hr"):
+               "cost.machine_rates_usd_per_hr", "electrical.wire_ampacity_amps"):
         dataset = seed.dataset(key)
         if dataset is None:
             continue

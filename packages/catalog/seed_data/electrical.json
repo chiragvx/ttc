@@ -1,0 +1,20 @@
+{
+  "datasets": [
+    {"key": "electrical.wire_ampacity_amps", "domain": "electrical",
+     "description": "AWG wire ampacity, chassis wiring / single conductor in free air. Rule-of-thumb reference (Handbook of Electronic Tables and Formulas, via powerstream.com) — NOT an NEC-compliance-grade table, same representative/unverified tier as this catalog's material data.",
+     "unit": "A", "source": "Handbook of Electronic Tables and Formulas (rule-of-thumb, chassis wiring free-air) -- https://www.powerstream.com/Wire_Size.htm", "version": "1",
+     "entries": [
+       {"entry_key": "AWG30", "value_numeric": 0.86},
+       {"entry_key": "AWG28", "value_numeric": 1.4},
+       {"entry_key": "AWG26", "value_numeric": 2.2},
+       {"entry_key": "AWG24", "value_numeric": 3.5},
+       {"entry_key": "AWG22", "value_numeric": 7},
+       {"entry_key": "AWG20", "value_numeric": 11},
+       {"entry_key": "AWG18", "value_numeric": 16},
+       {"entry_key": "AWG16", "value_numeric": 22},
+       {"entry_key": "AWG14", "value_numeric": 32},
+       {"entry_key": "AWG12", "value_numeric": 41},
+       {"entry_key": "AWG10", "value_numeric": 55}
+     ]}
+  ]
+}

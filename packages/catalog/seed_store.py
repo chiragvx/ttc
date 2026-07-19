@@ -29,7 +29,7 @@ class SeedFileStore:
 
     def _load_datasets(self) -> dict[str, ReferenceDataset]:
         out: dict[str, ReferenceDataset] = {}
-        for fname in ("manufacturing.json", "cost.json"):
+        for fname in ("manufacturing.json", "cost.json", "electrical.json"):
             path = os.path.join(self._dir, fname)
             if not os.path.isfile(path):
                 continue

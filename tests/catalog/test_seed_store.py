@@ -1,11 +1,13 @@
 """SeedFileStore — the zero-infra DomainStore tier. Pins that the checked-in JSON matches the
-values packages/ledger/bom.py::MATERIAL_DB and packages/disciplines/cost.py::MACHINE_RATE_USD_PER_HR
-hardcode by default (this is a faithful migration, not a value change)."""
+values packages/ledger/bom.py::MATERIAL_DB, packages/disciplines/cost.py::MACHINE_RATE_USD_PER_HR,
+and packages/ledger/wire_ampacity.py::AMPACITY_BY_AWG hardcode by default (this is a faithful
+migration, not a value change)."""
 
 from __future__ import annotations
 
 from packages.catalog.seed_store import SeedFileStore
 from packages.ledger.bom import MATERIAL_DB
+from packages.ledger.wire_ampacity import AMPACITY_BY_AWG
 
 
 def test_materials_match_the_hardcoded_bom_defaults():
@@ -47,6 +49,14 @@ def test_cost_machine_rate_dataset_matches_hardcoded_default():
     assert ds is not None
     entry = next(e for e in ds.entries if e.entry_key == "fdm_default")
     assert entry.value_numeric == MACHINE_RATE_USD_PER_HR
+
+
+def test_electrical_wire_ampacity_dataset_matches_hardcoded_default():
+    store = SeedFileStore()
+    ds = store.dataset("electrical.wire_ampacity_amps")
+    assert ds is not None
+    values = {e.entry_key: e.value_numeric for e in ds.entries}
+    assert values == AMPACITY_BY_AWG
 
 
 def test_unknown_dataset_key_returns_none():

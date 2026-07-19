@@ -21,6 +21,7 @@ def apply_to_live_app() -> None:
     _apply_materials()
     _apply_machine_rate()
     _apply_manufacturing_dfm()
+    _apply_wire_ampacity()
 
 
 def _apply_materials() -> None:
@@ -86,3 +87,17 @@ def _apply_manufacturing_dfm() -> None:
         set_dfm_reference(clearance_holes_mm=clearance_holes, recommended_wall_mm=recommended)
     except Exception:
         pass  # keep the hardcoded clearance-hole table / recommended-wall default
+
+
+def _apply_wire_ampacity() -> None:
+    try:
+        from packages.catalog.loader import get_store
+        from packages.ledger.wire_ampacity import set_wire_ampacity_db
+
+        dataset = get_store().dataset("electrical.wire_ampacity_amps")
+        if dataset is None:
+            return
+        ampacity = {e.entry_key: e.value_numeric for e in dataset.entries if e.value_numeric is not None}
+        set_wire_ampacity_db(ampacity)
+    except Exception:
+        pass  # keep the hardcoded AMPACITY_BY_AWG default

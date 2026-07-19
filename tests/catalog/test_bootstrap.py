@@ -10,6 +10,7 @@ from packages.catalog.models import MaterialRecord, ReferenceDataset, ReferenceE
 from packages.disciplines import cost as cost_module
 from packages.disciplines import manufacturing as manufacturing_module
 from packages.ledger import bom
+from packages.ledger import wire_ampacity as wire_ampacity_module
 
 
 @pytest.fixture(autouse=True)
@@ -18,6 +19,7 @@ def _reset_overrides():
     bom.reset_material_db()
     cost_module.reset_machine_rate()
     manufacturing_module.reset_dfm_reference()
+    wire_ampacity_module.reset_wire_ampacity_db()
 
 
 class _FakeStore:
@@ -129,6 +131,49 @@ def test_apply_overrides_manufacturing_dfm(monkeypatch):
     # (deliberately different, to prove it's ignored) min_wall entry
     from packages.ledger.apply import MIN_WALL_MM
     assert f"Minimum wall is {MIN_WALL_MM:g} mm" in text
+
+
+def test_apply_overrides_wire_ampacity(monkeypatch):
+    from packages.catalog.bootstrap import apply_to_live_app
+
+    fake = _FakeStore(datasets={
+        "electrical.wire_ampacity_amps": ReferenceDataset(
+            key="electrical.wire_ampacity_amps", domain="electrical",
+            entries=[ReferenceEntry(entry_key="AWG10", value_numeric=99.0)]),
+    })
+    _patch_store(monkeypatch, fake)
+
+    apply_to_live_app()
+    assert wire_ampacity_module.ampacity_a("AWG10") == 99.0
+
+
+def test_missing_wire_ampacity_dataset_leaves_the_default(monkeypatch):
+    from packages.catalog.bootstrap import apply_to_live_app
+
+    _patch_store(monkeypatch, _FakeStore(datasets={}))
+    apply_to_live_app()
+    assert wire_ampacity_module.AMPACITY_BY_AWG == wire_ampacity_module._DEFAULT_AMPACITY_BY_AWG
+
+
+def test_wire_ampacity_failure_does_not_block_the_other_overrides(monkeypatch):
+    from packages.catalog.bootstrap import apply_to_live_app
+
+    class _RaisingElectricalStore(_FakeStore):
+        def dataset(self, key):
+            if key.startswith("electrical."):
+                raise RuntimeError("boom")
+            return super().dataset(key)
+
+    fake = _RaisingElectricalStore(datasets={
+        "cost.machine_rates_usd_per_hr": ReferenceDataset(
+            key="cost.machine_rates_usd_per_hr", domain="cost",
+            entries=[ReferenceEntry(entry_key="fdm_default", value_numeric=13.0)]),
+    })
+    _patch_store(monkeypatch, fake)
+
+    apply_to_live_app()  # must not raise
+    assert cost_module.MACHINE_RATE_USD_PER_HR == 13.0  # unaffected by the electrical-dataset failure
+    assert wire_ampacity_module.ampacity_a("AWG10") == 55.0  # fell back to its own default
 
 
 def test_manufacturing_dfm_failure_does_not_block_the_other_overrides(monkeypatch):
