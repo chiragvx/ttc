@@ -1,12 +1,37 @@
+import { useCallback, useEffect, useMemo } from "react";
+import {
+  Background,
+  BackgroundVariant,
+  Controls,
+  Handle,
+  MarkerType,
+  MiniMap,
+  Position,
+  ReactFlow,
+  ReactFlowProvider,
+  useEdgesState,
+  useNodesState,
+  type Edge,
+  type Node,
+  type NodeMouseHandler,
+  type NodeProps,
+  type NodeTypes,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+
 import type { LedgerGraphData } from "./types";
 
 // A read-only topology view of the design's INSTANCE graph — nodes are `ledger.instances`, edges are
 // `ledger.connections` (typed interface<->interface mates) and `ledger.couplings` (derived-load
-// edges). Distinct from Viewport.tsx's 3D geometry viewport: this is a 2D SVG diagram of the
-// ENGINEERING GRAPH itself, not the built solid. PURELY PRESENTATIONAL — ledger data + a click
-// callback in, nothing else; no fetching, no App-level state, no graph-viz library (plain SVG with a
-// simple deterministic circular layout, matching packages/frontend/CLAUDE.md's "read-only viewport,
-// no new deps" spirit and the RequirementsCard/ManufacturingCard presentational-card pattern).
+// edges). Distinct from Viewport.tsx's 3D geometry viewport: this is a 2D diagram of the ENGINEERING
+// GRAPH itself, not the built solid. PURELY PRESENTATIONAL — ledger data + a click callback in,
+// nothing else; no fetching, no App-level state.
+//
+// Rebuilt (2026-07-19) on @xyflow/react for a real "Figma-style" node-graph — draggable cards,
+// curved directional connectors, pan/zoom, minimap — replacing the old hand-rolled plain-SVG
+// circular-layout version. See computeGraphData()/mergeNodePositions() below for the load-bearing
+// logic carried forward from that version (dangling-reference skip, disconnected-flag rules,
+// drag-position preservation across ledger refreshes).
 //
 // Dangling references are a REAL, expected case here, not a bug to guard against defensively as an
 // afterthought: packages/subsystems/placement.py::connection_issues() exists specifically because a
@@ -19,164 +44,282 @@ export interface EKGGraphViewProps {
   onSelectInstance: (instanceId: string) => void;
 }
 
-const NODE_R = 26;
-const MARGIN = 90; // room for the label text + selection ring around the outermost nodes
+// --- pure graph-data computation (constraint 4) ------------------------------------------------
+// ZERO React/xyflow imports below this point up to the component — this is what gets unit-tested
+// directly (fast, reliable, no jsdom/ResizeObserver involved), matching this codebase's established
+// "extract the risky pure logic, test it directly" pattern (see
+// packages/agents/openrouter_provider.py::_looks_truncated).
 
-interface LayoutResult {
-  positions: Record<string, { x: number; y: number }>;
-  size: number;
+export interface EKGComputedNode {
+  id: string;
+  subsystemType: string;
+  disconnected: boolean;
 }
-
-// Evenly space `n` nodes around a circle of radius proportional to `n`, centered in the viewBox.
-// Pure function of the instance ids (sorted, so layout never depends on backend key-insertion order)
-// — same ledger in always produces the same picture out.
-function layoutCircular(ids: string[]): LayoutResult {
-  const n = ids.length;
-  const radius = Math.max(120, n * 30);
-  const size = radius * 2 + MARGIN * 2;
-  const center = size / 2;
-  const positions: Record<string, { x: number; y: number }> = {};
-  ids.forEach((id, i) => {
-    const angle = (2 * Math.PI * i) / n - Math.PI / 2; // first node at 12 o'clock
-    positions[id] = { x: center + radius * Math.cos(angle), y: center + radius * Math.sin(angle) };
-  });
-  return { positions, size };
-}
-
-interface ResolvedEdge {
-  key: string;
-  x1: number; y1: number; x2: number; y2: number;
+export interface EKGComputedEdge {
+  id: string;
+  source: string;
+  target: string;
   label: string;
   kind: "connection" | "coupling";
 }
 
-export function EKGGraphView({ ledger, selectedInstanceId, onSelectInstance }: EKGGraphViewProps) {
-  // Defense in depth beyond the `ledger === null` case: getLedger() now checks res.ok (2026-07-19
-  // review, CRITICAL — an unchecked 401/503 error body used to reach here as a truthy-but-malformed
-  // object and crash on Object.keys(undefined), with no ErrorBoundary anywhere to contain it), but a
-  // component that's handed ledger data shouldn't ALSO assume every sub-field is always present.
-  const ids = ledger?.instances ? Object.keys(ledger.instances).sort() : [];
-
-  if (!ledger || !ledger.instances || ids.length === 0) {
-    return (
-      <div style={emptyState}>
-        No parts yet — ask the copilot to build something
-      </div>
-    );
-  }
-
-  const { positions, size } = layoutCircular(ids);
+export function computeGraphData(ledger: LedgerGraphData): { nodes: EKGComputedNode[]; edges: EKGComputedEdge[] } {
+  const instances = ledger.instances ?? {};
+  const ids = Object.keys(instances).sort();
 
   // Nodes actually touched by a RESOLVED edge (both endpoints exist) are "connected" for styling
   // purposes — an edge that gets skipped for a dangling endpoint doesn't count as touching the end
   // that DID resolve, since nothing is actually drawn to it.
   const touched = new Set<string>();
+  const edges: EKGComputedEdge[] = [];
 
-  const connectionEdges: ResolvedEdge[] = [];
   for (const c of ledger.connections ?? []) {
-    const pa = positions[c.a.instance_id];
-    const pb = positions[c.b.instance_id];
-    if (!pa || !pb) continue; // dangling endpoint(s) — skip, don't crash (placement.py::connection_issues' DANGLING case)
+    if (!instances[c.a.instance_id] || !instances[c.b.instance_id]) continue; // dangling endpoint(s) — skip, don't crash (placement.py::connection_issues' DANGLING case)
     touched.add(c.a.instance_id);
     touched.add(c.b.instance_id);
-    connectionEdges.push({
-      key: `conn-${c.id}`,
-      x1: pa.x, y1: pa.y, x2: pb.x, y2: pb.y,
+    edges.push({
+      id: `conn-${c.id}`,
+      source: c.a.instance_id,
+      target: c.b.instance_id,
       label: `${c.kind}: ${c.a.interface}<->${c.b.interface}`,
       kind: "connection",
     });
   }
 
-  const couplingEdges: ResolvedEdge[] = [];
   for (const cpl of ledger.couplings ?? []) {
-    const target = positions[cpl.target_instance];
+    const targetResolves = !!instances[cpl.target_instance];
     // The target is "touched" (legitimately part of the graph) whenever IT resolves, independent of
     // whether any input happens to be instance-sourced — a coupling with only literal-value inputs
     // (a real, valid case: packages/ledger/schema.py::CouplingInput's "value" form) still legitimately
     // targets a real part (2026-07-19 review, HIGH — this used to live inside the input loop below,
     // gated on `input.from_instance` existing, so an all-literal-inputs coupling never marked its own
     // resolvable target as touched).
-    if (target) touched.add(cpl.target_instance);
+    if (targetResolves) touched.add(cpl.target_instance);
+
     let i = 0;
     for (const input of Object.values(cpl.inputs ?? {})) {
       if (!input.from_instance) continue; // a literal-value input has no source instance to draw from
-      const src = positions[input.from_instance];
-      if (!src) continue; // dangling from_instance — skip just this edge, not the whole coupling
+      if (!instances[input.from_instance]) continue; // dangling from_instance — skip just this edge, not the whole coupling
       // The source is "touched" whenever IT resolves, independent of whether the TARGET also resolves
       // — an unrelated dangling target elsewhere in the same coupling must not falsely disconnect-flag
       // a perfectly valid source node (2026-07-19 review, MEDIUM — this used to sit after a `continue`
       // keyed on the target, so a dangling target discarded every one of its inputs' touched-marking
       // too, even a fully-valid one).
       touched.add(input.from_instance);
-      if (!target) continue; // nowhere to draw the edge TO, but the source above is still marked touched
-      couplingEdges.push({
-        key: `cpl-${cpl.id}-${i++}`,
-        x1: src.x, y1: src.y, x2: target.x, y2: target.y,
+      if (!targetResolves) continue; // nowhere to draw the edge TO, but the source above is still marked touched
+      edges.push({
+        id: `cpl-${cpl.id}-${i++}`,
+        source: input.from_instance,
+        target: cpl.target_instance,
         label: cpl.relation,
         kind: "coupling",
       });
     }
   }
 
-  return (
-    <div style={{ width: "100%" }} data-testid="ekg-graph-view">
-      <svg
-        data-testid="ekg-graph-svg"
-        viewBox={`0 0 ${size} ${size}`}
-        width="100%"
-        style={{ display: "block", background: "#0d1117", borderRadius: 10, border: "1px solid #30363d" }}
-      >
-        {connectionEdges.map((e) => <Edge key={e.key} edge={e} />)}
-        {couplingEdges.map((e) => <Edge key={e.key} edge={e} />)}
+  const nodes: EKGComputedNode[] = ids.map((id) => ({
+    id,
+    subsystemType: instances[id].subsystem_type,
+    disconnected: !touched.has(id),
+  }));
 
-        {ids.map((id) => {
-          const p = positions[id];
-          const inst = ledger.instances[id];
-          const isSelected = selectedInstanceId != null && id === selectedInstanceId;
-          const isDisconnected = !touched.has(id);
-          return (
-            <g
-              key={id}
-              data-testid={`ekg-node-${id}`}
-              data-selected={isSelected}
-              data-disconnected={isDisconnected}
-              onClick={() => onSelectInstance(id)}
-              style={{ cursor: "pointer" }}
-            >
-              {isSelected && (
-                <circle cx={p.x} cy={p.y} r={NODE_R + 6} fill="none" stroke="#58a6ff" strokeWidth={3} />
-              )}
-              <circle
-                cx={p.x} cy={p.y} r={NODE_R}
-                fill="#161b22"
-                stroke={isDisconnected ? "#d29922" : "#30363d"}
-                strokeWidth={isDisconnected ? 2 : 1.5}
-                strokeDasharray={isDisconnected ? "4 3" : undefined}
-              />
-              <text x={p.x} y={p.y - 2} textAnchor="middle" fontSize={10} fill="#c9d1d9">{id}</text>
-              <text x={p.x} y={p.y + 10} textAnchor="middle" fontSize={8} fill="#8b949e">{inst.subsystem_type}</text>
-            </g>
-          );
-        })}
-      </svg>
+  return { nodes, edges };
+}
+
+// --- layout + position-preservation merge (constraint 5) ---------------------------------------
+
+interface XY {
+  x: number;
+  y: number;
+}
+
+// Evenly space `n` ids around a circle of radius proportional to `n`. Pure function of the instance
+// ids (sorted upstream by computeGraphData, so layout never depends on backend key-insertion order)
+// — same ledger in always produces the same picture out. Adapted from the old SVG version's
+// layoutCircular(): coordinates are now centered on (0,0) (xyflow's `fitView` frames the canvas, so
+// no viewBox/margin bookkeeping is needed here).
+function layoutCircular(ids: string[]): Record<string, XY> {
+  const n = ids.length;
+  const radius = Math.max(120, n * 30);
+  const positions: Record<string, XY> = {};
+  ids.forEach((id, i) => {
+    const angle = (2 * Math.PI * i) / n - Math.PI / 2; // first node at 12 o'clock
+    positions[id] = { x: radius * Math.cos(angle), y: radius * Math.sin(angle) };
+  });
+  return positions;
+}
+
+export interface EKGNodeData extends Record<string, unknown> {
+  subsystemType: string;
+  disconnected: boolean;
+  selected: boolean;
+}
+export type EKGFlowNode = Node<EKGNodeData, "ekgCard">;
+
+// THE point of "draggable": merge freshly computed graph data into the EXISTING @xyflow node state
+// instead of replacing it, so a ledger refresh (a chat turn added/changed something) doesn't silently
+// snap a user-dragged node back to its auto-layout position. An id already present in `prevNodes`
+// KEEPS its current (possibly dragged) x/y — only its `data` (disconnected/selected) refreshes. A
+// genuinely new id gets a fresh position from the deterministic circular layout above. An id no
+// longer present in `computedNodes` simply doesn't appear in the returned array (dropped).
+//
+// Kept as its own function (constraint 5) so it can be unit-tested directly by mocking the
+// position-bearing `prevNodes` array, rather than asserting on real pixel coordinates through jsdom
+// (which has no real layout engine).
+export function mergeNodePositions(
+  prevNodes: EKGFlowNode[],
+  computedNodes: EKGComputedNode[],
+  selectedInstanceId?: string | null,
+): EKGFlowNode[] {
+  const prevById = new Map(prevNodes.map((n) => [n.id, n]));
+  const freshLayout = layoutCircular(computedNodes.map((n) => n.id));
+
+  return computedNodes.map((cn) => {
+    const prev = prevById.get(cn.id);
+    const data = {
+      subsystemType: cn.subsystemType,
+      disconnected: cn.disconnected,
+      selected: selectedInstanceId != null && cn.id === selectedInstanceId,
+    };
+    // Spread `...prev` (2026-07-19 review, LOW) — a bare `{id, type, position, data}` literal here
+    // drops every xyflow-OWNED field (measured, dragging, internal selected/z) the library itself
+    // writes onto these controlled node objects via its own onNodesChange (see applyNodeChanges/
+    // adoptUserNodes in @xyflow/react's internals). Returning a brand-new object on every merge — even
+    // for a node whose position/data didn't actually change — fails xyflow's referential-identity
+    // check and forces an unnecessary re-measure pass (visible edge/handle-anchor flicker) on every
+    // trigger, including a plain node-selection click. Preserving the rest of `prev` and only
+    // overwriting what this function actually owns (position, data) avoids that.
+    if (prev) return { ...prev, position: prev.position, data };
+    return { id: cn.id, type: "ekgCard" as const, position: freshLayout[cn.id], data };
+  });
+}
+
+// --- custom node ("card") — constraint 6 --------------------------------------------------------
+// Matches ManufacturingCard.tsx/RequirementsCard.tsx's dark palette EXACTLY: background #161b22,
+// border #30363d, text #c9d1d9 primary / #8b949e secondary. Disconnected -> dashed amber border
+// (#d29922), mirroring the old implementation's treatment (same color, same dashed style, now
+// applied to a card instead of a circle). Selected -> a distinct blue (#58a6ff) ring, layered
+// independently of the disconnected border so a node that is BOTH selected and disconnected shows
+// both stylings at once (neither silently overrides the other).
+function EKGCardNode({ id, data }: NodeProps<EKGFlowNode>) {
+  const { subsystemType, disconnected, selected } = data;
+  return (
+    <div
+      data-testid={`ekg-node-${id}`}
+      data-selected={selected}
+      data-disconnected={disconnected}
+      style={{
+        background: "#161b22",
+        border: disconnected ? "1.5px dashed #d29922" : "1px solid #30363d",
+        borderRadius: 8,
+        padding: "8px 12px",
+        minWidth: 130,
+        boxShadow: selected ? "0 0 0 2px #58a6ff" : "none",
+        cursor: "pointer",
+      }}
+    >
+      <Handle type="target" position={Position.Top} style={handleStyle} />
+      <div style={{ fontWeight: 700, fontSize: 12, color: "#c9d1d9" }}>{id}</div>
+      <div style={{ fontSize: 10, color: "#8b949e", marginTop: 2 }}>{subsystemType}</div>
+      <Handle type="source" position={Position.Bottom} style={handleStyle} />
     </div>
   );
 }
 
-function Edge({ edge }: { edge: ResolvedEdge }) {
-  const isConnection = edge.kind === "connection";
-  const mx = (edge.x1 + edge.x2) / 2;
-  const my = (edge.y1 + edge.y2) / 2;
+const handleStyle = { background: "#30363d", border: "1px solid #8b949e", width: 6, height: 6 };
+
+const nodeTypes: NodeTypes = { ekgCard: EKGCardNode };
+
+// --- top-level component ------------------------------------------------------------------------
+
+export function EKGGraphView({ ledger, selectedInstanceId, onSelectInstance }: EKGGraphViewProps) {
+  // Defense in depth beyond the `ledger === null` case: getLedger() checks res.ok (2026-07-19 review,
+  // CRITICAL — an unchecked 401/503 error body used to reach here as a truthy-but-malformed object
+  // and crash on Object.keys(undefined), with no ErrorBoundary anywhere to contain it), but a
+  // component that's handed ledger data shouldn't ALSO assume every sub-field is always present.
+  // Guarding directly on `ledger`/`ledger.instances` (rather than through an intermediate boolean)
+  // also lets TS narrow `ledger` to non-null for the EKGGraphCanvas branch below.
+  if (!ledger || !ledger.instances || Object.keys(ledger.instances).length === 0) {
+    return (
+      <div style={emptyState} data-testid="ekg-empty-state">
+        No parts yet — ask the copilot to build something
+      </div>
+    );
+  }
+
+  // Constraint 10: no ReactFlow canvas mounted at all for the empty/malformed case (avoids any
+  // ReactFlow-in-jsdom concerns for the trivial case) — `ledger` here is narrowed non-null/non-empty.
   return (
-    <g data-testid={`ekg-edge-${edge.key}`}>
-      <line
-        x1={edge.x1} y1={edge.y1} x2={edge.x2} y2={edge.y2}
-        stroke={isConnection ? "#58a6ff" : "#3fb950"}
-        strokeWidth={1.5}
-        strokeDasharray={isConnection ? undefined : "6 3"}
-      />
-      <text x={mx} y={my} textAnchor="middle" fontSize={8} fill="#8b949e">{edge.label}</text>
-    </g>
+    <ReactFlowProvider>
+      <EKGGraphCanvas ledger={ledger} selectedInstanceId={selectedInstanceId} onSelectInstance={onSelectInstance} />
+    </ReactFlowProvider>
+  );
+}
+
+interface EKGGraphCanvasProps {
+  ledger: LedgerGraphData;
+  selectedInstanceId?: string | null;
+  onSelectInstance: (instanceId: string) => void;
+}
+
+function EKGGraphCanvas({ ledger, selectedInstanceId, onSelectInstance }: EKGGraphCanvasProps) {
+  const computed = useMemo(() => computeGraphData(ledger), [ledger]);
+  const [nodes, setNodes, onNodesChange] = useNodesState<EKGFlowNode>([]);
+  const [edges, setEdges] = useEdgesState<Edge>([]);
+
+  // Position-preservation (constraint 5) — its own effect, separate from edge recomputation, so a
+  // pure edge-label change doesn't disturb node positions and vice versa.
+  useEffect(() => {
+    setNodes((prev) => mergeNodePositions(prev, computed.nodes, selectedInstanceId));
+  }, [computed.nodes, selectedInstanceId, setNodes]);
+
+  // Edges — constraint 7: Connections render solid blue, symmetric, no arrowhead. Couplings render
+  // dashed green WITH a directional arrowhead pointing at the target (value flows FROM source INTO
+  // target) — this directional distinction is the whole point of "how they interact".
+  useEffect(() => {
+    setEdges(
+      computed.edges.map((e) => ({
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        label: e.label,
+        labelStyle: { fill: "#8b949e", fontSize: 9 },
+        labelBgStyle: { fill: "#0d1117", fillOpacity: 0.8 },
+        style:
+          e.kind === "connection"
+            ? { stroke: "#58a6ff", strokeWidth: 1.5 }
+            : { stroke: "#3fb950", strokeWidth: 1.5, strokeDasharray: "6 3" },
+        markerEnd: e.kind === "coupling" ? { type: MarkerType.ArrowClosed, color: "#3fb950" } : undefined,
+      })),
+    );
+  }, [computed.edges, setEdges]);
+
+  const handleNodeClick: NodeMouseHandler<EKGFlowNode> = useCallback(
+    (_event, node) => onSelectInstance(node.id),
+    [onSelectInstance],
+  );
+
+  return (
+    <div style={{ position: "absolute", inset: 0 }} data-testid="ekg-graph-view">
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        onNodesChange={onNodesChange}
+        nodeTypes={nodeTypes}
+        onNodeClick={handleNodeClick}
+        colorMode="dark"
+        fitView
+      >
+        <Background variant={BackgroundVariant.Dots} color="#30363d" bgColor="#0d1117" gap={16} size={1} />
+        <Controls style={{ background: "#161b22", border: "1px solid #30363d", borderRadius: 8 }} />
+        <MiniMap
+          style={{ background: "#161b22", border: "1px solid #30363d", borderRadius: 8 }}
+          maskColor="rgba(13, 17, 23, 0.65)"
+          bgColor="#161b22"
+          nodeColor={(n) => (((n as EKGFlowNode).data?.disconnected) ? "#d29922" : "#58a6ff")}
+        />
+      </ReactFlow>
+    </div>
   );
 }
 

@@ -607,7 +607,16 @@ export default function App() {
             <Viewport refreshKey={meshKey} hoveredInstanceId={hoveredInstanceId} instances={instances} />
           </div>
           {viewMode === "graph" && (
-            <EKGGraphView ledger={ledgerGraph} selectedInstanceId={active} onSelectInstance={selectInstance} />
+            // key={activeFileId} (2026-07-19 review, MEDIUM): EKGGraphView stays mounted across a file
+            // switch (gated on viewMode alone, not the active file), and its drag-position cache is
+            // keyed by bare instance id — but instance ids are minted per-file-locally
+            // (packages/transport/app.py's "{subsystem_type}_{n}" counter checks only the CURRENT
+            // file's own ledger), so two unrelated files' first bracket both mint "bracket_1". Without
+            // this key, dragging a node in file A and then switching to file B would silently reuse
+            // file A's leftover position for file B's same-named instance. A React `key` forces a full
+            // remount (fresh position cache) whenever the active file actually changes.
+            <EKGGraphView key={files.find((f) => f.is_active)?.id}
+                          ledger={ledgerGraph} selectedInstanceId={active} onSelectInstance={selectInstance} />
           )}
           {viewMode === "validation" && (
             <div style={validationTabWrap}>
