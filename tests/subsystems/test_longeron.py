@@ -43,6 +43,15 @@ def test_too_thin_violates_min_wall(base_ledger, seeded_with):
     assert any("min wall" in r for r in reasons)
 
 
+def test_too_thin_width_also_violates_min_wall(base_ledger, seeded_with):
+    """2026-07-16 regression guard: `_check` used to validate height_mm only, missing a too-thin
+    width_mm entirely even though width×height is a single rectangular cross-section where either
+    dimension can be the thin one."""
+    led = seeded_with(base_ledger, "longeron", width_mm=(0.5, 0.1, 100))
+    reasons = get_subsystem("longeron").check_invariants(led)
+    assert any("min wall" in r for r in reasons)
+
+
 @pytest.mark.skipif(not HAS_B123D, reason="needs build123d")
 def test_geometry_builds(base_ledger, seeded):
     led = seeded(base_ledger, "longeron")

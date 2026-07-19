@@ -140,6 +140,15 @@ class Subsystem:
     # build-plan/reference/ and packages/truth_plane/CLAUDE.md: FEA methodology is FEA-engineer
     # territory; this flag is deliberately opt-in per subsystem, not inferred.
     fea_eligible: bool = False
+    # 2026-07-16 (min-wall floor gap found in the 2026-07-14 audit): packages/truth_plane/analysis.py's
+    # `_min_wall_ok` discovers a part's print-limiting dimension(s) by naming CONVENTION — any param
+    # ending in `thickness_mm`. That's right for a plate/bar whose thin dimension IS named that way, but
+    # wrong for a subsystem like `longeron` whose cross-section is `width_mm`/`height_mm` — the
+    # convention finds nothing, so the check silently no-ops (always True) no matter how thin the part
+    # actually is. Empty (default) = use the naming convention, unaffected. Non-empty = these EXACT
+    # param names are checked against the floor instead of guessing from the name — set this only when
+    # the naming convention would otherwise miss the part's real thin dimension(s).
+    min_wall_params: tuple[str, ...] = ()
     # 2026-07-03 (cascade deltas, prd4.md §2.2): an OPTIONAL packages.ledger.apply.CascadeRule this
     # subsystem declares — e.g. growing a bolt hole past the edge-distance rule cascades the plate
     # depth up instead of outright rejecting the request. None (default) = no cascades for this part.

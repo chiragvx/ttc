@@ -152,6 +152,8 @@ def test_bracket_still_gets_a_real_fs_path(monkeypatch):
                      "instances.root.params.thickness_mm": 3.0}),
     ("motor_mount", {"instances.root.params.plate_size_mm": 42.0, "instances.root.params.thickness_mm": 5.0}),
     ("mounting_plate_grid", {"instances.root.params.width_mm": 120.0, "instances.root.params.thickness_mm": 4.0}),
+    ("longeron", {"instances.root.params.length_mm": 400.0, "instances.root.params.width_mm": 20.0,
+                 "instances.root.params.height_mm": 10.0}),
 ])
 def test_newly_eligible_subsystem_reaches_the_solver(monkeypatch, name, params):
     calls = _fake_evaluate_fs(monkeypatch, factor_of_safety=7.0)
@@ -173,6 +175,31 @@ def test_min_wall_ok_generalizes_past_the_skin_thickness_name(monkeypatch):
 
     ok = analyze_geometry({"instances.root.params.length_mm": 100.0, "instances.root.params.width_mm": 20.0,
                            "instances.root.params.thickness_mm": 5.0}, "PLA", 40.0, "flat_bar")
+    assert ok.min_wall_ok is True
+
+
+@needs_b123d
+@needs_gmsh
+def test_min_wall_ok_catches_longeron_thin_cross_section(monkeypatch):
+    """longeron has no *_thickness_mm param at all — its cross-section is width_mm/height_mm — so the
+    naming-convention heuristic above finds nothing and used to always return True regardless of how
+    thin the part actually was (the 2026-07-14 audit gap). Regression guard for the fix: `longeron`
+    declares `min_wall_params=("width_mm", "height_mm")` and `_min_wall_ok` must honor it, catching
+    EITHER dimension going below the FDM floor."""
+    _fake_evaluate_fs(monkeypatch)
+    thin_height = analyze_geometry({"instances.root.params.length_mm": 400.0,
+                                    "instances.root.params.width_mm": 20.0,
+                                    "instances.root.params.height_mm": 0.3}, "PLA", 40.0, "longeron")
+    assert thin_height.min_wall_ok is False
+
+    thin_width = analyze_geometry({"instances.root.params.length_mm": 400.0,
+                                   "instances.root.params.width_mm": 0.3,
+                                   "instances.root.params.height_mm": 10.0}, "PLA", 40.0, "longeron")
+    assert thin_width.min_wall_ok is False
+
+    ok = analyze_geometry({"instances.root.params.length_mm": 400.0,
+                           "instances.root.params.width_mm": 20.0,
+                           "instances.root.params.height_mm": 10.0}, "PLA", 40.0, "longeron")
     assert ok.min_wall_ok is True
 
 

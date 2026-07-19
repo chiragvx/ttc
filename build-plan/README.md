@@ -457,6 +457,11 @@ Solver Tab + fatigue methodology) and **P7** (certification pass) — both need 
 values/criteria, not a self-certified approximation, per the same human-wall clause the rating-check
 slice cites.
 
+**2026-07-16 — closed the `longeron` min-wall false-pass** (see the FEA/optimize coverage bullet
+above for the full writeup): `Subsystem.min_wall_params` is the new, generalizable escape hatch for
+any future subsystem whose real wall-governing dimension isn't named `*_thickness_mm` — `longeron` is
+the first and only user of it today. Full suite green: **1687 passed, 29 skipped**.
+
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
 validated none of it. It's now split across 7 logical commits (ledger → truth-plane →
@@ -499,15 +504,23 @@ got here" narrative — no longer "uncommitted", see above):
 - **FEA + optimize coverage expanded** (2026-07-03, +`longeron` 2026-07-06): the Gmsh+CalculiX FS
   pipeline (`/analyze`) covers **7 single-solid plate/bar subsystems** sharing the validated
   cantilever methodology (`fea_eligible=True` on bracket, flat_bar, cover_plate, motor_mount, panel,
-  mounting_plate_grid, longeron). One caveat found in the 2026-07-14 audit: `longeron`'s own
-  load-bearing dimension is `height_mm`, not a `*_thickness_mm` param, so the generic min-wall floor
-  check (`packages/truth_plane/analysis.py::_min_wall_ok`) is trivially satisfied for it — not yet
-  fixed, tracked above. The 3-variant sweep (`/optimize`) is now generalized the same way — it
-  discovers and sweeps ANY `fea_eligible` subsystem's own `*_thickness_mm` param instead of a
-  hardcoded bracket-only `skin_thickness_mm`. Every OTHER subsystem (compounds, cylinders,
-  assemblies, or anything not
-  explicitly vetted) returns FS = `None` from `/analyze` and `"unsupported"` from `/optimize` —
-  never a fabricated load case or a silently-wrong sweep.
+  mounting_plate_grid, longeron). **2026-07-16 — fixed:** the 2026-07-14 audit found `longeron`'s
+  cross-section (`width_mm`/`height_mm`) has no `*_thickness_mm`-named param, so the generic min-wall
+  floor check (`packages/truth_plane/analysis.py::_min_wall_ok`) — which discovers a part's
+  wall-governing dimension(s) by NAME convention — found nothing and silently, always returned
+  `min_wall_ok=True` regardless of how thin the part actually was. Fixed with an explicit override:
+  `Subsystem.min_wall_params` (new field, empty tuple default — every other subsystem unaffected)
+  lets a part declare its real wall-governing param names when the naming convention would miss them;
+  `longeron` sets `min_wall_params=("width_mm", "height_mm")`. Its own `_check` invariant (the
+  interactive-plane delta-apply gate) had the same gap in miniature — it validated `height_mm` only,
+  missing a too-thin `width_mm` entirely — now checks both. Regression-tested at both layers
+  (`tests/subsystems/test_longeron.py`, `tests/solvers/test_analysis_multi_subsystem.py`). The
+  3-variant sweep (`/optimize`) still discovers its target the same `*_thickness_mm`-name way and so
+  still honestly reports `"unsupported"` for `longeron` (no sweep offered, not a wrong one) —
+  deliberately left as a separate, lower-severity scope: a missing feature, not a false safety
+  pass. Every non-fea_eligible subsystem (compounds, cylinders, assemblies, or anything not explicitly
+  vetted) returns FS = `None` from `/analyze` and `"unsupported"` from `/optimize` — never a
+  fabricated load case or a silently-wrong sweep.
 - **Multi-instance outliner, now with real assembly composition** (2026-07-03): a project can hold
   more than one independently-editable part (e.g. a bracket AND a standoff in the same project).
   Backend: `/instances` CRUD in `packages/transport/app.py`, backed by proper **`INSTANCE_ADDED`/

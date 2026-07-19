@@ -1,4 +1,14 @@
-"""Longeron — a long straight structural rail, a fuselage/wing spanwise member."""
+"""Longeron — a long straight structural rail, a fuselage/wing spanwise member.
+
+2026-07-16 — the FDM min-wall floor here now covers BOTH cross-section dimensions (`width_mm` and
+`height_mm`), not just `height_mm`: this is a genuine rectangular cross-section, either dimension can
+be the thin one depending on how a request sizes it, and the prior single-dimension check let a
+too-thin `width_mm` through unflagged. Also registers `min_wall_params` on the Subsystem so
+`packages/truth_plane/analysis.py::_min_wall_ok`'s FEA-time floor check (which normally finds a
+subsystem's thin dimension via the `*_thickness_mm` naming convention) actually sees this part's real
+wall-governing dimensions instead of silently no-oping (longeron has no `*_thickness_mm`-named param
+at all, so the convention previously found nothing and the check always passed regardless of how thin
+the part actually was)."""
 
 from __future__ import annotations
 
@@ -34,9 +44,12 @@ def _volume(p):
 
 
 def _check(p):
+    violations = []
+    if p.width_mm < _MIN_WALL_MM:
+        violations.append(f"width {p.width_mm:.2f} mm < min wall {_MIN_WALL_MM} mm")
     if p.height_mm < _MIN_WALL_MM:
-        return [f"height {p.height_mm:.2f} mm < min wall {_MIN_WALL_MM} mm"]
-    return []
+        violations.append(f"height {p.height_mm:.2f} mm < min wall {_MIN_WALL_MM} mm")
+    return violations
 
 
 LONGERON = register_subsystem(Subsystem(
@@ -51,4 +64,5 @@ LONGERON = register_subsystem(Subsystem(
     ],
     build=_build, volume=_volume, invariants=_check,
     fea_eligible=True,  # single Box, span along X — the validated cantilever methodology applies as-is
+    min_wall_params=("width_mm", "height_mm"),  # no *_thickness_mm param — see module docstring
 ))

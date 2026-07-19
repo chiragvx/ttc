@@ -41,11 +41,14 @@ def _plain_params(params: dict[str, float]) -> dict[str, float]:
     return {k.rsplit(".", 1)[-1]: v for k, v in params.items()}
 
 
-def _min_wall_ok(resolved_plain: dict[str, float]) -> bool:
-    """Generic min-wall floor: every param whose name ends in `thickness_mm` (the load-bearing
-    wall/skin lever for every currently fea_eligible subsystem) must clear the FDM floor. True when
-    the subsystem has no thickness-named param at all (nothing to violate)."""
-    thickness_like = [v for k, v in resolved_plain.items() if k.endswith("thickness_mm")]
+def _min_wall_ok(sub, resolved_plain: dict[str, float]) -> bool:
+    """Generic min-wall floor. Checks `sub.min_wall_params` if the subsystem declared explicit
+    wall-governing param names (2026-07-16 — for a part like `longeron` whose thin cross-section isn't
+    named `*_thickness_mm`); otherwise falls back to the naming CONVENTION, every param ending in
+    `thickness_mm` (the load-bearing wall/skin lever for every OTHER currently fea_eligible subsystem).
+    True when neither source finds a wall-governing param (nothing to violate)."""
+    names = sub.min_wall_params or tuple(k for k in resolved_plain if k.endswith("thickness_mm"))
+    thickness_like = [resolved_plain[n] for n in names if n in resolved_plain]
     return all(v >= MIN_WALL_MM for v in thickness_like) if thickness_like else True
 
 
@@ -113,7 +116,7 @@ def analyze_geometry(params: dict[str, float], material_name: str, load_n: float
         return Verdict(
             geometry_signature=sig, fingerprint=fingerprint(),
             factor_of_safety=None, mesh_converged=False, watertight=True,
-            min_wall_ok=_min_wall_ok(resolved_plain), material=material_name, load_n=load_n,
+            min_wall_ok=_min_wall_ok(sub, resolved_plain), material=material_name, load_n=load_n,
             solver_seconds=0.0,
         )
 
@@ -121,7 +124,7 @@ def analyze_geometry(params: dict[str, float], material_name: str, load_n: float
     uncut_solid = part.solid  # kept for the BC-face fragmentation check below, only used if cut
     sig = signature_from_params(params, geometry_params=tuple(params.keys()), cut_features=cuts)
     resolved_plain = {name: pd.value for name, pd in resolved.items()}
-    min_wall_ok = _min_wall_ok(resolved_plain)
+    min_wall_ok = _min_wall_ok(sub, resolved_plain)
 
     if cuts:
         from packages.subsystems.cut_features import apply_cut_features
