@@ -28,10 +28,16 @@ _DEFAULT_BASE = "https://openrouter.ai/api/v1"
 # single-shot delta-emitter path (`propose_delta`, used by POST /propose): a multi-part assembly
 # reply can plausibly need prose PLUS several add_instance entries PLUS deltas PLUS a rationale, all
 # in one completion, and the old shared 1024 cap could truncate that mid-tool-call-JSON with no
-# signal (see FIX 1 in the investigation this responds to). 3072 is a deliberate middle ground: high
-# enough that a real multi-op proposal has headroom, not so high that a stuck/rambling completion
-# burns an outsized latency+cost tax before the cap kicks in.
-_DEFAULT_CHAT_MAX_TOKENS = 3072
+# signal (see FIX 1 in the investigation this responds to). Raised again 2026-07-19 (3072 -> 6144)
+# after a live repro: a multi-part build ("plenum + flange + 4 runners") with a full prose plan
+# ahead of the tool call under tool_choice="auto" (prose and the tool-call JSON share this SAME
+# budget) truncated mid-tool-call-JSON at 3072 — "unterminated string"/"expecting delimiter" at an
+# arbitrary character position, confirmed in the server log. The tool surface has also grown
+# materially since 3072 was chosen (feature_ops/instance_ops/connection_ops/coupling_ops/
+# scope_proposal can now all coexist in one proposal). Still a deliberate middle ground, not
+# unbounded: high enough that a real multi-op proposal plus a prose explanation has headroom, not so
+# high that a stuck/rambling completion burns an outsized latency+cost tax before the cap kicks in.
+_DEFAULT_CHAT_MAX_TOKENS = 6144
 _SYSTEM = (
     "You are the geometric delta-emitter. Translate the user's intent into parameter deltas using the "
     "propose_parameter_delta function ONLY. Never write code or safety numbers. If the intent is "
@@ -198,6 +204,14 @@ class OpenRouterDeltaProvider(LLMProvider):
             yield ("done", None)  # keep the ('error', ...) then ('done', None) contract even here
             return
         saw_proposal = False
+        # Known BEFORE the parse loop below (finish_reason arrives on the final streamed chunk) — a
+        # completion cut off by the max_tokens cap ("length") already fully explains a malformed
+        # trailing tool-call arg string; the generic parse-failure message is redundant noise on top
+        # of the more specific, more actionable "cut off" message a few lines down, and it's the
+        # WRONG suggestion ("try rephrasing") for what's actually a "the reply was too big" problem
+        # (2026-07-19 live repro: a multi-part build request truncated mid-tool-call-JSON, and the
+        # user only needed to know to try a smaller request, not that "parsing failed").
+        truncated = finish_reason not in (None, "stop", "tool_calls")
         for args in tool_args.values():
             try:
                 proposal = DeltaProposal.model_validate(json.loads(args))
@@ -207,7 +221,8 @@ class OpenRouterDeltaProvider(LLMProvider):
                 # permanently-blank assistant bubble even though the request returned 200 OK. Log the
                 # real parse exception for debugging, but don't leak it verbatim to the user.
                 logger.warning("stream_chat: failed to parse tool-call arguments (%s)", e)
-                yield ("error", "the model's proposal could not be parsed — try rephrasing or asking again")
+                if not truncated:
+                    yield ("error", "the model's proposal could not be parsed — try rephrasing or asking again")
                 continue
             if proposal.deltas or proposal.feature_ops or proposal.instance_ops \
                     or proposal.connection_ops or proposal.coupling_ops or proposal.scope_proposal \
@@ -218,7 +233,7 @@ class OpenRouterDeltaProvider(LLMProvider):
             # don't yield it (the frontend would no-op on it anyway) and don't count it as having
             # "seen" a proposal, so the no-response check below still fires for this genuinely
             # empty case instead of also emitting a redundant, contradictory empty-proposal event.
-        if finish_reason not in (None, "stop", "tool_calls"):
+        if truncated:
             # e.g. "length" — cut off by the max_tokens cap; "content_filter" etc. also land here.
             yield ("error", "the response was cut off before finishing — try a shorter or simpler request")
         if not saw_token and not saw_proposal:

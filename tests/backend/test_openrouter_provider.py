@@ -130,6 +130,32 @@ def test_stream_chat_yields_tokens_then_proposal():
     assert events[-1] == ("done", None)
 
 
+def test_stream_chat_truncated_malformed_json_yields_only_the_cutoff_error_not_both():
+    # 2026-07-19 live repro: a multi-part build request ("plenum + flange + 4 runners") with a long
+    # prose plan ahead of the tool call (prose and the tool-call JSON share ONE token budget under
+    # tool_choice="auto") truncated mid-tool-call-JSON — confirmed in the server log ("unterminated
+    # string starting at: line 1 column 821"). Before this fix, that produced BOTH the generic
+    # "could not be parsed — try rephrasing" error (misleading — rephrasing an equally-large request
+    # would truncate again) AND the accurate "cut off... try a shorter or simpler request" error.
+    # Only the actionable one should surface.
+    def fake_stream(*, url, headers, json):
+        yield {"choices": [{"delta": {"content": "Here's the plan: ..."}}]}
+        tool_call = {"index": 0, "function": {
+            "arguments": '{"instance_ops":[{"op":"add_instance","subsystem_type":"'}}
+        yield {"choices": [{"delta": {"tool_calls": [tool_call]}}]}
+        yield {"choices": [{"delta": {}, "finish_reason": "length"}]}
+
+    prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+    events = list(prov.stream_chat(messages=[{"role": "user", "content": "build the manifold"}], ledger_json="{}"))
+
+    errors = [msg for k, msg in events if k == "error"]
+    assert len(errors) == 1
+    assert "cut off" in errors[0]
+    assert "could not be parsed" not in errors[0]
+    assert not any(k == "proposal" for k, _ in events)
+    assert events[-1] == ("done", None)
+
+
 def test_stream_chat_yields_a_proposal_for_scope_connection_or_coupling_ops_alone():
     # 2026-07-19 review (HIGH): the proposal-yield gate's OR-chain listed deltas/feature_ops/
     # instance_ops/request_clarification/suggestions but omitted connection_ops, coupling_ops, AND
