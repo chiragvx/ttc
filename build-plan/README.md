@@ -540,6 +540,22 @@ malformed/truncated string (no complete value anywhere) fails `raw_decode` ident
 real parse failure or a genuine truncation. The recovered case still logs what was ignored (never a
 *silent* discard). Full suite green: **1703 backend passed / 29 skipped**.
 
+**2026-07-20 — a fourth live bug, same recurring pattern, this time in `scope_proposal`.** Live
+testing a 25-part recon-UAV airframe: `scope_proposal.parts.20.count` / `.21.count` failed schema
+validation with `Input should be greater than or equal to 1`. The model represented a deferred part
+("payload bay ring/door — payload not chosen yet") as a `parts` row with `count: 0`, when
+`ScopeProposal` already has a dedicated `out_of_scope: list[str]` field for exactly that — it just
+used the wrong one. Fixed both ends: `_SCOPE_PROPOSAL_SECTION` now explicitly teaches deferred parts
+belong in `out_of_scope`, never a zero-count `parts` row; `ScopePartProposal.count`'s `ge=1` was also
+widened to `ge=0` regardless, since it's pure display data (no downstream apply logic reads it — see
+the class's own docstring), so the schema shouldn't crash an entire proposal over this either way,
+matching the same "the schema was stricter than the model's reasonable intent needed" pattern as the
+material/coupling-rationale fixes. A second failure on the same turn ("no response was generated for
+that message") showed no error in the log at all — genuinely empty generation, not a parseable bug;
+left uninvestigated pending a live repro with real diagnostic data, per this session's own standard
+of fixing only what's actually been reproduced. Full suite green: **1705 backend passed / 29
+skipped**.
+
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
 validated none of it. It's now split across 7 logical commits (ledger → truth-plane →

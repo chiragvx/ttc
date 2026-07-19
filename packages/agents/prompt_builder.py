@@ -406,6 +406,11 @@ optional `rationale`), what's explicitly `out_of_scope`, and any `open_questions
 This is NOT needed for a single well-understood catalog part ("make a bracket that holds 200N") — \
 that's just a plain `instance_ops` add, no `scope_proposal` needed.
 
+A part you are DEFERRING (not building this turn — e.g. "payload not chosen yet") belongs in \
+`out_of_scope` as a plain string, e.g. `"payload bay ring/door — payload not chosen yet"` — NEVER as \
+a `parts` row with `count: 0`. A `parts` row means "I am adding this now"; `count` must be the actual \
+number you're adding (≥ 1).
+
 `scope_proposal` is pure DISPLAY data — a receipt/summary, not an approval gate. This project's \
 established policy (packages/agents/CLAUDE.md, 2026-07-04) is that a proposal auto-applies through \
 the rules-validated path the instant it arrives; Undo is the safety net, not a pre-apply confirmation \

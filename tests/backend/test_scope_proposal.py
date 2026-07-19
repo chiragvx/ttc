@@ -79,6 +79,21 @@ def test_scope_part_proposal_defaults_count_and_lists():
     assert part.rationale is None
 
 
+def test_scope_part_proposal_accepts_a_zero_count_deferred_row():
+    # 2026-07-20 live repro: the model represented a deferred part ("payload bay ring/door — payload
+    # not chosen yet") as a `parts` row with count=0 instead of ScopeProposal.out_of_scope -- and the
+    # WHOLE tool call was rejected over it (count used to require >= 1). count is pure display data
+    # (no downstream apply logic reads it), so this must not crash the entire proposal either way --
+    # the prompt now also teaches the correct field, but the schema shouldn't depend on that alone.
+    part = ScopePartProposal(subsystem_type="payload_bay_ring", role="payload bay", count=0)
+    assert part.count == 0
+
+
+def test_scope_part_proposal_still_rejects_a_negative_count():
+    with pytest.raises(ValidationError):
+        ScopePartProposal(subsystem_type="standoff", role="motor arm", count=-1)
+
+
 def test_scope_part_proposal_rejects_unknown_field():
     with pytest.raises(ValidationError):
         ScopePartProposal(subsystem_type="standoff", role="motor arm", bogus_field="nope")

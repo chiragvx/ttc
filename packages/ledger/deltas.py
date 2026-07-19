@@ -189,7 +189,13 @@ class ScopePartProposal(BaseModel):
 
     subsystem_type: str
     role: str                              # short human label, e.g. "left wing", "battery bay"
-    count: int = Field(default=1, ge=1)
+    # 2026-07-20 live repro: the model represented a deferred part ("payload bay ring/door — not
+    # chosen yet") as a `parts` row with count=0 instead of ScopeProposal.out_of_scope (the field that
+    # actually exists for this), and the whole tool call was rejected over it. Widened ge=1 -> ge=0:
+    # this is pure display data (see class docstring — "nothing downstream parses individual entries
+    # in v1"), so a count=0 row is harmless either way; the prompt section below now also teaches the
+    # correct field to use, but the schema shouldn't crash the entire proposal over this either way.
+    count: int = Field(default=1, ge=0)
     operating_conditions: list[str] = Field(default_factory=list)
     rationale: Optional[str] = None
 
