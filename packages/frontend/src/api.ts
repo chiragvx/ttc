@@ -218,8 +218,22 @@ export async function setGoal(goal: string): Promise<RequirementsData> {
 export async function getRequirements(): Promise<RequirementsData> {
   return (await apiFetch("/requirements")).json();
 }
-export async function signoff(): Promise<void> {
-  await apiFetch("/signoff?reviewer=engineer", { method: "POST" });
+// 2026-07-19 — /signoff now 409s when the design hasn't actually been analyzed at its current
+// geometry (packages/transport/app.py::signoff). apiFetch doesn't throw on a non-2xx (see fetchMesh
+// above for this file's usual "caller checks res.ok" convention), so this used to silently resolve
+// even on a blocked sign-off -- the caller never knew review.state didn't actually flip.
+export interface SignoffResult {
+  ok: boolean;
+  message?: string;
+  unknowns?: string[];
+}
+export async function signoff(): Promise<SignoffResult> {
+  const res = await apiFetch("/signoff?reviewer=engineer", { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json();
+    return { ok: false, message: body.message, unknowns: body.unknowns };
+  }
+  return { ok: true };
 }
 
 // --- EKG graph view (topology) — READ-ONLY: the full instance/connection/coupling graph behind the

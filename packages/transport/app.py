@@ -1331,7 +1331,27 @@ def create_app() -> FastAPI:
                 "job_message": job_status.message if job_status else None}
 
     @router.post("/signoff")
-    def signoff(reviewer: str = "engineer"):
+    def signoff(reviewer: str = "engineer", instance_id: str | None = None):
+        # 2026-07-19 — this used to be a blind, unconditional flip: no ledger read, no check that the
+        # design being "reviewed" has ever actually been analyzed at its CURRENT geometry. A human (or
+        # a script hitting the REST API directly) could flip review.state to ENGINEER_REVIEWED on a
+        # design nobody had real numbers for. evaluate_export_gates already independently blocks export
+        # on an unknown safety scalar, so this never let a bad design through — but the sign-off itself
+        # asserted nothing. `gate.unknowns` (not `.eligible`/`.reasons`) is the right check: it holds
+        # only safety scalars that came back None, never the "not engineer-reviewed" reason (which is
+        # always present pre-signoff and isn't what this is checking) — deliberately NOT re-checking
+        # FS-vs-floor/mesh/watertight pass-fail here, since evaluate_export_gates already owns that
+        # decision at export time; this only requires that SOME real verdict exists for the geometry as
+        # it currently stands, mirroring /export/step's own instance-scoped gate check just above.
+        gate = evaluate_export_gates(state.resolved_ledger(instance_id), extra_findings=_all_gate_findings)
+        if gate.unknowns:
+            return JSONResponse(
+                status_code=409,
+                content={"status": "error",
+                         "message": "cannot sign off: one or more safety inputs are unknown for the "
+                                    "current design — analyze it first",
+                         "unknowns": gate.unknowns},
+            )
         state.signoff(reviewer)
         return {"ok": True}
 

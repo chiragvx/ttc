@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { analyze, analyzeStatus, optimize } from "./api";
+import { analyze, analyzeStatus, optimize, signoff } from "./api";
 
 // Captures exactly what apiFetch handed to the real fetch() — this is what pins down the
 // 2026-07-15 load-threading fix: analyze()/analyzeStatus()/optimize() must OMIT load_n by default
@@ -61,5 +61,25 @@ describe("apiFetch auth header (settings.ts::loadSettings -> Authorization)", ()
     const calls = stubFetch();
     await analyze();
     expect((calls[0].init?.headers as Record<string, string>).Authorization).toBe("Bearer secret123");
+  });
+});
+
+// 2026-07-19 -- /signoff now 409s on a design that hasn't been analyzed at its current geometry
+// (packages/transport/app.py::signoff). signoff() used to return bare Promise<void>, silently
+// resolving even when the backend refused to flip review.state; it must now surface the block.
+describe("signoff", () => {
+  it("resolves { ok: true } on a normal 200 response", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })));
+    await expect(signoff()).resolves.toEqual({ ok: true });
+  });
+
+  it("resolves { ok: false, message, unknowns } on a 409 instead of throwing", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      JSON.stringify({ status: "error", message: "cannot sign off: ...", unknowns: ["factor_of_safety"] }),
+      { status: 409 },
+    )));
+    await expect(signoff()).resolves.toEqual({
+      ok: false, message: "cannot sign off: ...", unknowns: ["factor_of_safety"],
+    });
   });
 });

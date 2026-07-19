@@ -477,7 +477,11 @@ export default function App() {
   };
 
   const signAndExport = async () => {
-    await signoff();
+    const s = await signoff();
+    if (!s.ok) {
+      setAnalysis((a) => ({ ...a, status: "error", errorMessage: s.message ?? "sign-off blocked" }));
+      return;
+    }
     const e = await exportCheck();
     setAnalysis((a) => ({ ...a, exportStatus: e.status }));
     if (e.status === "EXPORT_ELIGIBLE") window.open("/export/step", "_blank");

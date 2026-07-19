@@ -462,6 +462,23 @@ above for the full writeup): `Subsystem.min_wall_params` is the new, generalizab
 any future subsystem whose real wall-governing dimension isn't named `*_thickness_mm` — `longeron` is
 the first and only user of it today. Full suite green: **1687 passed, 29 skipped**.
 
+**2026-07-19 — grounded `POST /signoff`.** A red-team pass on `AIRCRAFT_DESIGN_PROCESS.md` §§6-8
+flagged a "Stage 4 ↔ Stage 2 loop-back" risk (a re-sized candidate re-consuming solver compute with no
+fresh human gate decision); tracing it against real code found the doc's 8-stage pipeline is a pure
+documentation overlay with no corresponding runtime construct, and the specific autonomous-AI-loop
+failure mode it worried about can't happen today (the LLM's only tool is `propose_parameter_delta` —
+it has no path to `/analyze`/`/optimize`). What tracing it down DID surface: `/signoff`
+(`packages/transport/app.py`) was a completely blind, ungrounded flip — no `instance_id`, no check
+that any real verdict exists for the design as it currently stands. `evaluate_export_gates` already
+independently blocks export on an unknown safety scalar, so this never let a bad design through, but
+the sign-off itself asserted nothing. Fixed: `/signoff` now takes the same `instance_id` param
+`/export/step` already does and 409s (with the `unknowns` list) unless a real, grounded verdict
+exists for that instance's current geometry — reusing `evaluate_export_gates`/`resolved_ledger`
+rather than a second, duplicated pass/fail check. Frontend `signoff()` (`api.ts`) stopped silently
+swallowing the 409 (it never checked `res.ok`); `signAndExport` (`App.tsx`) now surfaces a blocked
+sign-off through the same error-message path `runAnalyze`/`runOptimize` already use. Full suite
+green: **1690 backend passed / 29 skipped, 54 frontend passed**, `npm run build` clean.
+
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
 validated none of it. It's now split across 7 logical commits (ledger → truth-plane →

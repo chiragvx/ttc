@@ -255,3 +255,45 @@ def test_export_step_blocked_without_signoff_even_with_a_passing_fs(monkeypatch)
     assert resp.status_code == 409
     body = resp.json()
     assert any("not engineer-reviewed" in r for r in body["reasons"])
+
+
+def test_signoff_blocked_without_a_prior_analysis(monkeypatch):
+    """2026-07-19 fix: /signoff used to be a blind, unconditional flip -- no check that the design
+    being "reviewed" was ever actually analyzed. A never-analyzed instance must now 409, and
+    review.state must stay AI_PROPOSED (verified via /export/check still citing both reasons)."""
+    c = _client(monkeypatch)
+    resp = c.post("/signoff", params={"reviewer": "pe@example.com"})
+    assert resp.status_code == 409
+    body = resp.json()
+    assert "factor_of_safety" in body["unknowns"]
+
+    check = c.post("/export/check").json()
+    assert check["status"] == "EXPORT_BLOCKED"
+    assert any("not engineer-reviewed" in r for r in check["reasons"])  # sign-off truly never happened
+
+
+def test_signoff_succeeds_once_a_real_verdict_exists(monkeypatch):
+    """Regression guard for the fix above: the normal analyze-then-signoff path is unaffected."""
+    c = _client(monkeypatch)
+    c.post("/analyze")
+    resp = c.post("/signoff", params={"reviewer": "pe@example.com"})
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    assert c.post("/export/check").json()["status"] == "EXPORT_ELIGIBLE"
+
+
+def test_signoff_with_instance_id_is_gated_on_that_instances_own_verdict(monkeypatch):
+    """Same bug class as test_export_step_with_instance_id_is_gated_on_that_instances_own_verdict_not_
+    the_active_ones (test_manufacturing.py) -- a per-instance sign-off must check THAT instance's own
+    verdict, not whatever happens to be active. 'other' has no verdict of its own even though 'root'
+    (the active instance) does."""
+    c = _client(monkeypatch)
+    c.post("/analyze")  # grounds 'root'
+    c.post("/instances", json={"subsystem_type": "bracket", "instance_id": "other"})  # never analyzed
+
+    resp = c.post("/signoff", params={"reviewer": "pe@example.com", "instance_id": "other"})
+    assert resp.status_code == 409
+    assert "factor_of_safety" in resp.json()["unknowns"]
+
+    resp = c.post("/signoff", params={"reviewer": "pe@example.com", "instance_id": "root"})
+    assert resp.status_code == 200
