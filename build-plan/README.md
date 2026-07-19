@@ -500,6 +500,28 @@ material names — the actual missing piece, without which the plumbing fix alon
 Reproduced the exact failing tool-call payload directly and confirmed it now validates. Full suite
 green: **1700 backend passed / 29 skipped**, frontend unchanged at 54 passed, `npm run build` clean.
 
+**2026-07-19 — two more bugs found live building an 11-part satellite-bus assembly, both fixed.**
+First: `vite.config.ts`'s dev proxy was missing `/connection_ops`, `/coupling_ops`, and
+`/manufacturing` entirely — all three were added to the backend across earlier Engineering Graph work
+but the dev-proxy list was never updated (invisible under docker-compose, which serves everything
+same-origin with no proxy at all), so every one of them silently 404'd under `npm run dev`. Surfaced
+as `"coupling endpoint unavailable (HTTP 404)"` mid-proposal. Fixed by adding the three missing proxy
+entries; verified a real POST now reaches the backend (a 422 on a deliberately malformed test body,
+not a 404). Second, once that was fixed: the copilot's retry hit `stream_chat: tool-call arguments
+failed schema validation... coupling_ops.0.inputs.0.rationale — Extra inputs are not permitted` — it
+naturally wanted to explain EACH coupling input separately (why this mass, why this acceleration), but
+`CouplingInputItem` (`deltas.py`) had no `rationale` field at all — only the parent `CouplingOp` did —
+so `extra="forbid"` rejected the whole tool call. Confirmed `rationale` is never read anywhere in the
+backend on either `ParameterDelta` or `CouplingOp` (grep: zero readers) — it exists purely as a legal
+place for the LLM to put its reasoning without crashing the call. Added the same field to
+`CouplingInputItem`; reproduced the exact failing payload and confirmed it now validates. Also
+confirmed, live, that the "loose kit" self-check is working as designed: none of `bulkhead_frame`/
+`longeron`/`battery_tray`/`deck_plate`/`gps_mast` declare interfaces yet, so `connection_ops` genuinely
+wasn't available, and the copilot correctly fell back to plain positioning + an honest "rough first
+pass, not physically touching yet" caveat rather than fabricating a connection — the geometric
+self-check independently caught and reported the resulting gaps. Full suite green: **1701 backend
+passed / 29 skipped**, frontend 54 passed, `npm run build` clean.
+
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
 validated none of it. It's now split across 7 logical commits (ledger → truth-plane →
