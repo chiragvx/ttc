@@ -592,8 +592,18 @@ export default function App() {
               mesh/features) that a conditional `viewMode === "3d" && <Viewport .../>` would tear down
               and rebuild from scratch on every round-trip through another tab, silently resetting the
               camera/selection and re-fetching /mesh + /mesh/features even though refreshKey hadn't
-              actually changed (2026-07-19 review, MEDIUM). */}
-          <div style={{ display: viewMode === "3d" ? "contents" : "none" }}>
+              actually changed (2026-07-19 review, MEDIUM).
+              `position:absolute; inset:0` (NOT `display:contents`) — react-three-fiber's <Canvas> sizes
+              itself to 100%/100% of its immediate parent; `display:contents` removes that parent from
+              the box tree entirely, which is a known source of percentage-sizing/ResizeObserver edge
+              cases across browsers. `visibility:hidden` (not `display:none`) hides it, keeps it mounted
+              with a real, stable size at all times, and implicitly removes it from hit-testing —
+              `pointerEvents:none` while hidden is belt-and-suspenders on top of that. */}
+          <div style={{
+            position: "absolute", inset: 0,
+            visibility: viewMode === "3d" ? "visible" : "hidden",
+            pointerEvents: viewMode === "3d" ? "auto" : "none",
+          }}>
             <Viewport refreshKey={meshKey} hoveredInstanceId={hoveredInstanceId} instances={instances} />
           </div>
           {viewMode === "graph" && (
@@ -651,8 +661,14 @@ export default function App() {
 // View-mode tab strip + Validation-tab styling — mirrors ModelPanel.tsx's own floating-panel look
 // (border #30363d, background rgba(22,27,34,0.92), 10px radius, blur) so the new control reads as
 // part of the same visual system rather than a bolted-on piece.
+//
+// top: 60 (NOT 16) — 2026-07-19 live bug: this used to sit at top:16/left:16, the EXACT same spot as
+// Viewport.tsx's own toolbar (Fit/Rotate/Blueprint — also top:16/left:16/zIndex:5), so the two
+// absolutely-positioned controls rendered directly on top of each other. ModelPanel occupies the
+// right side (top:16/right:16/bottom:16), so the tab strip moves DOWN instead, stacking below the
+// viewport toolbar rather than colliding with either existing floating panel.
 const tabStrip: React.CSSProperties = {
-  position: "absolute", top: 16, left: 16, zIndex: 5, display: "flex", gap: 2, padding: 4,
+  position: "absolute", top: 60, left: 16, zIndex: 5, display: "flex", gap: 2, padding: 4,
   background: "rgba(22,27,34,0.92)", border: "1px solid #30363d", borderRadius: 10,
   boxShadow: "0 8px 24px rgba(0,0,0,0.45)", backdropFilter: "blur(6px)",
 };
@@ -662,7 +678,7 @@ const tabBtn: React.CSSProperties = {
 };
 const tabBtnActive: React.CSSProperties = { background: "#1f6feb22", color: "#c9d1d9" };
 const validationTabWrap: React.CSSProperties = {
-  position: "absolute", inset: 0, paddingTop: 64, paddingLeft: 24, paddingRight: 24, paddingBottom: 24,
+  position: "absolute", inset: 0, paddingTop: 108, paddingLeft: 24, paddingRight: 24, paddingBottom: 24,
   overflowY: "auto", display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 12,
   background: "#0d1117",
 };
