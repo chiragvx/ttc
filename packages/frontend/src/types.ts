@@ -292,9 +292,14 @@ export interface ManufacturingManifest {
 // /ledger returns (a full model_dump — these interfaces only declare the fields the graph view
 // reads; the real payload has more, e.g. Instance.params/transform/parent_id/cut_features, which
 // structural typing lets us ignore here).
+export interface LedgerParameter {
+  value: number;
+  unit: string;
+}
 export interface LedgerInstance {
   id: string;
   subsystem_type: string;
+  params?: Record<string, LedgerParameter>;
 }
 export interface LedgerInterfaceRef {
   instance_id: string;

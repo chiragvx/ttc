@@ -50,10 +50,16 @@ export interface EKGGraphViewProps {
 // "extract the risky pure logic, test it directly" pattern (see
 // packages/agents/openrouter_provider.py::_looks_truncated).
 
+export interface EKGParamEntry {
+  key: string;
+  value: number;
+  unit: string;
+}
 export interface EKGComputedNode {
   id: string;
   subsystemType: string;
   disconnected: boolean;
+  params: EKGParamEntry[];
 }
 export interface EKGComputedEdge {
   id: string;
@@ -117,11 +123,18 @@ export function computeGraphData(ledger: LedgerGraphData): { nodes: EKGComputedN
     }
   }
 
-  const nodes: EKGComputedNode[] = ids.map((id) => ({
-    id,
-    subsystemType: instances[id].subsystem_type,
-    disconnected: !touched.has(id),
-  }));
+  const nodes: EKGComputedNode[] = ids.map((id) => {
+    const paramsRecord = instances[id].params ?? {};
+    const params: EKGParamEntry[] = Object.keys(paramsRecord)
+      .sort()
+      .map((key) => ({ key, value: paramsRecord[key].value, unit: paramsRecord[key].unit }));
+    return {
+      id,
+      subsystemType: instances[id].subsystem_type,
+      disconnected: !touched.has(id),
+      params,
+    };
+  });
 
   return { nodes, edges };
 }
@@ -153,6 +166,7 @@ export interface EKGNodeData extends Record<string, unknown> {
   subsystemType: string;
   disconnected: boolean;
   selected: boolean;
+  params: EKGParamEntry[];
 }
 export type EKGFlowNode = Node<EKGNodeData, "ekgCard">;
 
@@ -180,6 +194,7 @@ export function mergeNodePositions(
       subsystemType: cn.subsystemType,
       disconnected: cn.disconnected,
       selected: selectedInstanceId != null && cn.id === selectedInstanceId,
+      params: cn.params,
     };
     // Spread `...prev` (2026-07-19 review, LOW) — a bare `{id, type, position, data}` literal here
     // drops every xyflow-OWNED field (measured, dragging, internal selected/z) the library itself
@@ -201,8 +216,21 @@ export function mergeNodePositions(
 // applied to a card instead of a circle). Selected -> a distinct blue (#58a6ff) ring, layered
 // independently of the disconnected border so a node that is BOTH selected and disconnected shows
 // both stylings at once (neither silently overrides the other).
+// How many params to show directly on the card before collapsing the rest into a "+N more" line —
+// bounds card height for a heavily-parameterized subsystem instead of letting it grow unbounded.
+const _MAX_VISIBLE_PARAMS = 6;
+
+// ParameterDef.value is a float (packages/ledger/parameter.py) — round for display so e.g. 85.00000001
+// mm (an FP artifact from an earlier derived edit) doesn't render as noise; toFixed(2) then re-parse
+// through Number() to also drop trailing zeros (1.50 -> "1.5", 85.00 -> "85").
+function formatParamValue(value: number): string {
+  return Number(value.toFixed(2)).toString();
+}
+
 function EKGCardNode({ id, data }: NodeProps<EKGFlowNode>) {
-  const { subsystemType, disconnected, selected } = data;
+  const { subsystemType, disconnected, selected, params } = data;
+  const visibleParams = params.slice(0, _MAX_VISIBLE_PARAMS);
+  const hiddenCount = params.length - visibleParams.length;
   return (
     <div
       data-testid={`ekg-node-${id}`}
@@ -213,7 +241,8 @@ function EKGCardNode({ id, data }: NodeProps<EKGFlowNode>) {
         border: disconnected ? "1.5px dashed #d29922" : "1px solid #30363d",
         borderRadius: 8,
         padding: "8px 12px",
-        minWidth: 130,
+        minWidth: 150,
+        maxWidth: 220,
         boxShadow: selected ? "0 0 0 2px #58a6ff" : "none",
         cursor: "pointer",
       }}
@@ -221,6 +250,25 @@ function EKGCardNode({ id, data }: NodeProps<EKGFlowNode>) {
       <Handle type="target" position={Position.Top} style={handleStyle} />
       <div style={{ fontWeight: 700, fontSize: 12, color: "#c9d1d9" }}>{id}</div>
       <div style={{ fontSize: 10, color: "#8b949e", marginTop: 2 }}>{subsystemType}</div>
+      {visibleParams.length > 0 && (
+        <div style={{ marginTop: 6, paddingTop: 6, borderTop: "1px solid #21262d" }} data-testid={`ekg-node-${id}-params`}>
+          {visibleParams.map((p) => (
+            <div
+              key={p.key}
+              style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 9, color: "#8b949e", lineHeight: 1.5 }}
+            >
+              <span>{p.key}</span>
+              <span style={{ color: "#c9d1d9" }}>
+                {formatParamValue(p.value)}
+                {p.unit ? ` ${p.unit}` : ""}
+              </span>
+            </div>
+          ))}
+          {hiddenCount > 0 && (
+            <div style={{ fontSize: 9, color: "#6e7681", marginTop: 2 }}>+{hiddenCount} more</div>
+          )}
+        </div>
+      )}
       <Handle type="source" position={Position.Bottom} style={handleStyle} />
     </div>
   );

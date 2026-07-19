@@ -38,7 +38,7 @@ describe("computeGraphData", () => {
     });
     const { nodes, edges } = computeGraphData(ledger);
     expect(edges).toEqual([]);
-    expect(nodes).toEqual([{ id: "i1", subsystemType: "bracket", disconnected: true }]);
+    expect(nodes).toEqual([{ id: "i1", subsystemType: "bracket", disconnected: true, params: [] }]);
   });
 
   it("skips a coupling input with a dangling from_instance instead of crashing", () => {
@@ -51,7 +51,7 @@ describe("computeGraphData", () => {
     const { nodes, edges } = computeGraphData(ledger);
     expect(edges).toEqual([]);
     // the target itself still resolves, so it's touched even though its only input's source is dangling
-    expect(nodes).toEqual([{ id: "i1", subsystemType: "bracket", disconnected: false }]);
+    expect(nodes).toEqual([{ id: "i1", subsystemType: "bracket", disconnected: false, params: [] }]);
   });
 
   it("does not crash and skips both a dangling connection AND a dangling coupling target on the same ledger", () => {
@@ -81,7 +81,7 @@ describe("computeGraphData", () => {
       ],
     });
     const { nodes } = computeGraphData(ledger);
-    expect(nodes).toEqual([{ id: "duct", subsystemType: "round_tube", disconnected: false }]);
+    expect(nodes).toEqual([{ id: "duct", subsystemType: "round_tube", disconnected: false, params: [] }]);
   });
 
   // 2026-07-19 review (MEDIUM), carried forward: when a coupling's target was dangling, the whole
@@ -97,7 +97,7 @@ describe("computeGraphData", () => {
       ],
     });
     const { nodes } = computeGraphData(ledger);
-    expect(nodes).toEqual([{ id: "plenum", subsystemType: "lofted_spindle", disconnected: false }]);
+    expect(nodes).toEqual([{ id: "plenum", subsystemType: "lofted_spindle", disconnected: false, params: [] }]);
   });
 
   it("flags a node touched by neither a connection nor a coupling as disconnected", () => {
@@ -144,6 +144,41 @@ describe("computeGraphData", () => {
     expect(() => computeGraphData(malformed)).not.toThrow();
     expect(computeGraphData(malformed)).toEqual({ nodes: [], edges: [] });
   });
+
+  it("extracts a node's params, sorted by key, for display on its card", () => {
+    const ledger = makeLedger({
+      instances: {
+        i1: {
+          id: "i1",
+          subsystem_type: "solar_panel_backing_plate",
+          params: {
+            width_mm: { value: 85, unit: "mm" },
+            thickness_mm: { value: 1.5, unit: "mm" },
+            n_holes: { value: 4, unit: "count" },
+          },
+        },
+      },
+    });
+    const { nodes } = computeGraphData(ledger);
+    expect(nodes).toEqual([
+      {
+        id: "i1",
+        subsystemType: "solar_panel_backing_plate",
+        disconnected: true,
+        params: [
+          { key: "n_holes", value: 4, unit: "count" },
+          { key: "thickness_mm", value: 1.5, unit: "mm" },
+          { key: "width_mm", value: 85, unit: "mm" },
+        ],
+      },
+    ]);
+  });
+
+  it("defaults to an empty params list when an instance declares no params field", () => {
+    const ledger = makeLedger({ instances: { i1: { id: "i1", subsystem_type: "bracket" } } });
+    const { nodes } = computeGraphData(ledger);
+    expect(nodes[0].params).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -157,13 +192,13 @@ describe("mergeNodePositions", () => {
       id,
       type: "ekgCard",
       position: { x, y },
-      data: { subsystemType: "bracket", disconnected, selected: false },
+      data: { subsystemType: "bracket", disconnected, selected: false, params: [] },
     };
   }
 
   it("keeps the EXISTING (possibly dragged) position for an id already present in prevNodes", () => {
     const prev = [flowNode("i1", 999, -42)];
-    const computed: EKGComputedNode[] = [{ id: "i1", subsystemType: "bracket", disconnected: false }];
+    const computed: EKGComputedNode[] = [{ id: "i1", subsystemType: "bracket", disconnected: false, params: [] }];
 
     const merged = mergeNodePositions(prev, computed, null);
 
@@ -172,7 +207,7 @@ describe("mergeNodePositions", () => {
   });
 
   it("assigns a fresh deterministic position to a genuinely new id", () => {
-    const computed: EKGComputedNode[] = [{ id: "brand-new", subsystemType: "spacer", disconnected: true }];
+    const computed: EKGComputedNode[] = [{ id: "brand-new", subsystemType: "spacer", disconnected: true, params: [] }];
 
     const merged = mergeNodePositions([], computed, null);
 
@@ -184,7 +219,7 @@ describe("mergeNodePositions", () => {
 
   it("drops an id no longer present in the freshly computed nodes", () => {
     const prev = [flowNode("stays", 1, 1), flowNode("gone", 2, 2)];
-    const computed: EKGComputedNode[] = [{ id: "stays", subsystemType: "bracket", disconnected: false }];
+    const computed: EKGComputedNode[] = [{ id: "stays", subsystemType: "bracket", disconnected: false, params: [] }];
 
     const merged = mergeNodePositions(prev, computed, null);
 
@@ -193,7 +228,7 @@ describe("mergeNodePositions", () => {
 
   it("refreshes data (disconnected/selected) on an existing node without touching its position", () => {
     const prev = [flowNode("i1", 5, 7, false)];
-    const computed: EKGComputedNode[] = [{ id: "i1", subsystemType: "bracket", disconnected: true }];
+    const computed: EKGComputedNode[] = [{ id: "i1", subsystemType: "bracket", disconnected: true, params: [] }];
 
     const merged = mergeNodePositions(prev, computed, "i1");
 
@@ -203,7 +238,7 @@ describe("mergeNodePositions", () => {
   });
 
   it("does not mark any node selected when selectedInstanceId is null/undefined", () => {
-    const computed: EKGComputedNode[] = [{ id: "i1", subsystemType: "bracket", disconnected: false }];
+    const computed: EKGComputedNode[] = [{ id: "i1", subsystemType: "bracket", disconnected: false, params: [] }];
     expect(mergeNodePositions([], computed, null)[0].data.selected).toBe(false);
     expect(mergeNodePositions([], computed, undefined)[0].data.selected).toBe(false);
   });
@@ -218,7 +253,7 @@ describe("mergeNodePositions", () => {
       measured: { width: 140, height: 60 },
       dragging: true,
     } as EKGFlowNode;
-    const computed: EKGComputedNode[] = [{ id: "i1", subsystemType: "bracket", disconnected: false }];
+    const computed: EKGComputedNode[] = [{ id: "i1", subsystemType: "bracket", disconnected: false, params: [] }];
 
     const merged = mergeNodePositions([prev], computed, null);
 
