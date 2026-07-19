@@ -53,6 +53,65 @@ def test_coupled_invariant_violation_is_conflict(ledger_factory):
     assert new.instances["root"].params["skin_thickness_mm"].value == 2.0  # unchanged
 
 
+# --- material_profile: the one string-valued target_node (2026-07-19 fix) ----------------------
+MATERIAL = "domains.structure.material_profile"
+
+
+def test_material_change_is_applied(base_ledger):
+    assert base_ledger.domains.structure.material_profile == "PLA"
+    new, out = apply_delta(base_ledger, ParameterDelta(target_node=MATERIAL, requested_value="ABS"))
+    assert out.status is ApplyStatus.APPLIED
+    assert out.old_value == "PLA" and out.new_value == "ABS"
+    assert new.domains.structure.material_profile == "ABS"
+    assert base_ledger.domains.structure.material_profile == "PLA"  # original untouched
+
+
+def test_unknown_material_name_is_rejected(base_ledger):
+    new, out = apply_delta(base_ledger, ParameterDelta(target_node=MATERIAL, requested_value="UNOBTANIUM"))
+    assert out.status is ApplyStatus.REJECTED
+    assert "unknown material" in out.message
+    assert new.domains.structure.material_profile == "PLA"  # never touched
+
+
+def test_numeric_value_sent_to_material_is_rejected(base_ledger):
+    """A real type mismatch (the LLM should send the material NAME as a string) — a clean REJECTED,
+    never a crash trying to compare a float against the material's own bounds (it has none)."""
+    new, out = apply_delta(base_ledger, ParameterDelta(target_node=MATERIAL, requested_value=6061.0))
+    assert out.status is ApplyStatus.REJECTED
+    assert "must be a string" in out.message
+    assert new.domains.structure.material_profile == "PLA"
+
+
+def test_string_value_sent_to_a_numeric_node_is_rejected(base_ledger):
+    """The mirror-image mistake: a string sent to a normal ParameterDef-backed node must also cleanly
+    REJECT, never crash comparing a str against (lo, hi) bounds."""
+    new, out = apply_delta(base_ledger, ParameterDelta(target_node=SKIN, requested_value="thick"))
+    assert out.status is ApplyStatus.REJECTED
+    assert "must be a number" in out.message
+    assert new.instances["root"].params["skin_thickness_mm"].value == 2.0
+
+
+def test_set_lock_on_material_is_rejected(base_ledger):
+    new, out = apply_delta(
+        base_ledger, ParameterDelta(target_node=MATERIAL, requested_value="ABS", set_lock=LockState.HARD_LOCK))
+    assert out.status is ApplyStatus.REJECTED
+    assert "cannot set_lock" in out.message
+    assert new.domains.structure.material_profile == "PLA"
+
+
+def test_material_change_never_invokes_cascade_rules(base_ledger):
+    """A material swap has no geometric cascade effect — cascade_rules must never even be CALLED (it
+    assumes a float requested_value; calling it here would break a subsystem's own arithmetic)."""
+    calls = []
+    def _spy_cascade(ledger, target, requested):
+        calls.append((target, requested))
+        return []
+    new, out = apply_delta(base_ledger, ParameterDelta(target_node=MATERIAL, requested_value="PETG"),
+                           cascade_rules=_spy_cascade)
+    assert out.status is ApplyStatus.APPLIED
+    assert calls == []
+
+
 # --- cascades: optional caller-supplied companion changes -------------------------------------
 
 

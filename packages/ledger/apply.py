@@ -74,8 +74,9 @@ class CascadeEffect:
 class ApplyOutcome:
     status: ApplyStatus
     target: str
-    old_value: float | None = None
-    new_value: float | None = None
+    # str for the one string-valued target_node (material_profile) — see apply_delta's string branch.
+    old_value: float | str | None = None
+    new_value: float | str | None = None
     message: str = ""
     cascades: list[CascadeEffect] = field(default_factory=list)
 
@@ -145,6 +146,46 @@ def check_invariants(
     return out
 
 
+def _apply_string_delta(
+    ledger: MasterParametricLedger,
+    delta: ParameterDelta,
+    parent,
+    attr: str,
+    current: str,
+    domain_checks: Optional[Callable[[MasterParametricLedger], list[str]]] = None,
+) -> tuple[MasterParametricLedger, ApplyOutcome]:
+    """apply_delta's counterpart for the one string-valued target_node that exists today
+    (domains.structure.material_profile) — a discrete, validated CHOICE, not a numeric ParameterDef:
+    no bounds/advisory concept, no HARD_LOCK (there's no ParameterDef here to lock), no cascades (a
+    material swap has no geometric cascade effect the way a numeric edit does — calling a subsystem's
+    own CascadeRule with a string would break its float-typed arithmetic)."""
+    from packages.ledger.bom import MATERIAL_DB  # same-package import — bom.py already lives in packages/ledger
+
+    target = delta.target_node
+    requested = delta.requested_value
+    if not isinstance(requested, str):
+        return ledger, ApplyOutcome(
+            ApplyStatus.REJECTED, target, old_value=current,
+            message=f"{target} is a string-valued node — requested_value must be a string, not {requested!r}")
+    if delta.set_lock is not None:
+        return ledger, ApplyOutcome(ApplyStatus.REJECTED, target, old_value=current,
+                                    message="cannot set_lock on a string-valued node")
+    if requested not in MATERIAL_DB:
+        return ledger, ApplyOutcome(
+            ApplyStatus.REJECTED, target, old_value=current,
+            message=f"unknown material {requested!r} (known: {sorted(MATERIAL_DB)})")
+
+    new_ledger = ledger.model_copy(deep=True)
+    n_parent, n_attr, _ = _resolve(new_ledger, target)
+    _set(n_parent, n_attr, requested)
+
+    violations = check_invariants(new_ledger, domain_checks)
+    if violations:
+        return ledger, ApplyOutcome(ApplyStatus.CONFLICT, target, old_value=current,
+                                    new_value=requested, message="; ".join(violations))
+    return new_ledger, ApplyOutcome(ApplyStatus.APPLIED, target, old_value=current, new_value=requested)
+
+
 def apply_delta(
     ledger: MasterParametricLedger,
     delta: ParameterDelta,
@@ -156,15 +197,25 @@ def apply_delta(
         return ledger, ApplyOutcome(ApplyStatus.REJECTED, target, message="LLM may not write derived/review nodes")
 
     parent, attr, current = _resolve(ledger, target)
-    if parent is None or not isinstance(current, ParameterDef):
+    if parent is None:
+        return ledger, ApplyOutcome(ApplyStatus.REJECTED, target, message="unknown or non-tunable node")
+
+    if isinstance(current, str):
+        return _apply_string_delta(ledger, delta, parent, attr, current, domain_checks)
+
+    if not isinstance(current, ParameterDef):
         return ledger, ApplyOutcome(ApplyStatus.REJECTED, target, message="unknown or non-tunable node")
 
     if current.is_locked:
         return ledger, ApplyOutcome(ApplyStatus.REJECTED, target, old_value=current.value,
                                     message="HARD_LOCK parameter is frozen")
 
-    lo, hi = current.bounds
     requested = delta.requested_value
+    if not isinstance(requested, (int, float)):
+        return ledger, ApplyOutcome(ApplyStatus.REJECTED, target, old_value=current.value,
+                                    message=f"{target} is a numeric node — requested_value must be a number, not {requested!r}")
+
+    lo, hi = current.bounds
     outside_recommended = not (lo <= requested <= hi)
 
     # Cascades: computed against the PRE-edit ledger (so a rule sees the "before" state), applied

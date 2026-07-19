@@ -3,7 +3,7 @@
 export interface ParamMutationRequest {
   event_type?: "PARAMETER_MUTATION_REQUEST";
   target_node: string;
-  requested_value: number;
+  requested_value: number | string; // string for the one string-valued node, material_profile
   set_lock?: string | null;
 }
 
@@ -16,8 +16,8 @@ export interface TelemetryDelta {
 
 export interface MutationApplied {
   node: string;
-  value: number;
-  old_value?: number | null; // pre-change value, for Undo
+  value: number | string; // string for the one string-valued node, material_profile
+  old_value?: number | string | null; // pre-change value, for Undo
   status: string; // APPLIED | APPLIED_ADVISORY
 }
 
@@ -80,7 +80,7 @@ export type ServerMessage = CascadeUpdate | MutationRejected;
 
 export interface ParameterDelta {
   target_node: string;
-  requested_value: number;
+  requested_value: number | string; // string for the one string-valued node, material_profile
   set_lock?: string | null;
   rationale?: string | null;
 }
@@ -339,9 +339,9 @@ export type ChatEvent =
 
 export interface DeltaOutcome {
   node: string;
-  requested: number;
-  applied: number | null;
-  oldValue: number | null;
+  requested: number | string; // string for the one string-valued node, material_profile
+  applied: number | string | null;
+  oldValue: number | string | null;
   status: "APPLIED" | "APPLIED_ADVISORY" | "REJECTED" | "CONFLICT";
   reason?: string;
   cascades?: CascadeEffect[]; // companion changes this SPECIFIC edit triggered, if any

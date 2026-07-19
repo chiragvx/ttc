@@ -20,7 +20,11 @@ from packages.ledger.schema import MasterParametricLedger
 from packages.subsystems import SUBSYSTEM_REGISTRY, SubsystemContext, geometry_paths, get_subsystem, get_subsystem_model
 
 # params relevant to EVERY printed part regardless of subsystem (shown alongside the subsystem's own
-# geometry params). Material is a string, not a ParameterDef, so it isn't listed here.
+# geometry params). Material is a string, not a ParameterDef, so `_param_schema` (which iterates
+# ParameterDefs only) can't list it here — it gets its own `_material_section` below instead, now that
+# apply_delta actually supports a string-valued target_node (2026-07-19; previously this section's own
+# stale comment said "isn't listed here" full stop, with no other section covering it either — a real
+# doc/schema mismatch the discipline fragments' own material-switching language contradicted).
 _CROSS_CUTTING: frozenset[str] = frozenset({BUILD_ORIENTATION, SLIP_FIT, OPERATING_TEMP, POWER_DISSIPATION})
 
 _BASE_RULES = """\
@@ -468,6 +472,24 @@ TARGET that's ambiguous (which instance/part), not the size.\
 """
 
 
+def _material_section(ledger: MasterParametricLedger) -> str:
+    """Material choice — a real design decision the copilot may propose, but a discrete, VALIDATED
+    string (checked against the material DB at apply time — apply.py::_apply_string_delta), not a
+    ParameterDef — see _CROSS_CUTTING's own comment for why _param_schema can't list it. Never invent
+    the material's OWN numbers (E/yield/density/service-temp) — those are read from the solver's
+    material DB by the structures/cost/thermal discipline fragments shown elsewhere in this prompt;
+    this section only says which target_node path to use and which names are valid to pick from."""
+    from packages.ledger.bom import MATERIAL_DB
+    from packages.ledger.nodes import MATERIAL
+
+    current = ledger.domains.structure.material_profile
+    names = ", ".join(sorted(MATERIAL_DB))
+    return (f"## Material\n`{MATERIAL}` (current: {current}) — allowed values: {names}.\n"
+            f"Propose via propose_parameter_delta with this exact target_node and the material NAME "
+            f"as a STRING requested_value (not a number, no units). See the discipline sections above "
+            f"for how each material trades off.")
+
+
 def _param_schema(ledger: MasterParametricLedger, relevant: frozenset[str] | None = None) -> str:
     """Stable parameter schema (paths + units + recommended range, no current values). When `relevant`
     is given, only those paths are shown — so an enclosure project doesn't advertise the bracket's
@@ -662,6 +684,7 @@ def build_system_prompt(subsystem_ctx: SubsystemContext | None, ledger: MasterPa
     if ledger.instances:
         relevant = _all_geometry_paths(ledger) | _CROSS_CUTTING
         sections.append(_param_schema(ledger, relevant))
+        sections.append(_material_section(ledger))
     return "\n\n".join(sections)
 
 

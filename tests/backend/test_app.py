@@ -41,6 +41,31 @@ def test_ws_valid_mutation_returns_cascade_and_persists():
     assert c.get("/ledger").json()['instances']['root']['params']["skin_thickness_mm"]["value"] == 3.0
 
 
+def test_ws_material_change_round_trips_through_the_real_mutate_path():
+    """2026-07-19 fix: the copilot's actual failure mode was ParameterDelta.requested_value rejecting
+    a material NAME outright at the wire — this drives the SAME real path (SessionState.mutate() via
+    the WS handler, not a direct apply_delta call) end-to-end for domains.structure.material_profile."""
+    c = _client()
+    assert c.get("/ledger").json()["domains"]["structure"]["material_profile"] == "PLA"
+    with c.websocket_connect("/ws") as ws:
+        ws.send_json({"target_node": "domains.structure.material_profile", "requested_value": "ABS"})
+        msg = ws.receive_json()
+    assert msg["event_type"] == "PARAMETER_CASCADE_UPDATE"
+    m = msg["mutations_applied"][0]
+    assert m["node"] == "domains.structure.material_profile"
+    assert m["value"] == "ABS" and m["old_value"] == "PLA" and m["status"] == "APPLIED"
+    assert c.get("/ledger").json()["domains"]["structure"]["material_profile"] == "ABS"
+
+
+def test_ws_unknown_material_name_is_nacked():
+    c = _client()
+    with c.websocket_connect("/ws") as ws:
+        ws.send_json({"target_node": "domains.structure.material_profile", "requested_value": "UNOBTANIUM"})
+        msg = ws.receive_json()
+    assert msg["event_type"] == "PARAMETER_MUTATION_REJECTED"
+    assert c.get("/ledger").json()["domains"]["structure"]["material_profile"] == "PLA"
+
+
 def test_ws_out_of_recommended_range_is_applied_advisory():
     """Soft bounds: WS mutation with a value past the recommended range still applies (with an
     APPLIED_ADVISORY status). The value is NOT clamped to the upper bound."""

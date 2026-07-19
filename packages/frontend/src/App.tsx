@@ -200,18 +200,26 @@ export default function App() {
   // of seconds while several overlapping multi-second tessellations piled up server-side). Exactly
   // the same bug class refreshAfterOps below was already built to fix for instance_ops/feature_ops
   // batches — this extends that same "refresh once per batch, not once per item" fix to deltas.
+  // The one string-valued target_node (packages/ledger/nodes.py::MATERIAL) — never belongs in the
+  // numeric `params` slider-state dict below (no material dropdown/slider exists in this UI today;
+  // ManufacturingCard reads it straight from the ledger instead), so setParams must skip it rather
+  // than stuff a string into a Record<string, number> every OTHER component assumes is numeric.
+  const MATERIAL_NODE = "domains.structure.material_profile";
+
   const mutate = async (
-    node: string, value: number, lock?: string | null, refresh: boolean = true,
+    node: string, value: number | string, lock?: string | null, refresh: boolean = true,
   ): Promise<ServerMessage> => {
     const resp = await send({ target_node: node, requested_value: value, set_lock: lock ?? null });
     if (resp.event_type === "PARAMETER_CASCADE_UPDATE") {
-      setParams((p) => {
-        const next = { ...p, [node]: resp.mutations_applied[0].value };
-        // a cascade may have moved a param OTHER than the one directly edited — reflect it in the
-        // sliders immediately, don't wait for the next full reload to show the real ledger state
-        for (const c of resp.cascades_applied) next[c.node] = c.value;
-        return next;
-      });
+      if (node !== MATERIAL_NODE) {
+        setParams((p) => {
+          const next = { ...p, [node]: resp.mutations_applied[0].value as number };
+          // a cascade may have moved a param OTHER than the one directly edited — reflect it in the
+          // sliders immediately, don't wait for the next full reload to show the real ledger state
+          for (const c of resp.cascades_applied) next[c.node] = c.value;
+          return next;
+        });
+      }
       // refresh every slider's valid clamp — a change to one param can shift another's valid range
       // (e.g. raising span_mm widens blend_taper_mm's valid max), so all update together, live
       if (resp.valid_ranges && resp.valid_ranges.length) {

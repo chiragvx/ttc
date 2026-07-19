@@ -21,7 +21,7 @@ class _Msg(BaseModel):
 class ParamMutationRequest(_Msg):
     event_type: Literal["PARAMETER_MUTATION_REQUEST"] = "PARAMETER_MUTATION_REQUEST"
     target_node: str
-    requested_value: float
+    requested_value: float | str  # str for the one string-valued node, material_profile (see deltas.py)
     set_lock: Optional[str] = None
 
 
@@ -35,8 +35,8 @@ class TelemetryDelta(_Msg):
 
 class MutationApplied(_Msg):
     node: str
-    value: float
-    old_value: Optional[float] = None  # pre-change value, so the client can Undo
+    value: float | str  # str for the one string-valued node, material_profile (see deltas.py)
+    old_value: Optional[float | str] = None  # pre-change value, so the client can Undo
     status: str  # APPLIED | APPLIED_ADVISORY
 
 

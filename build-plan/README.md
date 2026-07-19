@@ -479,6 +479,27 @@ swallowing the 409 (it never checked `res.ok`); `signAndExport` (`App.tsx`) now 
 sign-off through the same error-message path `runAnalyze`/`runOptimize` already use. Full suite
 green: **1690 backend passed / 29 skipped, 54 frontend passed**, `npm run build` clean.
 
+**2026-07-19 — the copilot could never actually change material.** Found live: asking for a hotter
+material broke the whole chat turn — `stream_chat: tool-call arguments failed schema validation...
+unable to parse string as a number, input_value='ABS'`. Root cause, two layers: (1)
+`ParameterDelta.requested_value` (`deltas.py`) was hard-typed `float`, so a material NAME could never
+be proposed at all; (2) even widened, `apply_delta` required the resolved target to be a `ParameterDef`
+— `domains.structure.material_profile` is a bare `str`, never wired into the apply path. Confirmed this
+is the *only* affected field (every other string field already has its own dedicated op type) and that
+switching material via chat had **never** worked — no test exercised it end-to-end, and
+`prompt_builder.py`'s own `_CROSS_CUTTING` comment said material "isn't listed here" with no other
+section covering it, even though the structures/cost discipline fragments already told the LLM it
+could reason about switching materials. Fixed at every layer: `requested_value: float | str`;
+`apply_delta` gained a real string-valued-target branch (validates against `bom.MATERIAL_DB`, rejects
+`set_lock`, skips `cascade_rules` — mirrors `InstanceOp.subsystem_type`'s existing validated-string
+pattern almost exactly); `protocol.py`/`types.ts` widened the wire types through to the frontend
+(`App.tsx`'s `mutate()` deliberately does NOT put material into the numeric `params` slider dict — no
+material UI control exists, so it's skipped there rather than lying about the type); and
+`prompt_builder.py` gained a new `_material_section` telling the copilot the exact target_node + valid
+material names — the actual missing piece, without which the plumbing fix alone wouldn't have helped.
+Reproduced the exact failing tool-call payload directly and confirmed it now validates. Full suite
+green: **1700 backend passed / 29 skipped**, frontend unchanged at 54 passed, `npm run build` clean.
+
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
 validated none of it. It's now split across 7 logical commits (ledger → truth-plane →

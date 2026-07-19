@@ -23,7 +23,12 @@ class ParameterDelta(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     target_node: str = Field(description="dotted ledger path, e.g. 'instances.root.params.skin_thickness_mm'")
-    requested_value: float
+    # 2026-07-19 — widened from a bare float: domains.structure.material_profile is a real, LLM-settable
+    # design choice but a bare str, not a ParameterDef (no bounds/lock to number). It's the ONLY string
+    # target_node that exists (see apply.py::apply_delta's string branch) — every other string field in
+    # the schema (ids, Instance.subsystem_type, connection/coupling refs) already has its own dedicated
+    # op type (InstanceOp/ConnectionOp/CouplingOp), never this one.
+    requested_value: float | str
     set_lock: Optional[LockState] = None
     rationale: Optional[str] = None
 
