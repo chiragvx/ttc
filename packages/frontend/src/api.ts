@@ -1,4 +1,4 @@
-import type { ChatEvent, ConnectionOp, CouplingOp, CutFeature, FeatureOp, InstanceOp, InstanceSnapshot, ManufacturingManifest, MeshData, PickableFeature, TelemetryDelta, ValidationResult } from "./types";
+import type { ChatEvent, ConnectionOp, CouplingOp, CutFeature, FeatureOp, InstanceOp, InstanceSnapshot, LedgerGraphData, ManufacturingManifest, MeshData, PickableFeature, TelemetryDelta, ValidationResult } from "./types";
 import { loadSettings, type LlmSettings } from "./settings";
 
 // REST + SSE calls to the FastAPI backend (proxied by Vite in dev).
@@ -222,6 +222,20 @@ export async function signoff(): Promise<void> {
   await apiFetch("/signoff?reviewer=engineer", { method: "POST" });
 }
 
+// --- EKG graph view (topology) — READ-ONLY: the full instance/connection/coupling graph behind the
+// Graph tab (EKGGraphView.tsx). Mirrors GET /ledger (packages/transport/app.py::get_ledger), which
+// returns the whole ledger via model_dump(); LedgerGraphData only types the subset the graph view
+// reads, so the extra fields (params/transform/cut_features/...) are ignored via structural typing.
+export async function getLedger(): Promise<LedgerGraphData> {
+  const res = await apiFetch("/ledger");
+  // AUTH_TOKEN/session-limit modes return a normal 200-parseable JSON error body ({"detail": "..."})
+  // on 401/503 — unchecked, that gets stored and handed to EKGGraphView as a malformed LedgerGraphData,
+  // crashing its render (Object.keys(undefined) etc.) with no ErrorBoundary anywhere to contain it
+  // (2026-07-19 review, CRITICAL).
+  if (!res.ok) throw new Error(`ledger unavailable (HTTP ${res.status})`);
+  return res.json();
+}
+
 // --- manufacturability outputs (Phase 6) — READ-ONLY make-manifest: each part's material/process
 // plus the assembly steps derived from the connection graph. Mirrors getRequirements() above.
 export async function getManufacturingManifest(): Promise<ManufacturingManifest> {
@@ -236,10 +250,15 @@ export async function getManufacturingManifest(): Promise<ManufacturingManifest>
 // Self-check the current assembly (2026-07-19). Geometric check always runs (no model); the visual
 // check runs only if a vision model is configured server-side (VISION_MODEL) and a key is passed.
 export async function runValidate(intent: string, apiKey?: string | null): Promise<ValidationResult> {
-  return (await apiFetch("/validate", {
+  const res = await apiFetch("/validate", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ intent, api_key: apiKey ?? null }),
-  })).json();
+  });
+  // same class of bug as getManufacturingManifest/getLedger's same-day fix: a 401/503 error body
+  // parses fine as JSON and would otherwise be stored as a fake ValidationResult, crashing
+  // ValidationCard's unconditional result.geometric.issues access (2026-07-19 review, HIGH).
+  if (!res.ok) throw new Error(`validate unavailable (HTTP ${res.status})`);
+  return res.json();
 }
 
 // Stream a conversational reply. Calls onEvent for each SSE event; abortable via signal.

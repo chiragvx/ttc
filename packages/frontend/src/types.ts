@@ -287,6 +287,43 @@ export interface ManufacturingManifest {
   assembly_steps: string[];
 }
 
+// --- EKG graph view (topology, distinct from the 3D viewport) — mirrors the subset of
+// packages/ledger/schema.py::Instance/Connection/InterfaceRef/Coupling/CouplingInput that GET
+// /ledger returns (a full model_dump — these interfaces only declare the fields the graph view
+// reads; the real payload has more, e.g. Instance.params/transform/parent_id/cut_features, which
+// structural typing lets us ignore here).
+export interface LedgerInstance {
+  id: string;
+  subsystem_type: string;
+}
+export interface LedgerInterfaceRef {
+  instance_id: string;
+  interface: string;
+}
+export interface LedgerConnection {
+  id: string;
+  a: LedgerInterfaceRef;
+  b: LedgerInterfaceRef;
+  kind: string;
+  gap_mm: number;
+}
+export interface LedgerCouplingInput {
+  value?: number | null;
+  from_instance?: string | null;
+  from_param?: string | null;
+}
+export interface LedgerCoupling {
+  id: string;
+  target_instance: string;
+  relation: string;
+  inputs: Record<string, LedgerCouplingInput>;
+}
+export interface LedgerGraphData {
+  instances: Record<string, LedgerInstance>;
+  connections: LedgerConnection[];
+  couplings: LedgerCoupling[];
+}
+
 // --- chat (SSE) ---
 export type ChatEvent =
   | { type: "token"; text: string }

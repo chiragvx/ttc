@@ -1,15 +1,17 @@
 import { useEffect, useState } from "react";
-import { activateInstance, addInstance, analyze, analyzeStatus, applyFeatureOp as postFeatureOp, applyConnectionOp as postConnectionOp, applyCouplingOp as postCouplingOp, applyInstanceOp as postInstanceOp, createFile, exportCheck, fetchTelemetry, getManufacturingManifest, getParams, getRequirements, getSubsystems, listFiles, listInstances, openFile, optimize, optimizeStatus, removeInstance, runValidate, setGoal, signoff, type FileRow, type InstanceRow, type ParamSpec, type RequirementsData, type SubsystemInfo } from "./api";
+import { activateInstance, addInstance, analyze, analyzeStatus, applyFeatureOp as postFeatureOp, applyConnectionOp as postConnectionOp, applyCouplingOp as postCouplingOp, applyInstanceOp as postInstanceOp, createFile, exportCheck, fetchTelemetry, getLedger, getManufacturingManifest, getParams, getRequirements, getSubsystems, listFiles, listInstances, openFile, optimize, optimizeStatus, removeInstance, runValidate, setGoal, signoff, type FileRow, type InstanceRow, type ParamSpec, type RequirementsData, type SubsystemInfo } from "./api";
 import { AnalysisBar, type AnalysisState } from "./AnalysisBar";
 import { OptimizeResult, type OptimizeResultData } from "./OptimizeResult";
 import { Chat } from "./chat/Chat";
+import { ValidationCard } from "./chat/ValidationCard";
+import { EKGGraphView } from "./EKGGraphView";
 import { ModelPanel } from "./ModelPanel";
 import { Hud } from "./Hud";
 import { SettingsModal } from "./SettingsModal";
 import { Viewport } from "./Viewport";
 import { loadSettings, type LlmSettings } from "./settings";
 import { useCadSocket } from "./useCadSocket";
-import { type ConnectionOp, type ConnectionOpOutcome, type CouplingOp, type CouplingOpOutcome, type DeltaOutcome, type FeatureOp, type FeatureOpOutcome, type InstanceOp, type InstanceOpOutcome, type ManufacturingManifest, type ParameterDelta, type ServerMessage } from "./types";
+import { type ConnectionOp, type ConnectionOpOutcome, type CouplingOp, type CouplingOpOutcome, type DeltaOutcome, type FeatureOp, type FeatureOpOutcome, type InstanceOp, type InstanceOpOutcome, type LedgerGraphData, type ManufacturingManifest, type ParameterDelta, type ServerMessage, type ValidationResult } from "./types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -40,12 +42,35 @@ export default function App() {
   // the assembly steps derived from the connection graph. Fetched/refreshed symmetrically with
   // `requirements` above — same triggers, no separate refresh path invented.
   const [manufacturingManifest, setManufacturingManifest] = useState<ManufacturingManifest | null>(null);
+  // View-mode tabs (2026-07-19): pure UI navigation over the SAME live model — never a gate on the
+  // chat/AI path (see packages/agents/CLAUDE.md's auto-apply policy). Defaults to "3d" so existing
+  // behavior is unaffected for anyone not using the new tabs.
+  const [viewMode, setViewMode] = useState<"graph" | "3d" | "validation">("3d");
+  const [ledgerGraph, setLedgerGraph] = useState<LedgerGraphData | null>(null);
+  // On-demand self-check for the Validation tab — distinct from Chat.tsx's per-message `validation`
+  // (ChatMessage.validation), which runs automatically after a turn changes geometry. This is the
+  // same runValidate() call, just triggered by hand from the tab instead of from a chat turn.
+  const [validationResult, setValidationResult] = useState<ValidationResult | null>(null);
+  const [validationRunning, setValidationRunning] = useState(false);
 
   const refreshRequirements = async () => {
     try { setRequirements(await getRequirements()); } catch { /* ignore */ }
   };
   const refreshManufacturingManifest = async () => {
     try { setManufacturingManifest(await getManufacturingManifest()); } catch { /* ignore */ }
+  };
+  // Refreshed from the SAME sites as refreshManufacturingManifest/refreshRequirements above
+  // (onGeometryChanged, runAnalyze, runOptimize, loadProject) so the graph view never goes stale
+  // after a chat turn changes the design while a different tab happens to be showing — plus once
+  // when the user switches into "graph" mode (see the effect below), so it's fresh on first view too.
+  const refreshLedgerGraph = async () => {
+    try { setLedgerGraph(await getLedger()); } catch { /* ignore */ }
+  };
+  const runStandaloneValidate = async () => {
+    setValidationRunning(true);
+    try { setValidationResult(await runValidate("", settings.apiKey)); }
+    catch { /* ignore */ }
+    finally { setValidationRunning(false); }
   };
   const applyGoal = async (goal: string) => {
     try { setRequirements(await setGoal(goal)); } catch { /* ignore */ }
@@ -79,6 +104,7 @@ export default function App() {
       setAnalysis((a) => ({ ...a, exportStatus: e.status }));
       void refreshRequirements();
       void refreshManufacturingManifest();
+      void refreshLedgerGraph();
       void refreshFiles();
       // adding/removing a part is a REST call, not a WS mutation — the socket never sees it, so
       // Mass/CG/Print/Cost would otherwise sit on stale (or "—") numbers until the next slider
@@ -144,6 +170,12 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
+  // Load the graph once when the user switches INTO "graph" mode — the other refresh sites below
+  // keep it fresh once it's been fetched the first time; this covers the tab's first-ever view.
+  useEffect(() => {
+    if (viewMode === "graph") void refreshLedgerGraph();
+  }, [viewMode]);
+
   // a geometry change invalidates the last analysis (resolver returns "unknown" -> export blocked);
   // it also re-grounds the goal compliance (FS back to unknown, mass/time recomputed)
   const onGeometryChanged = async () => {
@@ -152,6 +184,7 @@ export default function App() {
       setAnalysis((a) => ({ ...a, exportStatus: e.status, status: a.status === "done" ? "stale" : a.status }));
       void refreshRequirements();
       void refreshManufacturingManifest();
+      void refreshLedgerGraph();
     } catch {
       /* ignore */
     }
@@ -391,6 +424,7 @@ export default function App() {
       });
       void refreshRequirements(); // FS is now grounded -> the compliance readout can go green
       void refreshManufacturingManifest();
+      void refreshLedgerGraph();
     } catch {
       setAnalysis((a) => ({ ...a, status: "error" }));
     }
@@ -436,6 +470,7 @@ export default function App() {
       setAnalysis({ status: "done", fs: best?.fs ?? null, solverSeconds: null, exportStatus: e.status });
       void refreshRequirements();
       void refreshManufacturingManifest();
+      void refreshLedgerGraph();
     } catch {
       setAnalysis((a) => ({ ...a, status: "error" }));
     }
@@ -537,7 +572,48 @@ export default function App() {
           </div>
         </aside>
         <main style={{ position: "relative", minHeight: 0 }}>
-          <Viewport refreshKey={meshKey} hoveredInstanceId={hoveredInstanceId} instances={instances} />
+          {/* View-mode tab strip (2026-07-19) — pure UI navigation between the 3D viewport, the EKG
+              topology graph, and an on-demand self-check; never touches chat/apply/undo logic. Styled
+              to match ModelPanel's own floating-panel look (border/background/radius/blur below). */}
+          <div style={tabStrip}>
+            {(["3d", "graph", "validation"] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => setViewMode(m)}
+                style={{ ...tabBtn, ...(viewMode === m ? tabBtnActive : {}) }}
+              >
+                {m === "3d" ? "3D" : m === "graph" ? "Graph" : "Validation"}
+              </button>
+            ))}
+          </div>
+
+          {/* kept MOUNTED across tab switches (CSS-hidden, not conditionally rendered) — Viewport and
+              its inner Part component hold real local state (camera selection, autoRotate, the loaded
+              mesh/features) that a conditional `viewMode === "3d" && <Viewport .../>` would tear down
+              and rebuild from scratch on every round-trip through another tab, silently resetting the
+              camera/selection and re-fetching /mesh + /mesh/features even though refreshKey hadn't
+              actually changed (2026-07-19 review, MEDIUM). */}
+          <div style={{ display: viewMode === "3d" ? "contents" : "none" }}>
+            <Viewport refreshKey={meshKey} hoveredInstanceId={hoveredInstanceId} instances={instances} />
+          </div>
+          {viewMode === "graph" && (
+            <EKGGraphView ledger={ledgerGraph} selectedInstanceId={active} onSelectInstance={selectInstance} />
+          )}
+          {viewMode === "validation" && (
+            <div style={validationTabWrap}>
+              {validationResult ? (
+                <ValidationCard result={validationResult} />
+              ) : (
+                <div style={{ fontSize: 12, color: "#6e7681", fontStyle: "italic" }}>
+                  {validationRunning ? "Running self-check…" : "No self-check run yet — click below to run one."}
+                </div>
+              )}
+              <button onClick={() => void runStandaloneValidate()} disabled={validationRunning} style={reRunBtn}>
+                {validationRunning ? "Checking…" : "Re-run self-check"}
+              </button>
+            </div>
+          )}
+
           <ModelPanel
             instances={instances}
             subsystems={subsystems}
@@ -571,3 +647,26 @@ export default function App() {
     </div>
   );
 }
+
+// View-mode tab strip + Validation-tab styling — mirrors ModelPanel.tsx's own floating-panel look
+// (border #30363d, background rgba(22,27,34,0.92), 10px radius, blur) so the new control reads as
+// part of the same visual system rather than a bolted-on piece.
+const tabStrip: React.CSSProperties = {
+  position: "absolute", top: 16, left: 16, zIndex: 5, display: "flex", gap: 2, padding: 4,
+  background: "rgba(22,27,34,0.92)", border: "1px solid #30363d", borderRadius: 10,
+  boxShadow: "0 8px 24px rgba(0,0,0,0.45)", backdropFilter: "blur(6px)",
+};
+const tabBtn: React.CSSProperties = {
+  background: "none", border: "none", borderRadius: 6, color: "#8b949e",
+  cursor: "pointer", fontSize: 12, padding: "4px 10px",
+};
+const tabBtnActive: React.CSSProperties = { background: "#1f6feb22", color: "#c9d1d9" };
+const validationTabWrap: React.CSSProperties = {
+  position: "absolute", inset: 0, paddingTop: 64, paddingLeft: 24, paddingRight: 24, paddingBottom: 24,
+  overflowY: "auto", display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 12,
+  background: "#0d1117",
+};
+const reRunBtn: React.CSSProperties = {
+  background: "none", border: "1px solid #30363d", borderRadius: 6, color: "#c9d1d9",
+  cursor: "pointer", fontSize: 12, padding: "4px 10px",
+};
