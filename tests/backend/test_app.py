@@ -171,6 +171,45 @@ def test_export_check_blocks_on_an_over_constrained_connection():
     assert any("do not meet" in r for r in res["reasons"])
 
 
+@pytest.mark.skipif(not importlib.util.find_spec("build123d"), reason="needs build123d")
+def test_export_check_blocks_on_a_grossly_undersized_coupled_part():
+    # Phase 3 (2026-07-19, ENGINEERING_GRAPH_PLAN.md P3 gross-error): a coarse cantilever-over-
+    # bounding-box pre-check, reusing the ALREADY-VALIDATED closed-form oracle
+    # (packages/truth_plane/solvers/cases.py). round_bar defaults to dia_mm=10/height_mm=300 (a thin
+    # ~10x10x300mm bbox); a 50N coupling-derived force on PLA (yield 50 MPa) gives an analytical
+    # FS≈0.56 under the worst-case cantilever reading — well past the FS<1.0 block threshold.
+    c = TestClient(create_app())
+    crank = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_bar"}).json()["instance_id"]
+    c.post("/coupling_ops", json={"op": "add_coupling", "target_instance": crank,
+                                  "relation": "force_from_pressure_area",
+                                  "inputs": [{"name": "pressure_pa", "value": 1e8},
+                                             {"name": "area_mm2", "value": 0.5}]})  # 1e8 * 0.5e-6 = 50 N
+    res = c.post("/export/check").json()
+    assert res["status"] == "EXPORT_BLOCKED"
+    assert any("gross-error" in r and crank in r and "FS=" in r for r in res["reasons"])
+
+
+@pytest.mark.skipif(not importlib.util.find_spec("build123d"), reason="needs build123d")
+def test_export_check_does_not_gross_error_flag_a_reasonable_coupled_load():
+    c = TestClient(create_app())
+    crank = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_bar"}).json()["instance_id"]
+    c.post("/coupling_ops", json={"op": "add_coupling", "target_instance": crank,
+                                  "relation": "force_from_pressure_area",
+                                  "inputs": [{"name": "pressure_pa", "value": 2e6},
+                                             {"name": "area_mm2", "value": 0.5}]})  # 1 N — comfortably safe
+    res = c.post("/export/check").json()
+    assert not any("gross-error" in r for r in res["reasons"])
+
+
+def test_export_check_does_not_gross_error_flag_an_uncoupled_part():
+    # a part with NO coupling has no derived load to gross-error-check against — absent, not flagged
+    # (same "absent vs unknown" precedent as packages/couplings/resolve.py::derived_load_n).
+    c = TestClient(create_app())
+    c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_bar", "instance_id": "crank"})
+    res = c.post("/export/check").json()
+    assert not any("gross-error" in r for r in res["reasons"])
+
+
 def test_propose_without_key_returns_no_llm(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     res = _client().post("/propose", json={"intent": "make the skin 3 mm"}).json()

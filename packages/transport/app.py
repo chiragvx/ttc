@@ -241,23 +241,85 @@ def _valid_ranges(ledger: MasterParametricLedger, instance_id: str | None) -> li
     ]
 
 
+def _gross_error_findings(ledger: MasterParametricLedger) -> list[str]:
+    """Phase 3 (2026-07-19, ENGINEERING_GRAPH_PLAN.md P3 gross-error) — a DELIBERATELY coarse L0
+    pre-check: for every instance carrying a KNOWN coupling-derived force load (packages.couplings.
+    derived_load_n — a part with no coupling is skipped, not flagged), approximate it as a cantilever
+    beam over its OWN bounding box (worst-plausible orientation: the longest extent as the span, the
+    SMALLEST of the remaining two as the bending-resisting height — the weakest-case reading, since
+    this check exists to catch "an order of magnitude too thin", not to under-flag) and reuse the
+    ALREADY-VALIDATED closed-form Euler-Bernoulli oracle (packages/truth_plane/solvers/cases.py —
+    the SAME golden formula the real FEA pipeline is tested against, never a new physics derivation)
+    to compute a crude FS.
+
+    This is NOT a substitute for the real solver (/analyze) and NEVER writes ledger.derived.* — that
+    stays reserved for a real CalculiX verdict (Inversion #1). It only BLOCKS at an extreme shortfall
+    (analytical FS under this crude model < 1.0, i.e. even a rough worst-case guess says it yields);
+    anything less extreme is left to the real solver, matching the self-check's own "avoid a
+    false-positive block on a coarse heuristic" precedent (validate.py's embedding check downgrade).
+    A geometry build failure (or build123d unavailable in this environment) is swallowed here — a
+    broken build is already reported elsewhere (the self-check's degeneracy check); this function's
+    only job is the gross-error catch, not general build diagnostics."""
+    try:
+        from packages.truth_plane.solvers.cases import Cantilever
+    except ImportError:
+        return []  # build123d not installed — every geometry build below would fail too
+    from packages.couplings import derived_load_n
+    from packages.ledger.bom import material as material_lookup
+
+    mat = material_lookup(ledger.domains.structure.material_profile)
+    findings: list[str] = []
+    for iid, inst in ledger.instances.items():
+        load_n, _reason = derived_load_n(ledger, iid)
+        if load_n is None:
+            continue  # no coupling-derived load on this part — nothing to gross-error-check
+        sub = get_subsystem(inst.subsystem_type)
+        if sub.geometry_builder is None:
+            continue
+        try:
+            part = sub.geometry_builder(ledger, iid)
+        except Exception:
+            continue
+        if part is None:
+            continue
+        bbox = part.solid.bounding_box()
+        dims = sorted((float(bbox.size.X), float(bbox.size.Y), float(bbox.size.Z)))
+        height_mm, width_mm, length_mm = dims
+        if height_mm <= 0.0 or width_mm <= 0.0 or length_mm <= 0.0:
+            continue
+        cant = Cantilever(length_mm=length_mm, width_mm=width_mm, height_mm=height_mm,
+                          youngs_mod_mpa=mat.youngs_mod_mpa, poisson=mat.poisson,
+                          yield_mpa=mat.yield_mpa, tip_load_n=load_n)
+        fs = cant.analytical_fs
+        if fs < 1.0:
+            findings.append(
+                f"{iid}: coarse gross-error pre-check (worst-case cantilever over its own bounding "
+                f"box, {load_n:.1f} N derived load, {mat.name}) gives FS={fs:.2f} < 1.0 — looks "
+                f"drastically undersized for its derived load. This is a CRUDE approximation, not a "
+                f"grounded verdict — run /analyze for the real FS before trusting this either way")
+    return findings
+
+
 def _all_gate_findings(ledger):
     """Combined export-gate `extra_findings`: discipline gates (thermal, …) PLUS Phase-2 coupling gates
     (an unknown derived load blocks, same as an unknown FS) PLUS Phase-3 connection-graph topology
-    legality (dangling refs, rotation-needed mates, over-constrained/unsatisfied connections). One
-    injected callable so both gate call sites stay identical.
+    legality (dangling refs, rotation-needed mates, over-constrained/unsatisfied connections) PLUS
+    Phase-3 gross-error (a coarse cantilever-over-bounding-box pre-check). One injected callable so
+    both gate call sites stay identical.
 
     connection_issues() (packages/subsystems/placement.py) already fed the ADVISORY /validate
     self-check — a design with a genuinely broken connection graph could still pass the EXPORT gate
     silently, which is exactly the "invalid should block, not silently pass" gap this closes (2026-07-19,
     ENGINEERING_GRAPH_PLAN.md P3 topology-legality). Every issue it reports is a real graph invalidity
-    (not a missing-data case), so all go to `reasons` (blocking) — there's no `unknowns` counterpart."""
+    (not a missing-data case), so all go to `reasons` (blocking) — there's no `unknowns` counterpart.
+    Same for _gross_error_findings — see its own docstring."""
     from packages.couplings import coupling_gate_findings
     from packages.subsystems.placement import connection_issues
     r1, u1 = all_discipline_findings(ledger)
     r2, u2 = coupling_gate_findings(ledger)
     r3 = connection_issues(ledger)
-    return r1 + r2 + r3, u1 + u2
+    r4 = _gross_error_findings(ledger)
+    return r1 + r2 + r3 + r4, u1 + u2
 
 
 class ProposeRequest(BaseModel):
