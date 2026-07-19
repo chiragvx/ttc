@@ -569,6 +569,33 @@ Completion pricing checked too: ~$0.0002/1K tokens, so even a full 32768-token c
 fraction of a cent — no real cost/latency reason to keep it tight. Full suite green (unchanged):
 **1705 backend passed / 29 skipped**.
 
+**2026-07-20 — the real "aircraft design harness" bug: auto-layout scatters system parts hundreds of
+mm from the airframe, every time.** After the token-cap fix, a clean 21-part recon-UAV build still
+came back "not close to the prompt" — every single part flagged disconnected by the self-check,
+including the fuselage itself ("floats ~553mm from the nearest other part"), and the blueprint showed
+one lone fuselage blob plus a completely separate debris cluster. Root-caused by direct reproduction,
+not guessing: rebuilt the exact same ledger with the exact reported params and called
+`instance_world_offsets` directly — `winged_fuselage`'s Y-extent measured **1100mm (its wingspan)**,
+and `packages/subsystems/assembly.py`'s auto-layout stacks EVERY un-transformed, un-connected sibling
+in one shared linear queue along +Y — so placing the fuselage first shoved the entire rest of the
+21-part queue out past 1.1 meters before anything else got a position. Deterministic, 100%
+reproducible on every aircraft build with mixed part scale (confirmed fine for same-scale assemblies
+— the satellite bus, the acceptance test's heterogeneous 4-type composition — since none of those
+involve an `is_airframe_defining` body). Fixed by splitting the auto-layout cursor from one shared
+queue per parent to `(parent_id, is_airframe_defining)` — TWO independent lanes: the (usually
+singular) airframe-defining body gets its own lane, unaffected; every ordinary system/mounting
+sibling now shares its OWN lane, seeded independently, clustering near the origin (at/inside the
+airframe's own footprint) instead of past its wingspan. `is_airframe_defining` is `False` for every
+subsystem except 8 wing/fuselage-class parts, so any project without one collapses onto a single
+lane exactly as before — verified zero behavior change against the existing gap-math and
+heterogeneous-composition tests. Re-ran the exact original repro: every system part now lands within
+the fuselage's own span (0-725mm) instead of scattered 1115-1840mm away. Full suite green: **1707
+backend passed / 29 skipped**. (Two separate, already-flagged issues from the same build remain
+open, deliberately not addressed here: the copilot picked `winged_fuselage`, which has no declared
+interfaces, instead of `bwb_fuselage` for a request that explicitly wanted tip-mated wing panels —
+and no wing panels were added at all despite the scope table claiming 2; and the broader
+catalog-realism gap, boxes-as-mounts, already captured in the phase-2 memory.)
+
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
 validated none of it. It's now split across 7 logical commits (ledger → truth-plane →

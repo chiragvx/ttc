@@ -65,6 +65,42 @@ def test_three_auto_laid_out_siblings_all_get_a_gap_including_from_each_other(ba
     assert abs(gap_12 - gap_23) < 1e-6
 
 
+@pytest.mark.skipif(not HAS_B123D, reason="needs build123d")
+def test_airframe_defining_body_does_not_push_siblings_past_its_own_span(base_ledger, seeded):
+    """2026-07-20 live repro: a real 25-part recon-UAV build put `winged_fuselage` (Y-extent = its
+    500mm-default WINGSPAN) first in the auto-layout queue, and every other sibling shared the SAME
+    running cursor -- so the whole rest of the build got shoved out past the fuselage's own span,
+    landing hundreds of mm from the airframe (confirmed live: a self-check reporting the fuselage
+    "floats ~553mm from the nearest other part"). An is_airframe_defining body must get its OWN
+    auto-layout lane -- ordinary siblings must cluster near the origin (at/inside its footprint),
+    never past its span."""
+    led = seeded(base_ledger, "bracket")
+    led = add_instance(led, "winged_fuselage", "fuselage")
+    led = add_instance(led, "standoff", "sys1")
+    led = add_instance(led, "standoff", "sys2")
+    led = add_instance(led, "standoff", "sys3")
+    offsets = instance_world_offsets(led)
+
+    assert offsets["fuselage"][1] == 0.0  # first (only) member of the airframe lane, unaffected
+    fuselage_span = 500.0  # winged_fuselage's default span_mm
+    for sid in ("sys1", "sys2", "sys3"):
+        # must cluster near the origin, nowhere close to (let alone past) the fuselage's own span
+        assert offsets[sid][1] < fuselage_span / 4
+
+
+@pytest.mark.skipif(not HAS_B123D, reason="needs build123d")
+def test_two_airframe_defining_siblings_still_gap_against_each_other(base_ledger, seeded):
+    """The airframe lane must keep its OWN per-pair gap guarantee -- two is_airframe_defining bodies
+    (no connection between them) still get distinct, properly-spaced Y offsets from each other, same
+    as any other pair of auto-laid-out siblings."""
+    led = seeded(base_ledger, "bracket")
+    led = add_instance(led, "wing_panel", "wing_a")
+    led = add_instance(led, "wing_panel", "wing_b")
+    offsets = instance_world_offsets(led)
+    assert offsets["wing_a"][1] != offsets["wing_b"][1]
+    assert abs(offsets["wing_b"][1] - offsets["wing_a"][1]) > 0.0
+
+
 def test_explicit_transform_is_honored_over_autolayout(base_ledger, seeded):
     """An instance WITH an explicit transform ends up at exactly that offset (from its parent's
     resolved offset), bypassing auto-layout entirely. Constructed manually (not via add_instance,

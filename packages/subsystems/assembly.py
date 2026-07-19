@@ -40,6 +40,15 @@ _AUTO_LAYOUT_GAP_MM = 15.0
 _FALLBACK_SPACING_MM = 40.0
 
 
+def _is_airframe_defining(ledger: "MasterParametricLedger", instance_id: str) -> bool:
+    """True for a wing/fuselage-class body that sets the vehicle's own outer mold line (the same
+    flag `packages/agents/prompt_builder.py`'s airframe-pacing section reads) — used here to give
+    such a body its OWN auto-layout lane, separate from ordinary system/mounting parts. See
+    `instance_world_offsets`'s 2026-07-20 docstring note for why."""
+    inst = ledger.instances[instance_id]
+    return get_subsystem(inst.subsystem_type).is_airframe_defining
+
+
 def _y_extent_mm(ledger: "MasterParametricLedger", instance_id: str) -> float:
     """Build `instance_id`'s geometry ONCE and read its bounding box's Y-span, for auto-layout
     spacing. Falls back to `_FALLBACK_SPACING_MM` if the instance's subsystem has no
@@ -77,6 +86,22 @@ def instance_world_offsets(ledger: "MasterParametricLedger") -> dict[str, tuple[
     instance, which is what actually guarantees no overlap regardless of how consecutive siblings'
     extents compare. (Siblings that carry an explicit transform were positioned by the user and are
     not folded into this running stack — they don't consume auto-layout "slots".)
+
+    2026-07-20 fix: the cursor is actually keyed by `(parent_id, is_airframe_defining)`, TWO
+    independent lanes per parent group, not one. A single shared queue broke completely the moment
+    one sibling was an `is_airframe_defining` body (a wing/fuselage-class part, e.g.
+    `winged_fuselage`): its Y-extent is its WINGSPAN (a real live repro measured 1100mm), so placing
+    it first shoved the ENTIRE REST of the queue out past 1.1 meters before anything else got a
+    position — every small system/mounting part ended up clustered tightly against each OTHER but
+    uniformly far from the airframe itself (confirmed: a self-check reporting "floats ~553mm from
+    the nearest other part" on the fuselage, and a blueprint showing one lone airframe blob plus a
+    separate debris cluster). Splitting the cursor gives the (rare, usually singular) airframe-
+    defining body its own lane while every non-airframe sibling shares its OWN lane seeded
+    independently — so small system parts now cluster near the ORIGIN (i.e. at/inside the airframe
+    body's own footprint) instead of past its wingspan. `is_airframe_defining` is False for every
+    subsystem except 8 wing/fuselage-class parts, so a project with none of those 8 present (the
+    overwhelming common case — brackets, enclosures, rovers, satellites, ...) collapses onto a
+    single lane exactly as before: zero behavior change there.
     """
     offsets: dict[str, tuple[float, float, float]] = {}
     # Phase 1 (2026-07-19): a part joined by a typed Connection gets its world translation from the
@@ -85,10 +110,11 @@ def instance_world_offsets(ledger: "MasterParametricLedger") -> dict[str, tuple[
     # parent-chain/auto-layout logic below; everything without a connection is unchanged.
     from packages.subsystems.placement import resolve_placements
     mated = resolve_placements(ledger)  # {instance_id: world Transform}; empty when there are no connections
-    # cumulative Y-extent already claimed in a parent's stack (seeded with the parent's OWN extent
-    # for a real parent, 0.0 for the top-level stack, then grown by each auto-placed child's
-    # extent), keyed by parent id — `None` is the top-level stack's key.
-    auto_cursor_by_parent: dict[Optional[str], float] = {}
+    # cumulative Y-extent already claimed in a (parent, is_airframe_defining) lane (seeded with the
+    # parent's OWN extent for a real parent, -GAP for the top-level stack), keyed by
+    # (parent id, is this instance an airframe-defining body) — see the 2026-07-20 note above for why
+    # this needs to be two lanes, not one.
+    auto_cursor_by_parent: dict[tuple[Optional[str], bool], float] = {}
 
     def resolve(instance_id: str) -> tuple[float, float, float]:
         if instance_id in offsets:
@@ -104,17 +130,18 @@ def instance_world_offsets(ledger: "MasterParametricLedger") -> dict[str, tuple[
             t = inst.transform
             local = (t.x_mm, t.y_mm, t.z_mm)
         else:
-            if parent_id not in auto_cursor_by_parent:
+            cursor_key = (parent_id, _is_airframe_defining(ledger, instance_id))
+            if cursor_key not in auto_cursor_by_parent:
                 if parent_id is not None:
                     # a REAL parent's own body needs clearing — seed at its Y-extent so the first
                     # child doesn't nest back inside it.
-                    auto_cursor_by_parent[parent_id] = _y_extent_mm(ledger, parent_id)
+                    auto_cursor_by_parent[cursor_key] = _y_extent_mm(ledger, parent_id)
                 else:
                     # the top-level stack has no body to clear — seed at -GAP so the formula below
                     # (`cursor + GAP`) places the FIRST top-level part's center at exactly 0, not
                     # gap-offset from nothing. Only the 2nd+ sibling actually needs the gap.
-                    auto_cursor_by_parent[parent_id] = -_AUTO_LAYOUT_GAP_MM
-            cursor = auto_cursor_by_parent[parent_id]
+                    auto_cursor_by_parent[cursor_key] = -_AUTO_LAYOUT_GAP_MM
+            cursor = auto_cursor_by_parent[cursor_key]
             # GAP is added before EVERY auto-placed instance (not just the first) — placing this
             # instance's center at cursor+GAP and then reserving cursor+GAP+this_extent for whatever
             # comes next guarantees a real gap between EVERY consecutive pair, regardless of how their
@@ -124,7 +151,7 @@ def instance_world_offsets(ledger: "MasterParametricLedger") -> dict[str, tuple[
             # and capable of overlapping two instances outright otherwise).
             this_extent = _y_extent_mm(ledger, instance_id)
             local = (0.0, cursor + _AUTO_LAYOUT_GAP_MM, 0.0)
-            auto_cursor_by_parent[parent_id] = cursor + _AUTO_LAYOUT_GAP_MM + this_extent
+            auto_cursor_by_parent[cursor_key] = cursor + _AUTO_LAYOUT_GAP_MM + this_extent
         world = (px + local[0], py + local[1], pz + local[2])
         offsets[instance_id] = world
         return world
