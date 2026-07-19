@@ -3,7 +3,7 @@
 Master index for turning the `prd-27-8.14` vision into a real product, engineered with Claude
 (dev-time) and powered by Claude (runtime).
 
-**Last updated:** 2026-07-15
+**Last updated:** 2026-07-19
 **Current phase:** Phases 0–4 implemented & green (**576 backend tests pass on Windows** — `python -m
 pytest tests -q`, 27 skip on dependency-gated markers, more in the Linux container) and the **full
 wedge stack runs end-to-end on `docker compose up`**. Spike 4 fully PASSES (deflection-validated FS +
@@ -398,6 +398,59 @@ doctrine (the kernel must never sit in the 30Hz loop):
   HARD_LOCK/unlock UI-desync bugs it also surfaced are documented but deliberately left for a separate
   focused pass.
 
+**2026-07-19 — Engineering Graph Phases 1/1b/2/2b/3(partial)/5/6, the coupling+connection substrate now
+end-to-end.** Continuing the strategic pivot logged below (`ENGINEERING_GRAPH_ARCHITECTURE.md` — grounded
+problem-in/solution-out, not prompt-to-CAD-editing), the phased plan in `ENGINEERING_GRAPH_PLAN.md` went
+from "P1 specced, P2-P7 sketched" to six phases built, tested, and adversarially reviewed in one session:
+
+- **P1 — interfaces + connections (the substrate):** `InterfaceSpec`/`Connection`/`ConnectionOp`, a mate
+  solver (`packages/subsystems/placement.py`) that DERIVES a part's placement from declared interface
+  frames instead of the LLM hand-computing a Transform — the direct fix for the recurring "wing doesn't
+  attach to the body correctly" placement churn. **P1b** wired `ConnectionOp` into LLM tool-use + REST +
+  event persistence, mirroring `InstanceOp`'s existing pattern.
+- **P2 — the coupling primitive:** loads become DERIVED through a tiny registered relation catalog
+  (`packages/couplings/`: `force_from_mass_accel`, `force_from_pressure_area`, `torque_from_force_radius`,
+  `bending_from_distributed_load`) instead of stated scalars — the pump story (casing pressure change
+  cracks the crankshaft) made computable and verified end-to-end. `"unknown"` (an unregistered relation,
+  an unresolvable input) blocks export, same as an unknown FS. **P2b** wired `CouplingOp` into LLM
+  tool-use + REST + event persistence, mirroring P1b's own pattern.
+- **P3 (partial) — topology-legality:** a broken connection graph (dangling refs, rotation-needed mates,
+  over-constrained/unsatisfied connections) now blocks `/export/step`, not just the advisory `/validate`
+  self-check. The gross-error (closed-form spar-sizing) and rating-check (interface capacity) slices of
+  P3 were deliberately NOT built — reusing the validated Euler-Bernoulli cantilever oracle
+  (`packages/truth_plane/solvers/cases.py`) against a bounding-box approximation is defensible but is an
+  engineering judgment call, not plumbing, so it needs an explicit human decision rather than
+  self-certification (`CLAUDE.md`'s FEA-correctness human-wall clause).
+- **P5 — `ScopeSpec`:** an additive part-manifest summary (goal/parts/operating-conditions/out-of-scope)
+  the copilot can emit for a big/ambiguous "make an X" ask. Deliberately NOT a new pre-apply confirmation
+  gate — `packages/agents/CLAUDE.md`'s 2026-07-04 policy ("a proposal auto-applies immediately, Undo is
+  the safety net") governs; the "agreed before building" behavior for a genuinely unsure case routes
+  through the EXISTING `request_clarification`+`suggestions` mechanic, unchanged.
+- **P6 — manufacturability outputs:** the connection graph now generates human-readable assembly
+  instructions (bolt/slip-fit/place/mate + gap), a make-manifest (material + CNC-vs-print per part,
+  codifying an existing prose rule as a structured lookup, not new judgment), and any single instance can
+  export its own STEP file (`GET /export/step?instance_id=...`, additive/backward-compatible).
+
+Built via heavy multi-agent `Workflow`-tool orchestration (~70 agents across 5 runs: implement → test →
+adversarial review → fix confirmed → full suite green → commit, per phase). Every single review pass
+found real, confirmed bugs — never a clean first pass. Two worth flagging specifically:
+- **P6:** `GET /export/step?instance_id=X` gate-checked whatever instance happened to be ACTIVE, not `X`
+  itself — a per-part export of a never-analyzed part could ride on a DIFFERENT (active, signed-off)
+  part's grounded verdict and export fine. A direct Inversion #1 violation, live-reproduced before the
+  fix and regression-tested after (`resolved_ledger()`/`effective_load_n()` now take an optional
+  `instance_id`).
+- **P5's review caught a PRE-EXISTING bug from P1b/P2b**, not something P5 itself introduced:
+  `openrouter_provider.py::stream_chat`'s proposal-yield gate never included `connection_ops`/
+  `coupling_ops` in its "is this proposal non-empty" check — a turn whose ONLY output was one of those
+  was silently dropped server-side, with zero test coverage of that exact gate for either op type across
+  two full phases. Fixed for all three (`connection_ops`/`coupling_ops`/`scope_proposal`) and
+  regression-tested — the first test coverage this gate has ever had for any of them.
+
+Full suite green throughout: **1665 backend passed / 27 skipped, 26 frontend passed** after P5 (the last
+phase landed). Deliberately not attempted this session: **P4** (whole-system Solver Tab + fatigue
+methodology) and **P7** (certification pass) — both need handbook-sourced golden values/criteria, not a
+self-certified approximation, per the same human-wall clause P3's deferred slice cites.
+
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
 validated none of it. It's now split across 7 logical commits (ledger → truth-plane →
@@ -544,7 +597,7 @@ build-plan/
   reference/
     TECH_PLAN.md                       ← recommended final tech plan (architecture, stack, tiers, event-sourcing)
     ENGINEERING_GRAPH_ARCHITECTURE.md  ← 2026-07-19 DIRECTION doc: prompt-to-CAD → problem-to-part; typed graph (component/interface/connection/COUPLING), 2-tier checking, reductive fidelity ladder, containment-as-connection, never-fuse, certification-as-a-pass. Marks BUILT/DESIGNED/OPEN honestly.
-    ENGINEERING_GRAPH_PLAN.md          ← 2026-07-19 phased implementation plan for the above. P1 (interfaces+connections, the substrate) specced to schema level; P2–P7 sketched. Build P1 next, then re-plan from what it teaches.
+    ENGINEERING_GRAPH_PLAN.md          ← 2026-07-19 phased implementation plan for the above. P1/P1b/P2/P2b/P3(partial)/P5/P6 BUILT (see the 2026-07-19 entry above); P4/P7 deliberately not attempted — need handbook-sourced golden values, a human-wall call, not self-certification.
     DOMAIN_TAXONOMY.md                 ← disciplines × subsystems matrix; the wedge→recon-UAV bridge (grounded, not guessing)
     SCALABLE_SUBSYSTEM_REFACTOR.md     ← 2026-07-02: ParamSpec/Subsystem model + generic Domains.geometry bag; supersedes prd4 §1
     INSTANCE_GRAPH_REFACTOR.md         ← 2026-07-02: instance-tree ledger (Phase G) — supersedes the flat geometry bag with instances[<id>].params
