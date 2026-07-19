@@ -556,6 +556,19 @@ left uninvestigated pending a live repro with real diagnostic data, per this ses
 of fixing only what's actually been reproduced. Full suite green: **1705 backend passed / 29
 skipped**.
 
+**2026-07-20 — raised `chat_max_tokens` a third time (10240 → 32768), grounded in live provider
+data, not a guess.** The user (running `deepseek/deepseek-v4-flash` via the Settings model override,
+not the app's hardcoded default) hypothesized token limits were behind the repeated "could not be
+parsed" errors. Checked directly against OpenRouter's live model API rather than assuming: the
+model's own context window is 1,048,576 tokens with no reported `max_completion_tokens` ceiling —
+our real, measured system-prompt-plus-ledger cost for a 25-instance build is ~42k tokens, nowhere
+near either limit. So neither the model's input window nor a provider-side output cap is the
+constraint — it's purely our OWN self-imposed `chat_max_tokens=10240`, already raised twice before
+for smaller asks than a 25-part multi-coupling airframe with a full `scope_proposal` table.
+Completion pricing checked too: ~$0.0002/1K tokens, so even a full 32768-token completion costs a
+fraction of a cent — no real cost/latency reason to keep it tight. Full suite green (unchanged):
+**1705 backend passed / 29 skipped**.
+
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
 validated none of it. It's now split across 7 logical commits (ledger → truth-plane →

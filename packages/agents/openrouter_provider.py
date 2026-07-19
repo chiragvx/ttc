@@ -28,16 +28,21 @@ _DEFAULT_BASE = "https://openrouter.ai/api/v1"
 # single-shot delta-emitter path (`propose_delta`, used by POST /propose): a multi-part assembly
 # reply can plausibly need prose PLUS several add_instance entries PLUS deltas PLUS a rationale, all
 # in one completion, and the old shared 1024 cap could truncate that mid-tool-call-JSON with no
-# signal (see FIX 1 in the investigation this responds to). Raised twice on 2026-07-19 (3072 -> 6144
-# -> 10240) against TWO separate live repros in the same session: a "plenum + flange + 4 runners"
-# build truncated at 3072; an "8 runners" follow-up STILL truncated at 6144 (char ~6300). A fixed cap
-# will always lose to an unboundedly large ask eventually — this isn't trying to cover every request
-# size, it's giving realistic multi-part builds real headroom. The genuinely load-bearing fix for
-# whatever still exceeds this is the truncation DETECTION below (position-based, provider-independent),
-# which makes the failure mode "an accurate, actionable error" instead of "wrong error" regardless of
-# where the cap sits. Still bounded, not unlimited: high enough for a real multi-op proposal plus a
-# prose explanation, not so high that a stuck/rambling completion burns an outsized latency+cost tax.
-_DEFAULT_CHAT_MAX_TOKENS = 10240
+# signal (see FIX 1 in the investigation this responds to). Raised three times on 2026-07-19/20
+# (3072 -> 6144 -> 10240 -> 32768) against live repros in the same session: a "plenum + flange + 4
+# runners" build truncated at 3072; an "8 runners" follow-up STILL truncated at 6144 (char ~6300); a
+# 25-part recon-UAV airframe (multiple couplings + a full scope_proposal table) plausibly needed more
+# than 10240 too. This is our OWN self-imposed cap, not a provider limit — checked live against
+# OpenRouter's model API: the configured model has a 1M+-token context window and NO reported
+# max_completion_tokens ceiling of its own, and completion pricing is ~$0.0002/1K tokens, so even a
+# full 32768-token completion costs a fraction of a cent — there is no real cost/latency reason to
+# keep this tight. A fixed cap will always lose to an unboundedly large ask eventually — this isn't
+# trying to cover every request size, it's giving realistic multi-part builds real headroom. The
+# genuinely load-bearing fix for whatever still exceeds this is the truncation DETECTION below
+# (position-based, provider-independent), which makes the failure mode "an accurate, actionable
+# error" instead of "wrong error" regardless of where the cap sits. Still bounded, not unlimited: an
+# actually-stuck/rambling completion should still stop somewhere rather than run indefinitely.
+_DEFAULT_CHAT_MAX_TOKENS = 32768
 _SYSTEM = (
     "You are the geometric delta-emitter. Translate the user's intent into parameter deltas using the "
     "propose_parameter_delta function ONLY. Never write code or safety numbers. If the intent is "
