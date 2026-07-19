@@ -240,12 +240,41 @@ class OpenRouterDeltaProvider(LLMProvider):
             try:
                 parsed = json.loads(args)
             except json.JSONDecodeError as e:
-                logger.warning("stream_chat: failed to parse tool-call arguments (%s)", e)
-                if _looks_truncated(args, e):
-                    truncated = True
-                elif not truncated:
-                    yield ("error", "the model's proposal could not be parsed — try rephrasing or asking again")
-                continue
+                # Recovery: some streams append content AFTER a complete, valid top-level JSON value
+                # (2026-07-19 live repro — "Extra data: line 2 column 1 (char 10086)" on a 10121-char
+                # args string: a fully valid ~10KB tool call followed by ~35 bytes of something else,
+                # finish_reason=="tool_calls" — a NORMAL completion, not a cutoff). json.loads demands
+                # the WHOLE string be one JSON value and throws the real proposal away over transport
+                # noise appended after it. raw_decode parses just the first complete value and reports
+                # where it stopped; genuinely malformed JSON (a missing value, an unterminated string)
+                # fails raw_decode identically to json.loads (there is no complete value to extract),
+                # so this can only ever help the "valid prefix + trailing junk" case — it never masks a
+                # real parse failure or a genuine truncation, and _looks_truncated below is unaffected.
+                recovered, leftover = None, None
+                try:
+                    stripped = args.lstrip()
+                    recovered, end = json.JSONDecoder().raw_decode(stripped)
+                    leftover = stripped[end:].strip()
+                except json.JSONDecodeError:
+                    pass
+                if recovered is not None:
+                    logger.warning("stream_chat: recovered a complete tool-call payload; ignored %d "
+                                   "bytes of trailing data (finish_reason=%r): %r",
+                                   len(leftover), finish_reason, leftover[:200])
+                    parsed = recovered
+                else:
+                    # finish_reason + len(args) alongside the parse error itself (2026-07-19 live
+                    # repro: a "cut off" classification fired on an args string of only ~900 chars,
+                    # nowhere near chat_max_tokens — logging just the parse error left no way to tell
+                    # "genuinely hit the token cap" apart from "the stream ended early for some other
+                    # reason" after the fact).
+                    logger.warning("stream_chat: failed to parse tool-call arguments (%s) "
+                                   "[finish_reason=%r, len(args)=%d]", e, finish_reason, len(args))
+                    if _looks_truncated(args, e):
+                        truncated = True
+                    elif not truncated:
+                        yield ("error", "the model's proposal could not be parsed — try rephrasing or asking again")
+                    continue
             try:
                 proposal = DeltaProposal.model_validate(parsed)
             except Exception as e:

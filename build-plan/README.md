@@ -522,6 +522,24 @@ pass, not physically touching yet" caveat rather than fabricating a connection �
 self-check independently caught and reported the resulting gaps. Full suite green: **1701 backend
 passed / 29 skipped**, frontend 54 passed, `npm run build` clean.
 
+**2026-07-19 — a third live bug on the same satellite-bus retry, this one in the stream parser
+itself.** After the previous two fixes, the exact same prompt failed again — twice, differently.
+First surfaced as "the response was cut off before finishing," but the tool-call args were only
+~943 chars when it broke, nowhere near `chat_max_tokens=10240` — logging (added specifically to
+investigate this) showed the JSON error alone couldn't distinguish "genuinely hit the cap" from
+"the stream ended early for some other reason," so `stream_chat` now logs `finish_reason` +
+`len(args)` alongside the parse error. The retry after that surfaced the real bug: `finish_reason ==
+"tool_calls"` (a NORMAL completion, not a cutoff) on a **10121-char** args string that failed with
+`Extra data: line 2 column 1 (char 10086)` — a fully valid ~10KB tool call followed by ~35 bytes of
+something else. `json.loads` demands the whole string be one JSON value, so a real, complete,
+correctly-formed proposal was thrown away over trailing transport noise appended after it.
+`stream_chat` now tries `json.JSONDecoder().raw_decode()` as a recovery step when `json.loads` fails —
+it parses just the first complete top-level value and reports where it stopped; a genuinely
+malformed/truncated string (no complete value anywhere) fails `raw_decode` identically to
+`json.loads`, so this can only ever rescue the "valid prefix + trailing junk" case, never mask a
+real parse failure or a genuine truncation. The recovered case still logs what was ignored (never a
+*silent* discard). Full suite green: **1703 backend passed / 29 skipped**.
+
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
 validated none of it. It's now split across 7 logical commits (ledger → truth-plane →

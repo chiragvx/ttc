@@ -181,6 +181,47 @@ def test_stream_chat_truncated_malformed_json_yields_only_the_cutoff_error_not_b
     assert events[-1] == ("done", None)
 
 
+def test_stream_chat_recovers_a_complete_payload_with_trailing_junk():
+    # 2026-07-19 live repro: a complete, valid ~10KB tool call followed by ~35 bytes of something else
+    # ("Extra data: line 2 column 1", finish_reason=="tool_calls" -- a NORMAL completion, not a
+    # cutoff). json.loads demands the whole string be one JSON value and threw the real, complete
+    # proposal away over trailing transport noise. Must now recover the valid prefix instead.
+    good = json.dumps({"instance_ops": [
+        {"op": "add_instance", "subsystem_type": "bulkhead_frame", "instance_id": "top_ring"}]})
+    args = good + "\nsome trailing junk here"
+
+    def fake_stream(*, url, headers, json):
+        yield {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": args}}]}}]}
+        yield {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}
+
+    prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+    events = list(prov.stream_chat(messages=[{"role": "user", "content": "do it"}], ledger_json="{}"))
+
+    assert not any(k == "error" for k, _ in events)
+    proposals = [p for k, p in events if k == "proposal"]
+    assert len(proposals) == 1
+    assert proposals[0].instance_ops[0].instance_id == "top_ring"
+    assert events[-1] == ("done", None)
+
+
+def test_stream_chat_genuinely_truncated_json_is_not_falsely_recovered():
+    # raw_decode must fail identically to json.loads on a GENUINELY incomplete value (no complete
+    # top-level object exists anywhere in the string) -- the recovery path must never mask a real
+    # truncation.
+    def fake_stream(*, url, headers, json):
+        tool_call = {"index": 0, "function": {
+            "arguments": '{"instance_ops":[{"op":"add_instance","subsystem_type":"'}}
+        yield {"choices": [{"delta": {"tool_calls": [tool_call]}}]}
+        yield {"choices": [{"delta": {}, "finish_reason": "length"}]}
+
+    prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+    events = list(prov.stream_chat(messages=[{"role": "user", "content": "do it"}], ledger_json="{}"))
+
+    errors = [msg for k, msg in events if k == "error"]
+    assert len(errors) == 1 and "cut off" in errors[0]
+    assert not any(k == "proposal" for k, _ in events)
+
+
 def test_stream_chat_yields_a_proposal_for_scope_connection_or_coupling_ops_alone():
     # 2026-07-19 review (HIGH): the proposal-yield gate's OR-chain listed deltas/feature_ops/
     # instance_ops/request_clarification/suggestions but omitted connection_ops, coupling_ops, AND
