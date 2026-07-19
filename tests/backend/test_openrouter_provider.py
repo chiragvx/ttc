@@ -4,10 +4,35 @@ from __future__ import annotations
 
 import json
 
-from packages.agents.openrouter_provider import OpenRouterDeltaProvider
+from packages.agents.openrouter_provider import OpenRouterDeltaProvider, _looks_truncated
 from packages.ledger.deltas import ParameterDelta
 
 SKIN = "instances.root.params.skin_thickness_mm"
+
+
+def _decode_error(args: str) -> json.JSONDecodeError:
+    try:
+        json.loads(args)
+    except json.JSONDecodeError as e:
+        return e
+    raise AssertionError(f"expected {args!r} to fail to parse")
+
+
+def test_looks_truncated_true_for_an_unterminated_string_regardless_of_position():
+    # pos points at the string's OPENING quote for this error type, which can sit far from len(args)
+    # even though EOF-mid-string is definitionally always a cut-off stream.
+    args = '{"deltas":[{"target_node":"instances.root.params.'
+    assert _looks_truncated(args, _decode_error(args)) is True
+
+
+def test_looks_truncated_true_when_the_error_lands_exactly_at_the_end():
+    args = '{"deltas":[{"target_node":"x","requested_value":3'  # missing closing braces
+    assert _looks_truncated(args, _decode_error(args)) is True
+
+
+def test_looks_truncated_false_for_a_mid_string_syntax_error_with_trailing_content():
+    args = '{"deltas": [{"target_node": "x", "requested_value": }]}'  # missing value, then more JSON
+    assert _looks_truncated(args, _decode_error(args)) is False
 
 
 def _tool_response(arguments):
@@ -210,11 +235,13 @@ def test_stream_chat_empty_turn_yields_error_not_silence():
 
 
 def test_stream_chat_malformed_tool_call_json_yields_error_not_silent_continue():
-    # truncated/invalid JSON in the tool-call arguments (e.g. from hitting max_tokens mid-generation)
+    # invalid JSON in the tool-call arguments that is NOT truncation-shaped (the syntax error sits in
+    # the MIDDLE of the string, with more content after it — a missing value, not a cut-off stream)
     # used to be a bare `except Exception: continue` — silently dropped, no log, no error event.
     def fake_stream(*, url, headers, json):
-        yield {"choices": [{"delta": {"tool_calls": [
-            {"index": 0, "function": {"arguments": '{"deltas":[{"target_node":"'}}]}}]}
+        tool_call = {"index": 0, "function": {
+            "arguments": '{"deltas": [{"target_node": "x", "requested_value": }]}'}}
+        yield {"choices": [{"delta": {"tool_calls": [tool_call]}}]}
         yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
 
     prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
@@ -222,6 +249,32 @@ def test_stream_chat_malformed_tool_call_json_yields_error_not_silent_continue()
 
     errors = [msg for k, msg in events if k == "error"]
     assert errors and "could not be parsed" in errors[0]
+    assert not any(k == "proposal" for k, _ in events)
+    assert events[-1] == ("done", None)
+
+
+def test_stream_chat_json_error_at_end_of_string_is_treated_as_truncation_even_without_finish_reason_length():
+    # 2026-07-19 live repro #2: a SECOND real "8 runners" build still truncated mid-tool-call-JSON at
+    # the raised 6144-token cap, but the raw OpenRouter/DeepSeek stream never surfaced
+    # finish_reason=="length" for it — finish_reason alone was not a reliable truncation signal for
+    # this real provider/model combination, so the misleading "could not be parsed" message still
+    # showed. A JSON syntax error positioned at (or right at) the END of the accumulated arg string —
+    # e.g. an unterminated string, exactly what a cut-off stream produces — is itself
+    # provider-independent evidence of truncation and must get the accurate "cut off" message, even
+    # when finish_reason claims "stop".
+    def fake_stream(*, url, headers, json):
+        tool_call = {"index": 0, "function": {
+            "arguments": '{"deltas":[{"target_node":"instances.root.params.'}}
+        yield {"choices": [{"delta": {"tool_calls": [tool_call]}}]}
+        yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+
+    prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+    events = list(prov.stream_chat(messages=[{"role": "user", "content": "build the manifold"}], ledger_json="{}"))
+
+    errors = [msg for k, msg in events if k == "error"]
+    assert len(errors) == 1
+    assert "cut off" in errors[0]
+    assert "could not be parsed" not in errors[0]
     assert not any(k == "proposal" for k, _ in events)
     assert events[-1] == ("done", None)
 

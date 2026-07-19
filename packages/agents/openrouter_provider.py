@@ -28,22 +28,39 @@ _DEFAULT_BASE = "https://openrouter.ai/api/v1"
 # single-shot delta-emitter path (`propose_delta`, used by POST /propose): a multi-part assembly
 # reply can plausibly need prose PLUS several add_instance entries PLUS deltas PLUS a rationale, all
 # in one completion, and the old shared 1024 cap could truncate that mid-tool-call-JSON with no
-# signal (see FIX 1 in the investigation this responds to). Raised again 2026-07-19 (3072 -> 6144)
-# after a live repro: a multi-part build ("plenum + flange + 4 runners") with a full prose plan
-# ahead of the tool call under tool_choice="auto" (prose and the tool-call JSON share this SAME
-# budget) truncated mid-tool-call-JSON at 3072 — "unterminated string"/"expecting delimiter" at an
-# arbitrary character position, confirmed in the server log. The tool surface has also grown
-# materially since 3072 was chosen (feature_ops/instance_ops/connection_ops/coupling_ops/
-# scope_proposal can now all coexist in one proposal). Still a deliberate middle ground, not
-# unbounded: high enough that a real multi-op proposal plus a prose explanation has headroom, not so
-# high that a stuck/rambling completion burns an outsized latency+cost tax before the cap kicks in.
-_DEFAULT_CHAT_MAX_TOKENS = 6144
+# signal (see FIX 1 in the investigation this responds to). Raised twice on 2026-07-19 (3072 -> 6144
+# -> 10240) against TWO separate live repros in the same session: a "plenum + flange + 4 runners"
+# build truncated at 3072; an "8 runners" follow-up STILL truncated at 6144 (char ~6300). A fixed cap
+# will always lose to an unboundedly large ask eventually — this isn't trying to cover every request
+# size, it's giving realistic multi-part builds real headroom. The genuinely load-bearing fix for
+# whatever still exceeds this is the truncation DETECTION below (position-based, provider-independent),
+# which makes the failure mode "an accurate, actionable error" instead of "wrong error" regardless of
+# where the cap sits. Still bounded, not unlimited: high enough for a real multi-op proposal plus a
+# prose explanation, not so high that a stuck/rambling completion burns an outsized latency+cost tax.
+_DEFAULT_CHAT_MAX_TOKENS = 10240
 _SYSTEM = (
     "You are the geometric delta-emitter. Translate the user's intent into parameter deltas using the "
     "propose_parameter_delta function ONLY. Never write code or safety numbers. If the intent is "
     "ambiguous (missing value, unclear units, vague objective), call the function with "
     "request_clarification set and no deltas."
 )
+
+
+def _looks_truncated(args: str, e: "json.JSONDecodeError") -> bool:
+    """True if a JSON parse failure on `args` looks like a stream cut off mid-generation, rather than
+    a genuinely malformed-but-complete payload (2026-07-19 live repro, see stream_chat's own comment).
+
+    "Unterminated string starting at: ..." is a SPECIAL case: `JSONDecodeError.pos` for this message
+    points at the string's OPENING quote (where the unterminated literal began), not at the point the
+    stream actually ran out — so it can sit far from `len(args)` even though hitting EOF mid-string is
+    definitionally always a cut-off stream (a model does not deliberately emit a string it never
+    closes). Every OTHER JSON error (missing delimiter, expecting a value, …) is truncation only when
+    it lands AT the very end of the buffer — "expecting more input, found EOF" — not when there's
+    trailing content after the error position, which means the payload was complete but syntactically
+    wrong somewhere in the middle (a different, non-truncation failure)."""
+    if "Unterminated string" in e.msg:
+        return True
+    return e.pos >= len(args)
 
 
 class OpenRouterDeltaProvider(LLMProvider):
@@ -204,23 +221,38 @@ class OpenRouterDeltaProvider(LLMProvider):
             yield ("done", None)  # keep the ('error', ...) then ('done', None) contract even here
             return
         saw_proposal = False
-        # Known BEFORE the parse loop below (finish_reason arrives on the final streamed chunk) — a
-        # completion cut off by the max_tokens cap ("length") already fully explains a malformed
+        # A completion cut off by the max_tokens cap ("length") already fully explains a malformed
         # trailing tool-call arg string; the generic parse-failure message is redundant noise on top
         # of the more specific, more actionable "cut off" message a few lines down, and it's the
         # WRONG suggestion ("try rephrasing") for what's actually a "the reply was too big" problem
         # (2026-07-19 live repro: a multi-part build request truncated mid-tool-call-JSON, and the
         # user only needed to know to try a smaller request, not that "parsing failed").
+        #
+        # finish_reason ALONE is not reliable for this (a second live repro, same session: the raw
+        # stream never surfaced finish_reason=="length" for an OpenRouter/DeepSeek tool-call stream
+        # that was, by every other signal, truncated — the misleading message still showed). Detect it
+        # from the JSON failure itself instead — see _looks_truncated's own docstring for why pos alone
+        # isn't enough (an "Unterminated string" error's pos points at the string's OPENING quote, not
+        # where the stream actually ran out, so it can sit far from len(args) even when truncation is
+        # exactly what happened).
         truncated = finish_reason not in (None, "stop", "tool_calls")
         for args in tool_args.values():
             try:
-                proposal = DeltaProposal.model_validate(json.loads(args))
-            except Exception as e:
-                # a truncated/malformed tool-call arg string used to be dropped here with zero
-                # signal (bare `except Exception: continue`) — that's the direct mechanism behind a
-                # permanently-blank assistant bubble even though the request returned 200 OK. Log the
-                # real parse exception for debugging, but don't leak it verbatim to the user.
+                parsed = json.loads(args)
+            except json.JSONDecodeError as e:
                 logger.warning("stream_chat: failed to parse tool-call arguments (%s)", e)
+                if _looks_truncated(args, e):
+                    truncated = True
+                elif not truncated:
+                    yield ("error", "the model's proposal could not be parsed — try rephrasing or asking again")
+                continue
+            try:
+                proposal = DeltaProposal.model_validate(parsed)
+            except Exception as e:
+                # valid JSON that doesn't match the DeltaProposal schema — a genuinely different
+                # failure than truncation (the syntax was complete), so the position heuristic above
+                # doesn't apply; still worth a signal rather than the old silent `continue`.
+                logger.warning("stream_chat: tool-call arguments failed schema validation (%s)", e)
                 if not truncated:
                     yield ("error", "the model's proposal could not be parsed — try rephrasing or asking again")
                 continue
@@ -236,6 +268,10 @@ class OpenRouterDeltaProvider(LLMProvider):
         if truncated:
             # e.g. "length" — cut off by the max_tokens cap; "content_filter" etc. also land here.
             yield ("error", "the response was cut off before finishing — try a shorter or simpler request")
-        if not saw_token and not saw_proposal:
+        elif not saw_token and not saw_proposal:
+            # "no response was generated" would be actively wrong here if truncated: something WAS
+            # generated, it just didn't survive parsing — the "cut off" message above already covers
+            # that case with the correct explanation, so this one only applies when nothing was cut
+            # off either (a genuinely empty/no-op turn).
             yield ("error", "no response was generated for that message — try rephrasing or asking again")
         yield ("done", None)
