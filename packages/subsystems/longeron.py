@@ -12,7 +12,7 @@ the part actually was)."""
 
 from __future__ import annotations
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import ParamSpec, Subsystem, bar_end_interfaces, register_subsystem
 
 _FRAGMENT = """\
 ## Subsystem: Longeron
@@ -65,4 +65,5 @@ LONGERON = register_subsystem(Subsystem(
     build=_build, volume=_volume, invariants=_check,
     fea_eligible=True,  # single Box, span along X — the validated cantilever methodology applies as-is
     min_wall_params=("width_mm", "height_mm"),  # no *_thickness_mm param — see module docstring
+    interfaces=bar_end_interfaces("length_mm"),  # 2026-07-20 — a bar mates end-to-end at its two tips
 ))

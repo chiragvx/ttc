@@ -22,6 +22,7 @@ from packages.subsystems.base import (
     Namespace,
     ParamSpec,
     Subsystem,
+    bar_end_interfaces,
     geometry_paths,
     resolve_namespace,
     seed_instance,

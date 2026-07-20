@@ -596,6 +596,36 @@ interfaces, instead of `bwb_fuselage` for a request that explicitly wanted tip-m
 and no wing panels were added at all despite the scope table claiming 2; and the broader
 catalog-realism gap, boxes-as-mounts, already captured in the phase-2 memory.)
 
+**2026-07-20 — closed the self-correct loop for connectivity, and started scaling interfaces past
+2 of 267 parts.** User direction after the auto-layout fix: assembled view is what matters (there's
+no separate "exploded" mode anywhere in this codebase — confirmed by grep — the auto-layout output
+*is* the only "assembled" view there is today); when the self-check finds something disconnected,
+the system's job should be to connect it. Root-caused why that wasn't happening:
+`packages/frontend/src/chat/Chat.tsx`'s auto-correct loop gated on bare `!report.ok`, and
+`packages/truth_plane/validate.py` only flips `ok` false for `severity=="error"` issues — which is
+`degeneracy` only. `connectivity` issues are hardcoded `severity="warning"` (a deliberate choice,
+but one that structurally blocked the auto-correct gate from ever firing for exactly the issue type
+live-testing kept surfacing), and `embedding` is `severity="info"` (genuinely ambiguous by design —
+a part sitting inside another could be a legitimate internal component, so auto-correcting it risks
+a worse mistake than silence — left untouched). Fixed by extracting a pure, unit-tested
+`shouldAutoCorrect(report)` gate (`packages/frontend/src/chat/shouldAutoCorrect.ts`, mirrors the
+existing `summarizeOutcomes.ts` "extract the risky pure logic" precedent) that fires on `!report.ok`
+OR any `connectivity` issue, explicitly still excluding `embedding`.
+
+Separately: only `bwb_fuselage`/`wing_panel` (2 of 267 subsystems) declare any `InterfaceSpec` at
+all, confirmed the mate solver (`placement.py::resolve_placements`) and the LLM/ledger side
+(`ConnectionOp`, `_CONNECTION_OPS_SECTION`) are both already fully generic — no hardcoded interface
+names/counts anywhere — so scaling this up is purely a matter of declaring more interfaces per
+subsystem. Added a generic `bar_end_interfaces(length_param)` helper
+(`packages/subsystems/base.py`) for the shape family confirmed by direct code reading to be a plain
+centered `bd.Box(length_mm, width_mm, height_mm)`: `longeron`, `tail_boom`, `flat_bar`, `wing_spar`,
+`stabilizer_spar`, `main_gear_leg`, `nose_gear_leg` — one line each. Verified end-to-end: a real
+`resolve_placements` mate between two `longeron`s, and a real `/connection_ops` REST round-trip.
+Deliberately NOT touched this pass: plate/L-bracket-shaped mount parts (`motor_mount_firewall`,
+`wing_root_fitting`) use a different templated builder whose local-frame convention isn't yet
+verified — flagged as the natural next batch, not guessed at here. Full suite green: **1716 backend
+passed / 29 skipped**, frontend **59 passed**, `npm run build` clean.
+
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
 validated none of it. It's now split across 7 logical commits (ledger → truth-plane →

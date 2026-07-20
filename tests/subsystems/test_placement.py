@@ -49,6 +49,35 @@ def test_interfaces_are_declared():
     assert [i.name for i in get_subsystem_model("wing_panel").interfaces] == ["root"]
 
 
+@pytest.mark.parametrize("name", [
+    "longeron", "tail_boom", "flat_bar", "wing_spar", "stabilizer_spar", "main_gear_leg", "nose_gear_leg",
+])
+def test_bar_shaped_subsystems_declare_end_interfaces(name):
+    # 2026-07-20 — the generic bar_end_interfaces() helper, applied to the shape family confirmed by
+    # direct code reading to be a plain bd.Box(length_mm, width_mm, height_mm) centered at the origin.
+    assert [i.name for i in get_subsystem_model(name).interfaces] == ["end_a", "end_b"]
+
+
+def test_two_bar_shaped_parts_mate_end_to_end_via_the_generic_helper():
+    # Proves bar_end_interfaces() produces frames the EXISTING solver actually accepts -- not just
+    # that the interface list is non-empty. Two longerons (default length_mm=400) joined end-to-end:
+    # longeron_a's end_b (local x=+200) mates longeron_b's end_a (local x=-200) with zero rotation
+    # (v1 mates are pure translation) -- longeron_b's center should land at world x=400.
+    led = make_demo_ledger()
+    led = add_instance(led, "longeron", "la")
+    led = add_instance(led, "longeron", "lb")
+    led.connections = [
+        Connection(id="c1", a=InterfaceRef(instance_id="la", interface="end_b"),
+                   b=InterfaceRef(instance_id="lb", interface="end_a")),
+    ]
+    pl = resolve_placements(led)
+    assert pl["la"] == Transform()  # datum at origin
+    assert pl["lb"].x_mm == pytest.approx(400.0)
+    assert pl["lb"].y_mm == pytest.approx(0.0) and pl["lb"].z_mm == pytest.approx(0.0)
+    assert pl["lb"].rx_deg == 0 and pl["lb"].ry_deg == 0 and pl["lb"].rz_deg == 0
+    assert connection_issues(led) == []
+
+
 def test_mate_solver_reproduces_the_hand_verified_wing_placement():
     # THE Phase 1 proof: the sweep/dihedral offset the copilot used to hand-compute (and get wrong) is
     # now DERIVED from the body's own declared tip frame.

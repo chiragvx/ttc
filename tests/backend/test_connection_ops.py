@@ -24,6 +24,20 @@ def _bwb_and_wing(c):
     return body, wr
 
 
+def test_add_connection_works_for_the_generic_bar_end_interfaces_too():
+    # 2026-07-20 — proves the whole REST stack (not just the pure solver) accepts the new
+    # bar_end_interfaces()-declared interfaces, not just the original hand-authored bwb_fuselage/
+    # wing_panel pair.
+    c = _client()
+    la = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "longeron"}).json()["instance_id"]
+    lb = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "longeron"}).json()["instance_id"]
+    r = c.post("/connection_ops", json={"op": "add_connection", "a_instance": la, "a_interface": "end_b",
+                                        "b_instance": lb, "b_interface": "end_a"}).json()
+    assert r["ok"] and r["status"] == "APPLIED"
+    led = c.get("/ledger").json()
+    assert any(conn["id"] == r["connection_id"] for conn in led["connections"])
+
+
 def test_add_connection_applies_and_persists_through_replay():
     c = _client()
     body, wr = _bwb_and_wing(c)

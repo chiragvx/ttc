@@ -7,6 +7,7 @@ import { InstanceOpCard } from "./InstanceOpCard";
 import { MessageList } from "./MessageList";
 import { ProposalCard } from "./ProposalCard";
 import { ValidationCard } from "./ValidationCard";
+import { shouldAutoCorrect } from "./shouldAutoCorrect";
 import { summarizeOutcomes } from "./summarizeOutcomes";
 import { streamChat } from "../api";
 import type { LlmSettings } from "../settings";
@@ -221,7 +222,7 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
         try {
           const report = await onValidate(lastIntentRef.current);
           patch(aid, (m) => ({ ...m, validation: report }));
-          if (!report.ok && autoRoundRef.current < MAX_AUTO_ROUNDS && settings.apiKey) {
+          if (shouldAutoCorrect(report) && autoRoundRef.current < MAX_AUTO_ROUNDS && settings.apiKey) {
             autoRoundRef.current += 1;
             const issues = [...report.geometric.issues, ...(report.visual?.issues ?? [])];
             const lines = issues.map((i) => `- ${i.message}`).join("\n");

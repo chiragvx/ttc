@@ -69,6 +69,27 @@ class InterfaceSpec:
     frame: Callable[["Namespace"], Frame]
 
 
+def bar_end_interfaces(length_param: str, names: tuple[str, str] = ("end_a", "end_b")) -> list[InterfaceSpec]:
+    """Two mount interfaces at the +/- ends of a subsystem's own local X axis (2026-07-20) — generic
+    for ANY subsystem whose `_build` centers a plain box along local X using one named length param
+    (the `longeron`/`tail_boom`/`flat_bar`/`wing_spar`/`stabilizer_spar`/gear-leg shape family:
+    `bd.Box(length_mm, width_mm, height_mm)`, centered at the origin by construction — confirmed by
+    reading each of those files directly before reusing this). `normal` points OUTWARD from each end,
+    matching `Frame`'s own anti-parallel-touching-normals mating convention (two bars meeting end to
+    end: one's `end_b` normal is +X, the other's `end_a` normal is -X).
+
+    NOT for a plate/L-bracket-shaped part (e.g. `motor_mount_firewall`, `wing_root_fitting`) — those
+    use a different local-frame convention (a face, not a bar end) and aren't covered by this helper."""
+    def _end(sign: float) -> Callable[["Namespace"], Frame]:
+        def _frame(p: "Namespace") -> Frame:
+            half = getattr(p, length_param) / 2.0
+            return Frame(origin=(sign * half, 0.0, 0.0), normal=(sign, 0.0, 0.0))
+        return _frame
+    name_a, name_b = names
+    return [InterfaceSpec(name=name_a, kind="mount", frame=_end(-1.0)),
+            InterfaceSpec(name=name_b, kind="mount", frame=_end(1.0))]
+
+
 class Namespace:
     """Attribute-access facade over a subsystem's resolved param values. `p.top_width_mm` returns the
     float value. Passed to build/volume/invariants so nobody re-lists the param names."""
