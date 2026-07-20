@@ -24,6 +24,7 @@ from packages.subsystems.base import (
     Subsystem,
     bar_end_interfaces,
     geometry_paths,
+    plate_face_interfaces,
     resolve_namespace,
     seed_instance,
     seed_ledger_geometry,

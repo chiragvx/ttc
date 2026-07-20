@@ -90,6 +90,25 @@ def bar_end_interfaces(length_param: str, names: tuple[str, str] = ("end_a", "en
             InterfaceSpec(name=name_b, kind="mount", frame=_end(1.0))]
 
 
+def plate_face_interfaces(thickness_param: str, names: tuple[str, str] = ("top", "bottom")) -> list[InterfaceSpec]:
+    """Two mount interfaces at the +/- Z faces of a subsystem's own local Z axis (2026-07-20) —
+    generic for any subsystem whose `_build` centers a plain `width x depth x thickness` box at the
+    origin using one named thickness param (the `packages/truth_plane/regen/templated.py::render_bracket`
+    -derived plate/tray shape family — `motor_mount_firewall`, `avionics_tray`, `battery_bay_divider`,
+    `battery_strap_mount`, `servo_mount_tray`, confirmed by reading each file directly before reuse;
+    many other catalog entries share the same archetype and could adopt this the same way once
+    verified). `normal` points OUTWARD from each face, matching `Frame`'s anti-parallel-normals
+    mating convention. Mirrors `bar_end_interfaces` for the plate/tray shape family instead of bars."""
+    def _face(sign: float) -> Callable[["Namespace"], Frame]:
+        def _frame(p: "Namespace") -> Frame:
+            half = getattr(p, thickness_param) / 2.0
+            return Frame(origin=(0.0, 0.0, sign * half), normal=(0.0, 0.0, sign))
+        return _frame
+    name_a, name_b = names
+    return [InterfaceSpec(name=name_a, kind="mount", frame=_face(1.0)),
+            InterfaceSpec(name=name_b, kind="mount", frame=_face(-1.0))]
+
+
 class Namespace:
     """Attribute-access facade over a subsystem's resolved param values. `p.top_width_mm` returns the
     float value. Passed to build/volume/invariants so nobody re-lists the param names."""

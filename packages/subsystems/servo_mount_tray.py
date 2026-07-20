@@ -9,7 +9,7 @@ per this catalog's established "one archetype, many named catalog entries" conve
 
 from __future__ import annotations
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import ParamSpec, Subsystem, plate_face_interfaces, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -66,4 +66,5 @@ SERVO_MOUNT_TRAY = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    interfaces=plate_face_interfaces("thickness_mm"),  # 2026-07-20 — mounts via a flat face
 ))

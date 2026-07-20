@@ -58,6 +58,34 @@ def test_bar_shaped_subsystems_declare_end_interfaces(name):
     assert [i.name for i in get_subsystem_model(name).interfaces] == ["end_a", "end_b"]
 
 
+@pytest.mark.parametrize("name", [
+    "motor_mount_firewall", "avionics_tray", "battery_bay_divider", "battery_strap_mount", "servo_mount_tray",
+])
+def test_plate_shaped_subsystems_declare_face_interfaces(name):
+    # 2026-07-20 — the generic plate_face_interfaces() helper, applied to the render_bracket-derived
+    # shape family confirmed by direct code reading to share the identical width/depth/thickness box.
+    assert [i.name for i in get_subsystem_model(name).interfaces] == ["top", "bottom"]
+
+
+def test_two_plate_shaped_parts_mate_face_to_face_via_the_generic_helper():
+    # avionics_tray (thickness_mm=2.5) 'top' mates battery_bay_divider (thickness_mm=2.0) 'bottom'.
+    # No anchor/root in this component -> datum is min(instance ids) alphabetically: "divider" < "tray"
+    # (see placement.py's own datum-selection rule), so "divider" is the datum at the origin and
+    # "tray" is derived relative to it, landing at world z = -(1.0 + 1.25) = -2.25.
+    led = make_demo_ledger()
+    led = add_instance(led, "avionics_tray", "tray")
+    led = add_instance(led, "battery_bay_divider", "divider")
+    led.connections = [
+        Connection(id="c1", a=InterfaceRef(instance_id="tray", interface="top"),
+                   b=InterfaceRef(instance_id="divider", interface="bottom")),
+    ]
+    pl = resolve_placements(led)
+    assert pl["divider"] == Transform()  # datum at origin (alphabetically first)
+    assert pl["tray"].z_mm == pytest.approx(-2.25)
+    assert pl["tray"].x_mm == pytest.approx(0.0) and pl["tray"].y_mm == pytest.approx(0.0)
+    assert connection_issues(led) == []
+
+
 def test_two_bar_shaped_parts_mate_end_to_end_via_the_generic_helper():
     # Proves bar_end_interfaces() produces frames the EXISTING solver actually accepts -- not just
     # that the interface list is non-empty. Two longerons (default length_mm=400) joined end-to-end:

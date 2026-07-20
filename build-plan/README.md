@@ -626,6 +626,23 @@ Deliberately NOT touched this pass: plate/L-bracket-shaped mount parts (`motor_m
 verified — flagged as the natural next batch, not guessed at here. Full suite green: **1716 backend
 passed / 29 skipped**, frontend **59 passed**, `npm run build` clean.
 
+**2026-07-20 — the next interface batch: plate/tray-shaped mount parts.** Direct continuation of the
+above. `motor_mount_firewall`'s builder, `render_bracket` (`packages/truth_plane/regen/templated.py`),
+confirmed to be a plain `bd.Box(width_mm, depth_mm, thickness_mm)` centered at the origin — the same
+shape family as `avionics_tray`, `battery_bay_divider`, `battery_strap_mount`, `servo_mount_tray`
+(confirmed identical by reading each file directly; ~55 more catalog entries share the same
+`render_bracket` archetype and could adopt this the same way once verified individually, not
+attempted in one pass here). Added a second generic helper, `plate_face_interfaces(thickness_param)`
+— two "mount" interfaces at the +/- Z faces, mirroring `bar_end_interfaces`'s shape for the plate/tray
+family instead of bars — applied to all 5. Verified end-to-end: a real `resolve_placements` mate
+between `avionics_tray` and `battery_bay_divider` (which also caught a real test-authoring mistake
+before it shipped — the datum in a connected component with no anchor/root is `min(instance ids)`
+alphabetically, not "whichever was added first," so the initial test asserted the wrong instance was
+at the origin; fixed against the actual rule in `placement.py`, not assumed), and a real
+`/connection_ops` REST round-trip. `wing_root_fitting` (an L-bracket, a materially different
+topology from a flat plate) remains deliberately deferred — noted, not guessed at. Full suite green:
+**1723 backend passed / 29 skipped**.
+
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
 validated none of it. It's now split across 7 logical commits (ledger → truth-plane →

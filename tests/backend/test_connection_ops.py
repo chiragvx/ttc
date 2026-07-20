@@ -38,6 +38,18 @@ def test_add_connection_works_for_the_generic_bar_end_interfaces_too():
     assert any(conn["id"] == r["connection_id"] for conn in led["connections"])
 
 
+def test_add_connection_works_for_the_generic_plate_face_interfaces_too():
+    # 2026-07-20 — the second generic helper (plate_face_interfaces), REST round-trip.
+    c = _client()
+    tray = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "avionics_tray"}).json()["instance_id"]
+    div = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "battery_bay_divider"}).json()["instance_id"]
+    r = c.post("/connection_ops", json={"op": "add_connection", "a_instance": tray, "a_interface": "top",
+                                        "b_instance": div, "b_interface": "bottom"}).json()
+    assert r["ok"] and r["status"] == "APPLIED"
+    led = c.get("/ledger").json()
+    assert any(conn["id"] == r["connection_id"] for conn in led["connections"])
+
+
 def test_add_connection_applies_and_persists_through_replay():
     c = _client()
     body, wr = _bwb_and_wing(c)
