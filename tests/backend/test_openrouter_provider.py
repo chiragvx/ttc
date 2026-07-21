@@ -289,7 +289,34 @@ def test_stream_chat_malformed_tool_call_json_yields_error_not_silent_continue()
     events = list(prov.stream_chat(messages=[{"role": "user", "content": "??"}], ledger_json="{}"))
 
     errors = [msg for k, msg in events if k == "error"]
-    assert errors and "could not be parsed" in errors[0]
+    # foundations-audit follow-up (2026-07-21, live-reproduced): this assertion used to check ONLY
+    # errors[0]'s content, never the COUNT — which let a real double-error bug hide in plain sight
+    # (this exact repro also yielded a second, redundant "no response was generated" error underneath
+    # the specific one, since the generic end-of-stream fallback didn't know a specific error had
+    # already fired). Asserting the count is what actually would have caught it.
+    assert len(errors) == 1
+    assert "could not be parsed" in errors[0]
+    assert not any(k == "proposal" for k, _ in events)
+    assert events[-1] == ("done", None)
+
+
+def test_stream_chat_schema_invalid_tool_call_yields_exactly_one_error_not_two():
+    """foundations-audit follow-up (2026-07-21, live-reproduced): a tool call whose arguments are
+    VALID JSON but the WRONG SHAPE (a bare list, not the DeltaProposal object) hits a genuinely
+    different code path than malformed-JSON-syntax above (schema validation, not json.loads) — but
+    had the identical bug: the per-call "could not be parsed" error AND the generic end-of-stream
+    "no response was generated" fallback both fired for the same turn, since nothing had set
+    saw_proposal/saw_token and the fallback didn't know a specific error already covered it."""
+    def fake_stream(url, headers, json):
+        yield {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": "[1, 2, 3]"}}]}, "finish_reason": "tool_calls"}]}
+
+    prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+    events = list(prov.stream_chat(messages=[{"role": "user", "content": "hi"}], ledger_json="{}"))
+
+    errors = [msg for k, msg in events if k == "error"]
+    assert len(errors) == 1
+    assert "could not be parsed" in errors[0]
     assert not any(k == "proposal" for k, _ in events)
     assert events[-1] == ("done", None)
 

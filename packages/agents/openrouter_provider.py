@@ -226,6 +226,10 @@ class OpenRouterDeltaProvider(LLMProvider):
             yield ("done", None)  # keep the ('error', ...) then ('done', None) contract even here
             return
         saw_proposal = False
+        # Tracks whether a SPECIFIC per-tool-call error was already yielded (a parse failure or a
+        # schema-validation failure, neither one truncation-shaped) — see the end-of-stream check
+        # below for why this must suppress the generic "no response was generated" fallback.
+        yielded_specific_error = False
         # A completion cut off by the max_tokens cap ("length") already fully explains a malformed
         # trailing tool-call arg string; the generic parse-failure message is redundant noise on top
         # of the more specific, more actionable "cut off" message a few lines down, and it's the
@@ -299,6 +303,7 @@ class OpenRouterDeltaProvider(LLMProvider):
                         truncated = True
                     elif not truncated:
                         yield ("error", "the model's proposal could not be parsed — try rephrasing or asking again")
+                        yielded_specific_error = True
                     continue
             try:
                 proposal = DeltaProposal.model_validate(parsed)
@@ -309,6 +314,7 @@ class OpenRouterDeltaProvider(LLMProvider):
                 logger.warning("stream_chat: tool-call arguments failed schema validation (%s)", e)
                 if not truncated:
                     yield ("error", "the model's proposal could not be parsed — try rephrasing or asking again")
+                    yielded_specific_error = True
                 continue
             if proposal.deltas or proposal.feature_ops or proposal.instance_ops \
                     or proposal.connection_ops or proposal.coupling_ops or proposal.scope_proposal \
@@ -325,10 +331,17 @@ class OpenRouterDeltaProvider(LLMProvider):
             # (still the safest guess when nothing usable came through) — but NOT when a proposal
             # already validated: that's direct, positive evidence the completion was actually fine.
             yield ("error", "the response was cut off before finishing — try a shorter or simpler request")
-        elif not saw_token and not saw_proposal:
+        elif not saw_token and not saw_proposal and not yielded_specific_error:
             # "no response was generated" would be actively wrong here if truncated: something WAS
             # generated, it just didn't survive parsing — the "cut off" message above already covers
             # that case with the correct explanation, so this one only applies when nothing was cut
-            # off either (a genuinely empty/no-op turn).
+            # off either (a genuinely empty/no-op turn). It is ALSO wrong — and, before this fix,
+            # ACTUALLY FIRED (2026-07-21, live-reproduced: a single malformed/schema-invalid tool call
+            # with no finish_reason-based truncation signal) — when a specific per-tool-call error was
+            # already yielded above: that message already told the user exactly what went wrong ("the
+            # model's proposal could not be parsed"), so stacking a second, more generic "no response
+            # was generated" underneath it is pure redundant noise, not new information, in the SAME
+            # contradictory-pair-of-messages shape every other fix in this function already guards
+            # against. Only fire this generic backstop when NOTHING at all was communicated yet.
             yield ("error", "no response was generated for that message — try rephrasing or asking again")
         yield ("done", None)
