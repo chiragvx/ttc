@@ -16,5 +16,10 @@ import type { ValidationResult } from "../types";
 export function shouldAutoCorrect(report: ValidationResult): boolean {
   if (!report.ok) return true;
   const issues = [...report.geometric.issues, ...(report.visual?.issues ?? [])];
-  return issues.some((i) => i.check === "connectivity");
+  // "connections" (dangling/self/unsatisfied connection refs, from connection_issues() in
+  // packages/subsystems/placement.py) is the same class of confident, actionable signal as
+  // "connectivity" above -- validate.py's own comment calls an unresolved connection "a real
+  // error", not an ambiguous judgment call -- it's just hardcoded severity="warning" there too,
+  // so it needs the same override of the !report.ok gate.
+  return issues.some((i) => i.check === "connectivity" || i.check === "connections");
 }

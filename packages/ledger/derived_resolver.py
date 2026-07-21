@@ -16,6 +16,15 @@ from dataclasses import dataclass
 from packages.ledger.branch import iter_parameters
 from packages.ledger.schema import CutFeature, DerivedSafety, MasterParametricLedger
 
+# Bump this whenever Verdict's field set changes (a field added, removed, renamed, or its default
+# changed). verdict_from_json() below refuses to deserialize a stored row whose schema_version doesn't
+# match the current one -- an old-shape row is treated as "no verdict for this geometry" (forcing a
+# fresh solve) rather than reconstructed with silently-defaulted field values. This closed a real gap:
+# `material`/`load_n` were added to Verdict specifically to stop a 25 N verdict from silently
+# satisfying a 40 N request (see the comment below); a PRE-that-change row would otherwise deserialize
+# today with `load_n` defaulting to 40.0, reopening exactly the bug the fields were added to close.
+VERDICT_SCHEMA_VERSION = 1
+
 # params that define the bracket's geometry the solver analyzes; changing any invalidates a prior
 # verdict. Post-Phase-D, bracket geometry lives in the generic geometry bag under `domains.geometry.`.
 GEOMETRY_PARAMS = (
@@ -102,6 +111,30 @@ class Verdict:
             factor_of_safety=self.factor_of_safety, mesh_converged=self.mesh_converged,
             watertight=self.watertight, min_wall_ok=self.min_wall_ok,
         )
+
+
+def verdict_to_json(verdict: "Verdict") -> str:
+    """The one place a Verdict is serialized for storage -- always tags it with the current schema
+    version so a future field change can be detected on read, instead of silently deserializing into
+    whatever defaults happen to exist at read time. Use this (not `json.dumps(verdict.__dict__)`)
+    everywhere a Verdict is persisted."""
+    return json.dumps({"schema_version": VERDICT_SCHEMA_VERSION, **verdict.__dict__})
+
+
+def verdict_from_json(raw: str) -> "Verdict | None":
+    """The one place a Verdict is deserialized from storage. Returns None -- never a best-effort,
+    default-filled reconstruction -- if the stored row's schema_version is missing or doesn't match
+    the current one, or if its field set no longer matches Verdict's constructor exactly. A caller
+    that gets None should treat that row as if it didn't exist (no verdict for this geometry, forcing
+    a fresh solve), per Inversion #1: a safety-relevant value that can't be reconstructed with
+    confidence is "unknown", never guessed."""
+    d = json.loads(raw)
+    if d.pop("schema_version", None) != VERDICT_SCHEMA_VERSION:
+        return None
+    try:
+        return Verdict(**d)
+    except TypeError:
+        return None
 
 
 def latest_verdict(

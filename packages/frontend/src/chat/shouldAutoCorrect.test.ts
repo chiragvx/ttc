@@ -35,6 +35,13 @@ describe("shouldAutoCorrect", () => {
     expect(shouldAutoCorrect(r)).toBe(false);
   });
 
+  it("fires on a connections issue even when report.ok is true", () => {
+    // connections (dangling/self/unsatisfied connection refs) is also hardcoded severity=warning
+    // in validate.py, so report.ok stays true -- same gap class as the connectivity fix above.
+    const r = report({ ok: true, geometricIssues: [issue("connections", "warning")] });
+    expect(shouldAutoCorrect(r)).toBe(true);
+  });
+
   it("does not fire when there are no issues at all", () => {
     expect(shouldAutoCorrect(report())).toBe(false);
   });

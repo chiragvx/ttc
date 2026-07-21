@@ -16,7 +16,7 @@ import type { ChatEvent, ChatMessage, ConnectionOp, ConnectionOpOutcome, Couplin
 interface Props {
   settings: LlmSettings;
   onApply: (deltas: ParameterDelta[]) => Promise<DeltaOutcome[]>;
-  onUndo: (outcomes: DeltaOutcome[]) => Promise<void>;
+  onUndo: (outcomes: DeltaOutcome[]) => Promise<{ ok: boolean; reason?: string }>;
   onApplyFeatureOp: (op: FeatureOp) => Promise<FeatureOpOutcome>;
   onApplyInstanceOp: (op: InstanceOp) => Promise<InstanceOpOutcome>;
   onApplyConnectionOp: (op: ConnectionOp) => Promise<ConnectionOpOutcome>;  // Phase 1b mate
@@ -267,10 +267,20 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
           <ProposalCard
             outcomes={m.outcomes}
             undone={!!undone[m.id]}
+            undoError={undoErrors[`${m.id}:delta`]}
             onHover={onHoverInstance}
             onUndo={async () => {
-              await onUndo(m.outcomes!);
-              setUndone((u) => ({ ...u, [m.id]: true }));
+              // 2026-07-21 (foundations-audit H6): check the result instead of assuming success —
+              // a reversal can be REJECTED/CONFLICTed (e.g. the node got HARD_LOCK'd since, or a
+              // tightened invariant now rejects the old value). Mirrors the feature_op/instance_op
+              // handlers just below, which already do this correctly.
+              const result = await onUndo(m.outcomes!);
+              if (result.ok) {
+                setUndone((u) => ({ ...u, [m.id]: true }));
+                setUndoErrors((s) => { const { [`${m.id}:delta`]: _drop, ...rest } = s; return rest; });
+              } else {
+                setUndoErrors((s) => ({ ...s, [`${m.id}:delta`]: result.reason || "undo failed" }));
+              }
             }}
           />
         ),

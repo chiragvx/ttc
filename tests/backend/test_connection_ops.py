@@ -93,6 +93,35 @@ def test_self_connection_is_rejected():
     assert "itself" in r["message"]
 
 
+def test_second_connection_to_an_already_claimed_interface_is_rejected():
+    # 2026-07-21 audit (HIGH, live-reproduced): apply_connection_op validated everything about a
+    # NEW connection except whether one of its endpoints' (instance, interface) was already claimed
+    # by a DIFFERENT existing connection. resolve_placements positions each mated neighbor from its
+    # host's interface frame, so two connections sharing bwb_fuselage's 'tip_right' silently placed
+    # BOTH wing_panel instances at the identical world Transform — overlapping geometry that
+    # connection_issues() never reported, because each connection's own two endpoints DID coincide.
+    c = _client()
+    body, wr1 = _bwb_and_wing(c)
+    wr2 = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "wing_panel"}).json()["instance_id"]
+    first = c.post("/connection_ops", json={"op": "add_connection", "a_instance": wr1, "a_interface": "root",
+                                             "b_instance": body, "b_interface": "tip_right"}).json()
+    assert first["ok"] and first["status"] == "APPLIED"
+    second = c.post("/connection_ops", json={"op": "add_connection", "a_instance": wr2, "a_interface": "root",
+                                              "b_instance": body, "b_interface": "tip_right"}).json()
+    assert second["status"] == "REJECTED"
+    assert "already connected" in second["message"]
+    # the first connection is untouched and no phantom second connection was recorded
+    led = c.get("/ledger").json()
+    assert [conn["id"] for conn in led["connections"]] == [first["connection_id"]]
+
+    # freeing the interface (remove the first connection) must let a new one claim it — the check
+    # is against the CURRENT live connection set, not history.
+    c.post("/connection_ops", json={"op": "remove_connection", "id": first["connection_id"]})
+    third = c.post("/connection_ops", json={"op": "add_connection", "a_instance": wr2, "a_interface": "root",
+                                             "b_instance": body, "b_interface": "tip_right"}).json()
+    assert third["ok"] and third["status"] == "APPLIED"
+
+
 def test_remove_connection():
     c = _client()
     body, wr = _bwb_and_wing(c)

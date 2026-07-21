@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
+
 from packages.ledger.derived_resolver import (
+    VERDICT_SCHEMA_VERSION,
     Verdict,
     geometry_signature,
     latest_verdict,
     ledger_with_derived,
     resolve_derived,
+    verdict_from_json,
+    verdict_to_json,
 )
 from packages.ledger.gates import ExportStatus, evaluate_export_gates
 from packages.ledger.schema import Review, ReviewState
@@ -110,6 +115,46 @@ def test_verdict_from_a_different_load_case_does_not_satisfy_a_specific_request(
     # a caller that doesn't specify a case (material=None, load_n=None) still matches ANY case —
     # unchanged default behavior for pre-existing callers like the export gate
     assert latest_verdict(base_ledger, verdicts, fingerprint=FP) is verdict_25n
+
+
+def test_verdict_json_round_trips_through_the_store_format(base_ledger):
+    sig = geometry_signature(base_ledger)
+    v = _verdict(sig)
+    restored = verdict_from_json(verdict_to_json(v))
+    assert restored == v
+
+
+def test_verdict_from_json_drops_a_row_with_no_schema_version_instead_of_defaulting_fields():
+    """The confirmed bug this closes: `material`/`load_n` were added to Verdict after rows already
+    existed in storage without them. Blindly doing `Verdict(**json.loads(raw))` on such a row would
+    silently backfill load_n=40.0 -- indistinguishable from a genuinely-solved 40 N verdict, exactly
+    the fabricated-cross-load-case-match bug those fields exist to prevent. A pre-versioning row (no
+    "schema_version" key at all) must be dropped, not guessed."""
+    pre_versioning_row = json.dumps({
+        "geometry_signature": "sig", "fingerprint": "fp", "factor_of_safety": 4.0,
+        "mesh_converged": True, "watertight": True, "min_wall_ok": True,
+    })
+    assert verdict_from_json(pre_versioning_row) is None
+
+
+def test_verdict_from_json_drops_a_row_whose_schema_version_does_not_match_current():
+    stale = json.dumps({
+        "schema_version": VERDICT_SCHEMA_VERSION + 1, "geometry_signature": "sig", "fingerprint": "fp",
+        "factor_of_safety": 4.0, "mesh_converged": True, "watertight": True, "min_wall_ok": True,
+        "material": "PLA", "load_n": 40.0, "solver_seconds": 1.0,
+    })
+    assert verdict_from_json(stale) is None
+
+
+def test_verdict_from_json_drops_a_row_whose_field_set_no_longer_matches():
+    # correct version tag, but a field Verdict's constructor doesn't recognize (e.g. left over from a
+    # shape change that should have bumped the version but didn't) -- still refuses to guess.
+    wrong_shape = json.dumps({
+        "schema_version": VERDICT_SCHEMA_VERSION, "geometry_signature": "sig", "fingerprint": "fp",
+        "factor_of_safety": 4.0, "mesh_converged": True, "watertight": True, "min_wall_ok": True,
+        "a_field_that_does_not_exist": 1,
+    })
+    assert verdict_from_json(wrong_shape) is None
 
 
 def test_export_gate_flips_with_verdict_and_signoff(base_ledger):

@@ -22,11 +22,13 @@ export function ProposalCard({
   outcomes,
   onUndo,
   undone,
+  undoError,
   onHover,
 }: {
   outcomes: DeltaOutcome[];
   onUndo: () => void;
   undone: boolean;
+  undoError?: string;
   onHover?: (instanceId: string | null) => void;
 }) {
   const undoable = outcomes.some((o) => o.oldValue != null && (o.status === "APPLIED" || o.status === "APPLIED_ADVISORY"));
@@ -60,9 +62,10 @@ export function ProposalCard({
         );
       })}
       {undoable && (
-        <div style={{ marginTop: 6, display: "flex", justifyContent: "flex-end" }}>
+        <div style={{ marginTop: 6, display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6 }}>
+          {undoError && !undone && <FailureReason reason={undoError} />}
           <button onClick={onUndo} disabled={undone} style={{ ...undoBtn, opacity: undone ? 0.5 : 1 }}>
-            {undone ? "↩ undone" : "↩ Undo"}
+            {undone ? "↩ undone" : undoError ? "↩ retry Undo" : "↩ Undo"}
           </button>
         </div>
       )}

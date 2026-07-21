@@ -163,7 +163,7 @@ def _world_frame(ledger, placements, instance_id: str, interface: str) -> Option
     return _apply_transform_to_frame(t, lf)
 
 
-def connection_issues(ledger: "MasterParametricLedger") -> list[str]:
+def connection_issues(ledger: "MasterParametricLedger", instance_id: str | None = None) -> list[str]:
     """Human-readable problems with the connection graph, for the self-check:
     - DANGLING: an endpoint whose instance or interface doesn't exist.
     - ROTATION-NEEDED: a mate whose normals aren't anti-parallel (the v1 solver only auto-places
@@ -173,9 +173,18 @@ def connection_issues(ledger: "MasterParametricLedger") -> list[str]:
       violated. This is the "part mated by two conflicting connections" case: v1 places
       first-reached-wins and this check reports the loser instead of silently ignoring it (per
       ENGINEERING_GRAPH_PLAN.md P1.6 — report the conflict, don't attempt a full constraint solver).
-    Empty list = the graph is clean."""
+    Empty list = the graph is clean.
+
+    `instance_id` (default None -> every connection, the pre-existing/self-check-tab behavior)
+    restricts the per-connection checks to connections where `instance_id` is one of the two endpoints,
+    and the multiple-anchors check to whichever connected component `instance_id` actually belongs to.
+    Pass it whenever the caller means ONE specific part (the export/signoff gate) — omitting it here is
+    what let an unrelated part's broken connection elsewhere in the file block a fully-grounded,
+    unrelated part's export (foundations-audit H3, 2026-07-21)."""
     issues: list[str] = []
     for c in ledger.connections:
+        if instance_id is not None and instance_id not in (c.a.instance_id, c.b.instance_id):
+            continue
         # a part cannot mate to itself
         if c.a.instance_id == c.b.instance_id:
             issues.append(f"connection {c.id}: both endpoints are the same instance "
@@ -196,6 +205,8 @@ def connection_issues(ledger: "MasterParametricLedger") -> list[str]:
     # review, HIGH). v1 still only TRANSLATES; this makes the guard honest about when that's not enough.
     placements = resolve_placements(ledger)
     for c in ledger.connections:
+        if instance_id is not None and instance_id not in (c.a.instance_id, c.b.instance_id):
+            continue
         wa = _world_frame(ledger, placements, c.a.instance_id, c.a.interface)
         wb = _world_frame(ledger, placements, c.b.instance_id, c.b.interface)
         if wa is None or wb is None:
@@ -236,6 +247,11 @@ def connection_issues(ledger: "MasterParametricLedger") -> list[str]:
                 if nb not in comp:
                     stack.append(nb)
         seen |= comp
+        if instance_id is not None and instance_id not in comp:
+            continue  # v1 resolves one whole connected component together (one anchor as the datum,
+            # the rest mated relative to it) -- an anchor conflict anywhere in `instance_id`'s OWN
+            # component genuinely affects its placement, but a conflict in a totally separate,
+            # unconnected component does not.
         anchored = sorted(i for i in comp if ledger.instances[i].transform is not None)
         if len(anchored) > 1:
             issues.append(

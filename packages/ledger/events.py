@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from enum import Enum
 from typing import Callable, Iterable, Optional
 
@@ -253,14 +255,57 @@ class BaseEventLog(ABC):
     @abstractmethod
     def _get_artifact(self, sha256: str) -> bytes | None: ...
 
+    # -- concurrency ------------------------------------------------------------
+    def _store_lock_(self) -> threading.RLock:
+        # ONE lock guards every operation that touches this store's connection: fold()'s cache
+        # read/write, _append()'s count->hash->store sequence, and transaction()'s grouped writes.
+        # 2026-07-21 review: an earlier version of this fix gave fold() and _append()/transaction()
+        # TWO SEPARATE locks -- which does not actually serialize them against each other. PgEventStore
+        # and SqlEventStore share ONE connection object across every concurrent request to the same
+        # file; a fold() read and a transaction()'s writes running through two different locks could
+        # still execute concurrently on that SAME connection, which neither psycopg nor sqlite3
+        # supports safely from multiple threads at once. RLock (not Lock): transaction() holds this for
+        # its whole block, and each `_append()` made from inside that block re-acquires it on the SAME
+        # thread -- a plain Lock would self-deadlock there. Created via `dict.setdefault`, atomic under
+        # the GIL, so two threads racing to create it can never end up guarding the same store with two
+        # different lock objects.
+        return self.__dict__.setdefault("_store_lock", threading.RLock())
+
     # -- append ---------------------------------------------------------------
     def _append(self, kind: EventKind, payload: dict, actor: str, ts: str) -> Event:
-        seq = self._count()
-        prev = self._last_hash() if seq else GENESIS_PREV
-        h = compute_hash(prev, kind, seq, actor, ts, payload)
-        ev = Event(seq=seq, kind=kind, actor=actor, ts=ts, payload=payload, prev_hash=prev, hash=h)
-        self._store_event(ev)
-        return ev
+        # 2026-07-21 fix: count -> last_hash -> store used to be three separate, unguarded round trips
+        # on a store shared across concurrent requests to the same file (see `fold()`'s docstring for
+        # why that's the app's ordinary traffic, not an edge case) -- two concurrent appends could
+        # compute the SAME `seq`/`prev_hash`, corrupting the hash chain or colliding on the primary
+        # key. Locked for the same reason `fold()` is -- and with the SAME lock (see `_store_lock_`).
+        with self._store_lock_():
+            seq = self._count()
+            prev = self._last_hash() if seq else GENESIS_PREV
+            h = compute_hash(prev, kind, seq, actor, ts, payload)
+            ev = Event(seq=seq, kind=kind, actor=actor, ts=ts, payload=payload, prev_hash=prev, hash=h)
+            self._store_event(ev)
+            return ev
+
+    @contextmanager
+    def transaction(self):
+        """Group several `_append()` calls (or other writes made through this store) into one atomic
+        unit: either all of them become durable, or -- if the process dies, or an exception is raised,
+        partway through -- none do. Use this whenever a single LOGICAL mutation is expressed as more
+        than one event (e.g. cascade effects plus their driver edit, or cascade-removed
+        connections/couplings plus the instance-removal that caused them) -- without it, a crash
+        mid-sequence can leave a durable event with no companion event to explain it (a cascade value
+        with no driver edit, say), which `replay()` then folds as if it were always-valid history.
+
+        Also holds the SAME lock `_append()` uses, for the whole block: this store's connection is one
+        object shared across concurrent requests to the same file, so a grouped write must exclude
+        other threads' appends for its entire duration, not just append-by-append (an RLock, so the
+        `_append()` calls made from inside this block re-entering the lock on the same thread is fine).
+
+        Default here (used by the in-memory `EventLog`): no real transaction to wrap, since an
+        in-memory store has nothing to roll back -- a crash loses the whole process's state together,
+        not partially. `SqlEventStore`/`PgEventStore` override this with a genuine DB transaction."""
+        with self._store_lock_():
+            yield
 
     def append_genesis(self, ledger: MasterParametricLedger, actor: str, ts: str) -> Event:
         if self._count():
@@ -367,20 +412,36 @@ class BaseEventLog(ABC):
         actual rows unless it did. Cache key includes `id(reconcile)` since folding with vs without
         `reconcile_all` produces genuinely different ledger states — a different callable invalidates
         it. Safe under this class's append-only contract: events are only ever added, never removed
-        or reordered, by any caller reachable from this store's own API."""
-        n = self._count()
-        cache_ledger = getattr(self, "_fold_cache_ledger", None)
-        cache_count = getattr(self, "_fold_cache_count", 0)
-        cache_reconcile_id = getattr(self, "_fold_cache_reconcile_id", None)
-        if cache_ledger is not None and cache_reconcile_id == id(reconcile) and cache_count <= n:
-            new_events = self._events_since(cache_count) if cache_count < n else []
-            ledger = replay(new_events, reconcile=reconcile, initial=cache_ledger) if new_events else cache_ledger
-        else:
-            ledger = replay(self._all_events(), reconcile=reconcile)
-        self._fold_cache_ledger = ledger
-        self._fold_cache_count = n
-        self._fold_cache_reconcile_id = id(reconcile)
-        return ledger
+        or reordered, by any caller reachable from this store's own API.
+
+        Guarded by `_store_lock_()` (2026-07-21 fix, same lock `_append()`/`transaction()` use — see
+        that method's docstring for why it must be the SAME one, not a separate lock): most transport
+        routes are plain `def`, dispatched by FastAPI to a real OS-thread pool, so concurrent requests
+        against the SAME file's log (a slider drag firing several mutations while telemetry/params poll
+        concurrently) are the app's ordinary traffic, not an edge case. Without a lock, the
+        read-decide-replay-write sequence above is three separate, non-atomic steps: a thread can read
+        a stale `cache_ledger` paired with an already-advanced `cache_count` (written by a different
+        thread that finished its own fold() in between), causing `_events_since(cache_count)` to skip a
+        real slice of events — then write that wrong ledger back as the new cache, permanently dropping
+        the skipped slice from every future read of this file. Holding the lock for the whole method
+        serializes fold() calls on one store; the common case (a cache hit, no new events) is cheap
+        enough that this costs little, and correctness here matters more than the marginal concurrency
+        loss."""
+        with self._store_lock_():
+            n = self._count()
+            cache_ledger = getattr(self, "_fold_cache_ledger", None)
+            cache_count = getattr(self, "_fold_cache_count", 0)
+            cache_reconcile_id = getattr(self, "_fold_cache_reconcile_id", None)
+            if cache_ledger is not None and cache_reconcile_id == id(reconcile) and cache_count <= n:
+                new_events = self._events_since(cache_count) if cache_count < n else []
+                ledger = (replay(new_events, reconcile=reconcile, initial=cache_ledger)
+                          if new_events else cache_ledger)
+            else:
+                ledger = replay(self._all_events(), reconcile=reconcile)
+            self._fold_cache_ledger = ledger
+            self._fold_cache_count = n
+            self._fold_cache_reconcile_id = id(reconcile)
+            return ledger
 
     def verify_chain(self) -> bool:
         prev = GENESIS_PREV

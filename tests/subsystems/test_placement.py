@@ -144,6 +144,30 @@ def test_dangling_connection_is_flagged():
     assert any("ghost" in m and "missing instance" in m for m in issues)
 
 
+def test_connection_issues_scoped_to_one_instance_ignores_an_unrelated_part():
+    """foundations-audit H3, 2026-07-21: connection_issues(ledger, instance_id=...) must not let a
+    broken connection on a totally different, unrelated instance block/flag a clean one -- this is the
+    same underlying gap that let one part's broken connection block a different part's EXPORT (see
+    tests/backend/test_app.py's H3 regression test for the full REST-level version)."""
+    led = _bwb_with_two_wings()
+    # a dangling connection touching ONLY "wl" (and a nonexistent "ghost" instance) -- "wr" and "body"
+    # are not endpoints of it, even though "wr" shares the same connected component via "body".
+    led.connections.append(Connection(id="bad", a=InterfaceRef(instance_id="wl", interface="root"),
+                                      b=InterfaceRef(instance_id="ghost", interface="tip_left")))
+
+    unscoped = connection_issues(led)
+    assert any("ghost" in m for m in unscoped)  # unchanged pre-existing whole-ledger behavior
+
+    wl_issues = connection_issues(led, instance_id="wl")
+    assert any("ghost" in m for m in wl_issues)  # wl IS an endpoint of the dangling connection
+
+    wr_issues = connection_issues(led, instance_id="wr")
+    assert not any("ghost" in m for m in wr_issues)  # wr is unrelated -- must not see wl's problem
+
+    body_issues = connection_issues(led, instance_id="body")
+    assert not any("ghost" in m for m in body_issues)  # body is not an endpoint of the bad connection either
+
+
 def test_unknown_interface_is_flagged():
     led = _bwb_with_two_wings()
     led.connections.append(Connection(id="bad2", a=InterfaceRef(instance_id="wr", interface="nope"),

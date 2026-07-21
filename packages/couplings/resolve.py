@@ -113,15 +113,23 @@ def resolve_couplings(ledger: "MasterParametricLedger") -> list[CouplingResult]:
     return [resolve_coupling(ledger, c) for c in ledger.couplings]
 
 
-def coupling_gate_findings(ledger: "MasterParametricLedger") -> tuple[list[str], list[str]]:
+def coupling_gate_findings(
+    ledger: "MasterParametricLedger", instance_id: str | None = None,
+) -> tuple[list[str], list[str]]:
     """`(reasons, unknowns)` for the export gate — extends "unknown blocks export" from safety scalars
     to DERIVED LOADS. A coupling that can't be grounded (relation not in the catalog, missing input)
     means the target's load is unknown, so any FS computed for it would be for a fabricated load — that
     must block export, exactly like an unknown FS does. Injected via `evaluate_export_gates`'s
-    `extra_findings` seam (combined with the discipline findings at the app's gate call sites)."""
+    `extra_findings` seam (combined with the discipline findings at the app's gate call sites).
+
+    `instance_id` (default None -> every coupling, the pre-existing behavior) restricts this to
+    couplings TARGETING that instance — an unrelated part's ungrounded coupling elsewhere in the file
+    must not block a different, fully-grounded part's export (foundations-audit H3, 2026-07-21)."""
     reasons: list[str] = []
     unknowns: list[str] = []
     for res in resolve_couplings(ledger):
+        if instance_id is not None and res.target_instance != instance_id:
+            continue
         if not res.is_known:
             unknowns.append(f"coupling:{res.coupling_id}")
             reasons.append(f"coupling {res.coupling_id} -> {res.target_instance} load is unknown: {res.reason}")

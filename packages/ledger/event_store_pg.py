@@ -17,10 +17,14 @@ volume) is the recovery path, not an in-place ALTER.
 from __future__ import annotations
 
 import json
+import logging
 import os
+from contextlib import contextmanager
 
-from packages.ledger.derived_resolver import Verdict
+from packages.ledger.derived_resolver import Verdict, verdict_from_json, verdict_to_json
 from packages.ledger.events import BaseEventLog, Event, EventKind
+
+_logger = logging.getLogger(__name__)
 
 _DDL = [
     """CREATE TABLE IF NOT EXISTS events (
@@ -100,6 +104,20 @@ class PgEventStore(BaseEventLog):
         self.conn.execute("INSERT INTO artifacts (sha256, content) VALUES (%s,%s) ON CONFLICT DO NOTHING",
                           (sha256, content))
 
+    @contextmanager
+    def transaction(self):
+        """Real DB transaction (overrides BaseEventLog's no-op default). `self.conn` is opened with
+        autocommit=True (each bare `conn.execute()` commits itself immediately) -- psycopg's own
+        `Connection.transaction()` is designed to work on top of that: entering it runs everything in
+        the block as one real transaction (committed together on success, rolled back together on
+        exception -- including a process death mid-block, which never reaches COMMIT), then autocommit
+        resumes once the block exits. Also holds the append lock for the whole block (see
+        BaseEventLog.transaction()'s docstring for why: this store's connection is shared across
+        concurrent requests to the same file)."""
+        with self._store_lock_():
+            with self.conn.transaction():
+                yield
+
     def _get_artifact(self, sha256: str) -> bytes | None:
         row = self.conn.execute("SELECT content FROM artifacts WHERE sha256 = %s", (sha256,)).fetchone()
         return bytes(row[0]) if row else None
@@ -116,14 +134,25 @@ class PgVerdictStore:
     def put_verdict(self, project_id: str, verdict: Verdict) -> None:
         self.conn.execute(
             "INSERT INTO verdicts (project_id, geo_sig, fingerprint, verdict_json) VALUES (%s,%s,%s,%s)",
-            (project_id, verdict.geometry_signature, verdict.fingerprint, json.dumps(verdict.__dict__)),
+            (project_id, verdict.geometry_signature, verdict.fingerprint, verdict_to_json(verdict)),
         )
 
     def verdicts(self, project_id: str) -> list[Verdict]:
         rows = self.conn.execute(
             "SELECT verdict_json FROM verdicts WHERE project_id = %s ORDER BY id", (project_id,)
         ).fetchall()
-        return [Verdict(**json.loads(r[0])) for r in rows]
+        out = []
+        for (raw,) in rows:
+            v = verdict_from_json(raw)
+            if v is None:
+                _logger.warning(
+                    "project %s: dropping a stored verdict whose schema_version doesn't match "
+                    "the current Verdict shape -- treating it as absent (forces a fresh solve) "
+                    "rather than deserializing with guessed field values", project_id,
+                )
+                continue
+            out.append(v)
+        return out
 
     def put_optimize(self, project_id: str, result: dict) -> None:
         self.conn.execute(

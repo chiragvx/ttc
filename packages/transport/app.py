@@ -7,6 +7,7 @@ solver tiers live behind the Truth Plane and are out of this hot path by design.
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextvars
 import dataclasses
 import json
@@ -147,22 +148,65 @@ _DEMO_BOM = BOM([
 ])
 
 
+# Kernel-regen timeout guard (2026-07-21, foundations-audit F1 — see the long comment on
+# `_bounded_geometry_build` below for exactly what this does and does NOT protect against). A shared
+# pool, not one-off per call: GET /mesh fires on every live-drag tick (~10-60x/s during a drag,
+# Viewport.tsx's own "LIVE-DRAG REGEN" comment), and spinning up a fresh ThreadPoolExecutor per call
+# would itself be wasteful churn. Sized for several files/sessions regenerating concurrently, not just
+# one — this is a monolith serving every open browser tab.
+_KERNEL_REGEN_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=8, thread_name_prefix="kernel-regen"
+)
+_KERNEL_REGEN_TIMEOUT_S = 20.0  # generous above the ~2s a big lofted body already takes (Viewport.tsx)
+
+
+def _bounded_geometry_build(fn, *args):
+    """Run a geometry-builder call (build123d/OCCT — genuinely unbounded work per
+    packages/truth_plane/CLAUDE.md's own "runs inside the sandbox" framing) through a worker thread
+    with a wall-clock timeout, instead of letting `/mesh`/`/export/step`'s request handler block
+    forever on it. Raises TimeoutError if it doesn't return in time.
+
+    HONEST SCOPE (2026-07-21 decision, foundations-audit F1 — do not read this as "F1 is closed"):
+    this is a DELIBERATE, informed partial mitigation, not real containment. A GIL-release probe run
+    against this exact build123d/OCP version found boolean/fillet ops release the GIL only ~45-55% of
+    the time during a heavy call — real, measurable contention, not a full process freeze, but NOT a
+    clean release either. That matters here because it means a `future.result(timeout=...)` on a
+    THREAD cannot forcibly stop a wedged/degenerate OCCT call the way `truth_plane/sandbox.py`'s
+    `run_sandboxed` (or the setsid+killpg fix in `truth_plane/analysis.py`) genuinely can for a
+    SUBPROCESS: on timeout here, the request handler stops waiting and the caller gets a clean error —
+    but the abandoned worker thread keeps running the C++ call in the background, indefinitely,
+    competing for the GIL with every other request this process is handling, for as long as it takes
+    (or forever, for a truly non-terminating input). This bounds the common case (a slow-but-finite
+    regen, e.g. a big lofted body) to a clear, bounded failure instead of an unbounded hang; it does
+    NOT bound the pathological case (a genuinely wedged OCCT boolean) the way real out-of-process
+    containment would. Closing that gap for real needs kernel regen to run in a killable subprocess —
+    which conflicts with the live-drag UX (Viewport.tsx's 2026-07-19 fix) firing this on every drag
+    tick, since spawning a fresh subprocess at that frequency is a different cost tradeoff entirely.
+    That's a product decision, not an oversight — left open on purpose, not silently."""
+    future = _KERNEL_REGEN_EXECUTOR.submit(fn, *args)
+    return future.result(timeout=_KERNEL_REGEN_TIMEOUT_S)
+
+
 def _render_geometry(ledger: MasterParametricLedger, active_instance_id: str | None):
     """The geometry `/mesh` and `/export/step` show. Once a project holds MORE THAN ONE instance,
     this is the whole assembly (every instance composed via its Transform — see
     packages/subsystems/assembly.py); a single-instance project (the common case, and every project
     before Item 3) gets exactly the active instance's own geometry, byte-for-byte the same as before
-    — zero behavior change for that case. Returns None if there is no geometry to show."""
+    — zero behavior change for that case. Returns None if there is no geometry to show.
+
+    Bounded via `_bounded_geometry_build` (2026-07-21) — see its docstring for exactly what that does
+    and does not protect against. May raise TimeoutError; callers must handle it explicitly rather than
+    let it surface as an unhandled 500."""
     if len(ledger.instances) > 1:
         from packages.subsystems.assembly import render_assembly
-        return render_assembly(ledger)
+        return _bounded_geometry_build(render_assembly, ledger)
     inst = ledger.instances.get(active_instance_id)
     if inst is None:
         return None
     sub = get_subsystem(inst.subsystem_type)
     if sub.geometry_builder is None:
         return None
-    return sub.geometry_builder(ledger, inst.id)
+    return _bounded_geometry_build(sub.geometry_builder, ledger, inst.id)
 
 
 def _telemetry(ledger: MasterParametricLedger, instance_id: str | None = None) -> TelemetryDelta:
@@ -241,7 +285,7 @@ def _valid_ranges(ledger: MasterParametricLedger, instance_id: str | None) -> li
     ]
 
 
-def _gross_error_findings(ledger: MasterParametricLedger) -> list[str]:
+def _gross_error_findings(ledger: MasterParametricLedger, instance_id: str | None = None) -> list[str]:
     """Phase 3 (2026-07-19, ENGINEERING_GRAPH_PLAN.md P3 gross-error) — a DELIBERATELY coarse L0
     pre-check: for every instance carrying a KNOWN coupling-derived force load (packages.couplings.
     derived_load_n — a part with no coupling is skipped, not flagged), approximate it as a cantilever
@@ -259,7 +303,11 @@ def _gross_error_findings(ledger: MasterParametricLedger) -> list[str]:
     false-positive block on a coarse heuristic" precedent (validate.py's embedding check downgrade).
     A geometry build failure (or build123d unavailable in this environment) is swallowed here — a
     broken build is already reported elsewhere (the self-check's degeneracy check); this function's
-    only job is the gross-error catch, not general build diagnostics."""
+    only job is the gross-error catch, not general build diagnostics.
+
+    `instance_id` (default None -> every instance, the pre-existing behavior) restricts the check to
+    just that one instance — an unrelated, grossly-undersized part elsewhere in the file must not block
+    a different, fully-grounded part's export (foundations-audit H3, 2026-07-21)."""
     try:
         from packages.truth_plane.solvers.cases import Cantilever
     except ImportError:
@@ -269,7 +317,10 @@ def _gross_error_findings(ledger: MasterParametricLedger) -> list[str]:
 
     mat = material_lookup(ledger.domains.structure.material_profile)
     findings: list[str] = []
-    for iid, inst in ledger.instances.items():
+    items = ledger.instances.items() if instance_id is None else (
+        ((instance_id, ledger.instances[instance_id]),) if instance_id in ledger.instances else ()
+    )
+    for iid, inst in items:
         load_n, _reason = derived_load_n(ledger, iid)
         if load_n is None:
             continue  # no coupling-derived load on this part — nothing to gross-error-check
@@ -277,7 +328,10 @@ def _gross_error_findings(ledger: MasterParametricLedger) -> list[str]:
         if sub.geometry_builder is None:
             continue
         try:
-            part = sub.geometry_builder(ledger, iid)
+            # bounded (2026-07-21, F1) -- this runs on every /export/check; a wedged build on ONE
+            # instance must not hang the whole gross-error pass. A timeout is just another build
+            # failure here, same as any other Exception -- skip this instance's gross-error check.
+            part = _bounded_geometry_build(sub.geometry_builder, ledger, iid)
         except Exception:
             continue
         if part is None:
@@ -300,7 +354,7 @@ def _gross_error_findings(ledger: MasterParametricLedger) -> list[str]:
     return findings
 
 
-def _all_gate_findings(ledger):
+def _all_gate_findings(ledger, instance_id: str | None = None):
     """Combined export-gate `extra_findings`: discipline gates (thermal, …) PLUS Phase-2 coupling gates
     (an unknown derived load blocks, same as an unknown FS) PLUS Phase-3 connection-graph topology
     legality (dangling refs, rotation-needed mates, over-constrained/unsatisfied connections) PLUS
@@ -312,13 +366,23 @@ def _all_gate_findings(ledger):
     silently, which is exactly the "invalid should block, not silently pass" gap this closes (2026-07-19,
     ENGINEERING_GRAPH_PLAN.md P3 topology-legality). Every issue it reports is a real graph invalidity
     (not a missing-data case), so all go to `reasons` (blocking) — there's no `unknowns` counterpart.
-    Same for _gross_error_findings — see its own docstring."""
+    Same for _gross_error_findings — see its own docstring.
+
+    `instance_id` (2026-07-21, foundations-audit H3) scopes the coupling/connection/gross-error gates
+    (all three genuinely per-instance) to the SPECIFIC part being exported/signed-off — resolved_ledger()
+    already does this for `derived` itself (see its own 2026-07-19 CRITICAL comment); before this fix
+    these three ran over the WHOLE ledger regardless, so a broken coupling or connection on a totally
+    unrelated part elsewhere in the file could block export of a fully-grounded, unrelated instance.
+    Discipline findings (all_discipline_findings) stay whole-ledger: material/thermal state is currently
+    ONE global value for the whole project, not per-instance (a separate, known limitation), so there is
+    no narrower scope to apply there yet. `instance_id=None` preserves the exact pre-existing whole-ledger
+    behavior for any caller that doesn't have a specific instance in mind."""
     from packages.couplings import coupling_gate_findings
     from packages.subsystems.placement import connection_issues
     r1, u1 = all_discipline_findings(ledger)
-    r2, u2 = coupling_gate_findings(ledger)
-    r3 = connection_issues(ledger)
-    r4 = _gross_error_findings(ledger)
+    r2, u2 = coupling_gate_findings(ledger, instance_id)
+    r3 = connection_issues(ledger, instance_id)
+    r4 = _gross_error_findings(ledger, instance_id)
     return r1 + r2 + r3 + r4, u1 + u2
 
 
@@ -602,11 +666,15 @@ class FileState:
             # cascade first means the ledger already carries the companion value by the time the
             # direct edit itself replays, so the SAME sequence of plain mutations reconstructs
             # identical state without ever re-deriving or re-validating what already happened here.
-            for c in outcome.cascades:
-                self.log.append_mutation(
-                    ParameterDelta(target_node=c.target, requested_value=c.new_value),
-                    actor="cascade", ts=_TS)
-            self.log.append_mutation(delta, actor="user", ts=_TS)
+            # `transaction()` (2026-07-21): these are ONE logical mutation expressed as several events
+            # — without it, a crash between two of these appends could leave a cascade value durable
+            # with no driver edit to explain it, which replay() would then fold as valid history.
+            with self.log.transaction():
+                for c in outcome.cascades:
+                    self.log.append_mutation(
+                        ParameterDelta(target_node=c.target, requested_value=c.new_value),
+                        actor="cascade", ts=_TS)
+                self.log.append_mutation(delta, actor="user", ts=_TS)
             return CascadeUpdate(
                 mutations_applied=[MutationApplied(node=outcome.target, value=outcome.new_value,
                                                    old_value=outcome.old_value, status=outcome.status.value)],
@@ -1086,12 +1154,16 @@ def create_app() -> FastAPI:
             else:
                 # persist the cascade-removed connections and couplings FIRST (a dangling connection/
                 # coupling resurrecting on an id-reused new part is exactly what this prevents —
-                # 2026-07-19 review), then the instance removal itself.
-                for cid in outcome.removed_connection_ids:
-                    state.log.append_connection_removed(cid, actor="user", ts=_TS)
-                for coupling_id in outcome.removed_coupling_ids:
-                    state.log.append_coupling_removed(coupling_id, actor="user", ts=_TS)
-                state.log.append_instance_removed(outcome.instance_id, actor="user", ts=_TS)
+                # 2026-07-19 review), then the instance removal itself. `transaction()` (2026-07-21):
+                # these are ONE logical removal expressed as several events — without it, a crash
+                # between two of these appends could leave a partial removal durable (e.g. the instance
+                # gone but a companion connection-removed event never landing, or vice versa).
+                with state.log.transaction():
+                    for cid in outcome.removed_connection_ids:
+                        state.log.append_connection_removed(cid, actor="user", ts=_TS)
+                    for coupling_id in outcome.removed_coupling_ids:
+                        state.log.append_coupling_removed(coupling_id, actor="user", ts=_TS)
+                    state.log.append_instance_removed(outcome.instance_id, actor="user", ts=_TS)
                 if state.active_instance_id == outcome.instance_id:  # it just got removed -> fall
                     # back to whatever's left (None if the file is now empty) — no root to fall back to
                     state.active_instance_id = next(iter(state.ledger().instances), None)
@@ -1156,8 +1228,13 @@ def create_app() -> FastAPI:
     def export_check():
         # derived is resolved from the latest matching analysis verdict (stale -> unknown -> blocked);
         # discipline gates (thermal, …) are injected so a thermal-limited part also blocks honestly.
+        # No instance_id param on this endpoint -- resolve the SAME way resolved_ledger() itself falls
+        # back internally (the active instance), so the coupling/connection/gross-error findings below
+        # are scoped consistently with whichever instance `derived` was actually resolved for.
+        inst = state.active_instance()
+        iid = inst.id if inst is not None else None
         return evaluate_export_gates(
-            state.resolved_ledger(), extra_findings=_all_gate_findings
+            state.resolved_ledger(), extra_findings=lambda led: _all_gate_findings(led, iid)
         ).model_dump(mode="json")
 
     def _requirements_payload() -> dict:
@@ -1343,7 +1420,16 @@ def create_app() -> FastAPI:
         # FS-vs-floor/mesh/watertight pass-fail here, since evaluate_export_gates already owns that
         # decision at export time; this only requires that SOME real verdict exists for the geometry as
         # it currently stands, mirroring /export/step's own instance-scoped gate check just above.
-        gate = evaluate_export_gates(state.resolved_ledger(instance_id), extra_findings=_all_gate_findings)
+        #
+        # 2026-07-21 (foundations-audit H3): resolve the SAME effective instance resolved_ledger()
+        # resolves internally (mirrors its own instance_id-or-active-instance fallback), so the
+        # coupling/connection/gross-error findings below are scoped to that SAME part, not the whole
+        # ledger — an unrelated part's broken connection elsewhere in the file must not block signoff
+        # of a fully-grounded, unrelated instance.
+        inst = state.ledger().instances.get(instance_id) if instance_id is not None else state.active_instance()
+        iid = inst.id if inst is not None else None
+        gate = evaluate_export_gates(state.resolved_ledger(instance_id),
+                                     extra_findings=lambda led: _all_gate_findings(led, iid))
         if gate.unknowns:
             return JSONResponse(
                 status_code=409,
@@ -1365,7 +1451,15 @@ def create_app() -> FastAPI:
         # whatever the session's active instance happens to be — see resolved_ledger()'s own comment.
         # A per-part export of an unanalyzed part must not ride on a DIFFERENT (active, signed-off)
         # part's grounded verdict.
-        gate = evaluate_export_gates(state.resolved_ledger(instance_id), extra_findings=_all_gate_findings)
+        #
+        # 2026-07-21 (foundations-audit H3): extend that SAME instance-scoping to the coupling/
+        # connection/gross-error findings, not just `derived` — before this fix those three ran over
+        # the WHOLE ledger regardless of instance_id, so an unrelated part's broken coupling/connection
+        # elsewhere in the file could block export of this fully-grounded, unrelated instance.
+        inst = state.ledger().instances.get(instance_id) if instance_id is not None else state.active_instance()
+        iid = inst.id if inst is not None else None
+        gate = evaluate_export_gates(state.resolved_ledger(instance_id),
+                                     extra_findings=lambda led: _all_gate_findings(led, iid))
         if not gate.eligible:
             return JSONResponse(
                 status_code=409,
@@ -1378,17 +1472,24 @@ def create_app() -> FastAPI:
         # part's own geometry — additive, fully backward-compatible (omitted -> identical to before).
         from packages.truth_plane.regen.export import export_part
         led = state.ledger()
-        if instance_id is not None:
-            inst = led.instances.get(instance_id)
-            if inst is None:
-                return JSONResponse(status_code=404, content={"status": "error",
-                    "message": f"unknown instance_id {instance_id!r}"})
-            sub = get_subsystem(inst.subsystem_type)
-            if sub.geometry_builder is None:
-                return {"status": "error", "message": "instance has no buildable geometry"}
-            part = sub.geometry_builder(led, inst.id)
-        else:
-            part = _render_geometry(led, state.active_instance_id)
+        try:
+            if instance_id is not None:
+                inst = led.instances.get(instance_id)
+                if inst is None:
+                    return JSONResponse(status_code=404, content={"status": "error",
+                        "message": f"unknown instance_id {instance_id!r}"})
+                sub = get_subsystem(inst.subsystem_type)
+                if sub.geometry_builder is None:
+                    return {"status": "error", "message": "instance has no buildable geometry"}
+                part = _bounded_geometry_build(sub.geometry_builder, led, inst.id)
+            else:
+                part = _render_geometry(led, state.active_instance_id)
+        except TimeoutError:
+            # 2026-07-21 (F1) -- a bounded, honest failure instead of hanging this request forever.
+            # See _bounded_geometry_build's docstring for what this does and does not protect against.
+            return JSONResponse(status_code=504, content={"status": "error",
+                "message": "geometry regen timed out — the model may be too complex, or degenerate "
+                           "for the current parameters"})
         # `name` computed only AFTER confirming `part` exists (2026-07-19 review, HIGH: the no-instance_id
         # branch used to compute this unconditionally, so a zero-instance project raised an unhandled
         # AttributeError on state.active_instance() being None instead of the clean "no geometry to
@@ -1471,7 +1572,16 @@ def create_app() -> FastAPI:
         # or a multi-instance assembly) by iterating .solids() — a plain Solid iterates as one-item,
         # a Compound iterates as its children.
         led = state.ledger()
-        part = _render_geometry(led, state.active_instance_id)
+        try:
+            part = _render_geometry(led, state.active_instance_id)
+        except TimeoutError:
+            # 2026-07-21 (F1) -- a bounded, honest failure instead of hanging this request (and this
+            # thread) forever on a live-drag tick. See _bounded_geometry_build's docstring for what
+            # this does and does not protect against. The frontend's fetchMesh() already throws on any
+            # non-2xx and Viewport.tsx's pump() already swallows a failed fetch and self-repumps for
+            # the current state on the next tick (see its own "single-flight, latest-wins" comment) —
+            # so this degrades to "one drag tick's mesh update was skipped," not a stuck viewport.
+            return JSONResponse(status_code=504, content={"error": "geometry regen timed out"})
         if part is None:
             return {"positions": [], "indices": []}
         positions: list[float] = []
@@ -1498,9 +1608,22 @@ def create_app() -> FastAPI:
         # rough click-to-select groundwork (prd4.md Phase 3's "context-aware floating HUD" —
         # precise version needs OCCT topological identity, specialist-gated; this reuses the
         # generator-baked TAGS every subsystem already produces instead). Pure/no build123d cost
-        # beyond what /mesh itself already pays (same geometry_builder calls).
+        # beyond what /mesh itself already pays (same geometry_builder calls) — and fired in the
+        # SAME Promise.all as /mesh on every live-drag tick (Viewport.tsx's pump()), so it needs the
+        # identical _bounded_geometry_build guard (2026-07-21, F1 follow-up: this endpoint was missed
+        # in the original F1 pass and left calling geometry_builder unbounded). Wrapped WHOLE, like
+        # /mesh wraps render_assembly whole — list_pickable_features's own docstring explains why
+        # there's no per-instance seam to bound instead (instance_world_offsets can block before the
+        # per-instance loop ever runs).
         from packages.subsystems.features import list_pickable_features
-        return {"features": list_pickable_features(state.ledger())}
+        try:
+            features = _bounded_geometry_build(list_pickable_features, state.ledger())
+        except TimeoutError:
+            # See _bounded_geometry_build's docstring for what this does and does not protect
+            # against. Same degrade-gracefully story as /mesh's own 504: fetchMeshFeatures().catch(()
+            # => []) already treats any failure as "no feature update this tick," not a stuck viewport.
+            return JSONResponse(status_code=504, content={"error": "feature listing timed out"})
+        return {"features": features}
 
     @router.get("/manufacturing/manifest")
     def manufacturing_manifest():

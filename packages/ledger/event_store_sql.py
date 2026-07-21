@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 
 from packages.ledger.events import BaseEventLog, Event, EventKind
 
@@ -35,9 +36,30 @@ class SqlEventStore(BaseEventLog):
         self.conn = sqlite3.connect(path)
         self.conn.executescript(_DDL)
         self.conn.commit()
+        self._in_transaction = False  # see transaction() below
 
     def close(self) -> None:
         self.conn.close()
+
+    @contextmanager
+    def transaction(self):
+        """Real DB transaction (overrides BaseEventLog's no-op default): `_store_event`/`_put_artifact`
+        skip their own per-call commit while `_in_transaction` is set, so every write inside this block
+        lands in ONE sqlite transaction -- committed together on success, rolled back together if the
+        block raises (including a process death mid-block, which never gets to COMMIT at all)."""
+        with self._store_lock_():
+            if self._in_transaction:  # nested call (e.g. _append() from inside an outer transaction)
+                yield
+                return
+            self._in_transaction = True
+            try:
+                yield
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+            finally:
+                self._in_transaction = False
 
     def _count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
@@ -51,7 +73,8 @@ class SqlEventStore(BaseEventLog):
             "INSERT INTO events (seq, kind, actor, ts, payload, prev_hash, hash) VALUES (?,?,?,?,?,?,?)",
             (ev.seq, ev.kind.value, ev.actor, ev.ts, json.dumps(ev.payload), ev.prev_hash, ev.hash),
         )
-        self.conn.commit()
+        if not self._in_transaction:
+            self.conn.commit()
 
     def _all_events(self) -> list[Event]:
         rows = self.conn.execute(
@@ -72,7 +95,8 @@ class SqlEventStore(BaseEventLog):
 
     def _put_artifact(self, sha256: str, content: bytes) -> None:
         self.conn.execute("INSERT OR REPLACE INTO artifacts (sha256, content) VALUES (?, ?)", (sha256, content))
-        self.conn.commit()
+        if not self._in_transaction:
+            self.conn.commit()
 
     def _get_artifact(self, sha256: str) -> bytes | None:
         row = self.conn.execute("SELECT content FROM artifacts WHERE sha256 = ?", (sha256,)).fetchone()

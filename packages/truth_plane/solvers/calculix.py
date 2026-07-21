@@ -124,6 +124,38 @@ def solve(mesh: Mesh, *, youngs_mod_mpa: float, poisson: float, tip_load_n: floa
         with open(job + ".inp", "w", encoding="utf-8") as fh:
             fh.write(deck)
         proc = subprocess.run([ccx, "job"], cwd=workdir, capture_output=True, text=True, timeout=600)
+        # A ccx run that fails (singular stiffness matrix, negative Jacobian, a solver warning) can
+        # still leave a syntactically valid, parseable-but-degenerate .frd behind -- "did a .frd get
+        # written" alone can't tell that apart from a real converged solve. Gate on the process exit
+        # code first (mirrors sandbox.py's run_sandboxed OK/ERROR convention for OCCT jobs).
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"ccx exited non-zero (rc={proc.returncode}) -- solver failure, not a numeric result:\n"
+                f"{proc.stdout[-2000:]}\n{proc.stderr[-1000:]}"
+            )
+        # CalculiX is also known to sometimes exit 0 even after printing a fatal *ERROR rather than
+        # propagating a non-zero return code -- treat that as the same class of solver failure.
+        combined_output = f"{proc.stdout}\n{proc.stderr}"
+        if "*ERROR" in combined_output:
+            raise RuntimeError(
+                f"ccx reported *ERROR despite rc={proc.returncode} -- solver failure, not a numeric result:\n"
+                f"{proc.stdout[-2000:]}\n{proc.stderr[-1000:]}"
+            )
+        # Best-effort convergence cross-check from ccx's own .sta summary (when it wrote one): each
+        # completed increment is a row beginning with its STEP number, so zero such rows means ccx
+        # aborted before finishing even one increment. This is additive to, never a replacement for,
+        # the returncode/*ERROR checks above -- a missing or unrecognized .sta is NOT itself treated
+        # as a failure (crude signal only; exact .sta layout is FEA-engineer territory, not something
+        # to over-parse here).
+        sta_path = job + ".sta"
+        if os.path.exists(sta_path):
+            with open(sta_path, "r", encoding="utf-8", errors="replace") as fh:
+                sta_text = fh.read()
+            data_rows = [ln for ln in sta_text.splitlines() if ln.strip()[:1].isdigit()]
+            if not data_rows:
+                raise RuntimeError(
+                    f"ccx .sta shows no completed increments -- solver did not converge:\n{sta_text[-2000:]}"
+                )
         frd = job + ".frd"
         if not os.path.exists(frd):
             raise RuntimeError(f"ccx produced no .frd (rc={proc.returncode}):\n{proc.stdout[-2000:]}\n{proc.stderr[-1000:]}")

@@ -45,6 +45,14 @@ def list_pickable_features(ledger: "MasterParametricLedger") -> list[dict]:
     with 0.0. Add the instance's WORLD offset (from instance_world_offsets(ledger), called ONCE,
     not per-instance -- it's not free) to get the world-space point.
 
+    NOTE (2026-07-21): `instance_world_offsets` itself can call a geometry_builder (via
+    `assembly.py::_y_extent_mm`, for auto-laid-out instances with no explicit transform) -- this
+    function is genuinely unbounded end to end, same as `render_assembly`. Callers on an HTTP hot
+    path (see `packages/transport/app.py`'s `/mesh/features` handler) must wrap the WHOLE call in
+    `_bounded_geometry_build`, exactly like `/mesh` wraps `render_assembly` whole -- there is no
+    per-instance seam here to bound individually, since the offset phase can block before the
+    per-instance loop below ever runs.
+
     Returns a flat list of {"instance_id": str, "tag": str, "point": [x, y, z], "meta": dict} one
     entry per pickable feature. Do NOT call instance_world_offsets or any instance's
     geometry_builder more than once per instance -- both do real work (geometry_builder builds a

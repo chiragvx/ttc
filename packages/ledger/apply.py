@@ -821,6 +821,27 @@ def apply_connection_op(
                 ApplyStatus.REJECTED, op.id,
                 message=f"endpoint {side}: {inst.subsystem_type} has no interface {iface!r} "
                         f"(declares: {declared or 'none'})")
+        # neither endpoint's (instance, interface) may already be claimed by a DIFFERENT existing
+        # connection: resolve_placements (packages/subsystems/placement.py) positions each mated
+        # neighbor from its host's interface FRAME, so two connections sharing one host interface
+        # silently place both neighbors at the identical world Transform (2026-07-21 audit, HIGH) —
+        # and connection_issues() can't catch it after the fact because each connection's own two
+        # endpoints DO coincide (that's the whole bug). Checked against the CURRENT live connection
+        # set (not history), so removing a connection frees its interface for a new one; a same-id
+        # re-add of the identical connection can't reach here — the id-uniqueness check above already
+        # REJECTED it (this codebase has no "update an existing connection" op).
+        claimed_by = next(
+            (c for c in ledger.connections
+             if (c.a.instance_id, c.a.interface) == (iid, iface)
+             or (c.b.instance_id, c.b.interface) == (iid, iface)),
+            None,
+        )
+        if claimed_by is not None:
+            return ledger, ConnectionOpOutcome(
+                ApplyStatus.REJECTED, op.id,
+                message=f"endpoint {side}: {iid}.{iface} is already connected via {claimed_by.id!r} "
+                        f"({claimed_by.a.instance_id}.{claimed_by.a.interface} <-> "
+                        f"{claimed_by.b.instance_id}.{claimed_by.b.interface})")
 
     conn_id = op.id if op.id is not None else _next_connection_id(ledger)
     conn = Connection(

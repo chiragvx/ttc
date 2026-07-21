@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -178,22 +179,32 @@ def test_export_step_enforces_gates_server_side():
 def test_export_check_blocks_on_an_over_constrained_connection():
     # Phase 3 (2026-07-19, ENGINEERING_GRAPH_PLAN.md P3 topology-legality): connection_issues() already
     # fed the ADVISORY /validate self-check but a broken connection graph could still pass the EXPORT
-    # gate silently — closed by folding connection_issues() into _all_gate_findings. Both add_connection
-    # calls below succeed individually (real instances, real interfaces — apply_connection_op has no
-    # reason to reject either), but the SECOND one conflicts with the first (the v1 solver already
-    # placed the wing by its first mate, first-reached-wins — mirrors
-    # tests/subsystems/test_placement.py::test_over_constrained_connection_is_flagged_not_silently_dropped,
-    # here proven through the live REST -> gate path instead of calling connection_issues() directly).
+    # gate silently — closed by folding connection_issues() into _all_gate_findings.
+    #
+    # 2026-07-21 update (foundations-audit H2 fix): apply_connection_op now rejects a connection whose
+    # endpoint interface is ALREADY claimed by an existing connection, so the over-constrained state
+    # below (wing's "root" interface mated twice) is now caught at add-time — fail-fast — instead of
+    # being allowed through and only caught later by the export gate's connection_issues() walk. This
+    # is strictly better (the copilot gets an immediate, actionable REJECTED instead of silently
+    # building a broken graph it discovers is broken minutes later at export) but it does mean this
+    # specific scenario can no longer reach the gate via the live REST path — the gate-level
+    # connection_issues() over-constraint detection itself is still covered directly by
+    # tests/subsystems/test_placement.py::test_over_constrained_connection_is_flagged_not_silently_dropped
+    # (which builds the Connection objects directly, bypassing apply_connection_op's validation).
     c = _client()
     body = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "bwb_fuselage"}).json()["instance_id"]
     wing = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "wing_panel"}).json()["instance_id"]
-    c.post("/connection_ops", json={"op": "add_connection", "a_instance": wing, "a_interface": "root",
-                                    "b_instance": body, "b_interface": "tip_right"})
-    c.post("/connection_ops", json={"op": "add_connection", "a_instance": wing, "a_interface": "root",
-                                    "b_instance": body, "b_interface": "tip_left"})
+    first = c.post("/connection_ops", json={"op": "add_connection", "a_instance": wing, "a_interface": "root",
+                                    "b_instance": body, "b_interface": "tip_right"}).json()
+    assert first["status"] == "APPLIED"
+    second = c.post("/connection_ops", json={"op": "add_connection", "a_instance": wing, "a_interface": "root",
+                                    "b_instance": body, "b_interface": "tip_left"}).json()
+    assert second["status"] == "REJECTED"
+    # the rejected second connection never reached the ledger, so export sees a clean, single-mate
+    # graph — not blocked by a connection-legality finding (may still be blocked/eligible on other
+    # grounds, e.g. no verdict yet; that's not what this test is about).
     res = c.post("/export/check").json()
-    assert res["status"] == "EXPORT_BLOCKED"
-    assert any("do not meet" in r for r in res["reasons"])
+    assert not any("do not meet" in r for r in res.get("reasons", []))
 
 
 @pytest.mark.skipif(not importlib.util.find_spec("build123d"), reason="needs build123d")
@@ -226,6 +237,32 @@ def test_export_check_does_not_gross_error_flag_a_reasonable_coupled_load():
     assert not any("gross-error" in r for r in res["reasons"])
 
 
+def test_export_step_does_not_block_on_a_different_instances_gross_error():
+    """foundations-audit H3, 2026-07-21: the coupling/connection/gross-error extra_findings used to run
+    over the WHOLE ledger regardless of which instance was being exported -- a grossly-undersized part
+    ANYWHERE in the file blocked export of every other, fully-unrelated part too. Two round_bars in one
+    file: "victim" gets the same undersized coupled load as
+    test_export_check_blocks_on_a_grossly_undersized_coupled_part (a real, reachable gross-error
+    finding); "keeper" has no coupling at all. Exporting "keeper" must never see victim's finding."""
+    c = TestClient(create_app())
+    victim = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_bar"}).json()["instance_id"]
+    c.post("/coupling_ops", json={"op": "add_coupling", "target_instance": victim,
+                                  "relation": "force_from_pressure_area",
+                                  "inputs": [{"name": "pressure_pa", "value": 1e8},
+                                             {"name": "area_mm2", "value": 0.5}]})  # same 50N as above
+    keeper = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_bar"}).json()["instance_id"]
+
+    # sanity: exporting the actually-bad instance DOES see the gross-error finding (proves the fixture
+    # is real, not a false negative from something else entirely).
+    victim_res = c.get(f"/export/step?instance_id={victim}").json()
+    assert any("gross-error" in r and victim in r for r in victim_res["reasons"])
+
+    # the fix under test: exporting the CLEAN, unrelated instance must not see it.
+    keeper_res = c.get(f"/export/step?instance_id={keeper}").json()
+    assert not any("gross-error" in r for r in keeper_res["reasons"])
+    assert not any(victim in r for r in keeper_res["reasons"])
+
+
 def test_export_check_does_not_gross_error_flag_an_uncoupled_part():
     # a part with NO coupling has no derived load to gross-error-check against — absent, not flagged
     # (same "absent vs unknown" precedent as packages/couplings/resolve.py::derived_load_n).
@@ -255,6 +292,82 @@ def test_mesh_returns_real_geometry():
     res = _client().get("/mesh", params={"skin": 3.0}).json()
     assert len(res["positions"]) > 0 and len(res["positions"]) % 3 == 0
     assert len(res["indices"]) > 0 and len(res["indices"]) % 3 == 0
+
+
+def test_mesh_times_out_cleanly_instead_of_hanging_on_a_wedged_build(monkeypatch):
+    """foundations-audit F1 (2026-07-21, partial mitigation -- see _bounded_geometry_build's own
+    docstring for the honest scope: this bounds a slow-but-finite build, it does NOT forcibly kill a
+    genuinely wedged one). No real build123d/OCCT needed -- a fake, deliberately slow geometry_builder
+    stands in for "the kernel never returns," and the timeout is dropped to make the test fast."""
+    import dataclasses
+
+    import packages.transport.app as app_module
+    from packages.subsystems import SUBSYSTEM_REGISTRY, get_subsystem
+
+    def _never_returns(ledger, instance_id):
+        time.sleep(2.0)  # much longer than the test's own patched timeout below
+        raise AssertionError("should have been abandoned by the timeout, not actually finished")
+
+    monkeypatch.setattr(app_module, "_KERNEL_REGEN_TIMEOUT_S", 0.05)
+    # SubsystemContext is a frozen dataclass -- swap the whole registry entry, not one field.
+    slow_bracket = dataclasses.replace(get_subsystem("bracket"), geometry_builder=_never_returns)
+    monkeypatch.setitem(SUBSYSTEM_REGISTRY, "bracket", slow_bracket)
+
+    c = _client()
+    res = c.get("/mesh")
+    assert res.status_code == 504
+    assert "timed out" in res.json()["error"]
+
+
+def test_bounded_geometry_build_raises_timeout_error_on_a_wedged_build(monkeypatch):
+    """Unit-level check of the mechanism _render_geometry/_render_geometry's callers rely on --
+    /export/step's own timeout wiring isn't separately HTTP-tested here because reaching its
+    geometry-build step at all requires first satisfying the export gate (a real analyzed verdict),
+    which needs the real FEA solver this dev box doesn't have; the gate-scoping and gate-blocking
+    behavior around it is already covered elsewhere (test_export_step_enforces_gates_server_side
+    etc.) and /mesh (tested above) exercises the exact same _render_geometry -> _bounded_geometry_build
+    path with none of that gate machinery in the way."""
+    import packages.transport.app as app_module
+
+    def _never_returns():
+        time.sleep(2.0)
+        raise AssertionError("should have been abandoned by the timeout, not actually finished")
+
+    monkeypatch.setattr(app_module, "_KERNEL_REGEN_TIMEOUT_S", 0.05)
+    with pytest.raises(TimeoutError):
+        app_module._bounded_geometry_build(_never_returns)
+
+
+def test_mesh_features_times_out_cleanly_instead_of_hanging_on_a_wedged_build(monkeypatch):
+    """F1 follow-up (2026-07-21): /mesh/features is fired in the SAME Promise.all as /mesh on every
+    live-drag tick (Viewport.tsx's pump()) -- it was missed in the original F1 pass and called
+    geometry_builder directly with no timeout, an unbounded hole in an otherwise-bounded mitigation.
+    Wrapped WHOLE (like /mesh wraps render_assembly whole) because there is no per-instance seam to
+    bound: instance_world_offsets() can call a geometry_builder itself (assembly.py's own
+    _y_extent_mm, for an auto-laid-out instance with no explicit transform) BEFORE
+    list_pickable_features' per-instance loop ever runs -- confirmed by reproducing this exact
+    single-instance ledger wedging in the offset phase, not the loop, when this fix was first
+    attempted with a narrower per-instance seam."""
+    import dataclasses
+
+    import packages.transport.app as app_module
+    from packages.subsystems import SUBSYSTEM_REGISTRY, get_subsystem
+
+    def _never_returns(ledger, instance_id):
+        time.sleep(2.0)
+        raise AssertionError("should have been abandoned by the timeout, not actually finished")
+
+    monkeypatch.setattr(app_module, "_KERNEL_REGEN_TIMEOUT_S", 0.05)
+    slow_bracket = dataclasses.replace(get_subsystem("bracket"), geometry_builder=_never_returns)
+    monkeypatch.setitem(SUBSYSTEM_REGISTRY, "bracket", slow_bracket)
+
+    c = _client()
+    start = time.perf_counter()
+    res = c.get("/mesh/features")
+    elapsed = time.perf_counter() - start
+    assert res.status_code == 504
+    assert "timed out" in res.json()["error"]
+    assert elapsed < 1.5  # bounded by the patched 0.05s timeout, not the fake builder's 2s sleep
 
 
 @pytest.mark.needs_kernel

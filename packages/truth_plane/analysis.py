@@ -27,6 +27,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import queue
+import signal
 import tempfile
 import time
 import traceback
@@ -198,7 +199,18 @@ def analyze_geometry(params: dict[str, float], material_name: str, load_n: float
     )
 
 
+def _own_process_group() -> None:
+    """Put the CURRENT (child) process in a fresh session/process group, so the parent can killpg the
+    whole subtree on timeout -- including a grandchild (ccx/gmsh) this worker spawns via
+    subprocess.run, which by default inherits the worker's process group. Same containment technique
+    as sandbox.py's run_sandboxed. No-op on non-POSIX (this module's solver work only ever actually
+    runs inside the Linux sandbox; see the module docstring)."""
+    if os.name == "posix":
+        os.setsid()
+
+
 def _worker(q, params, material_name, load_n, subsystem_name, cut_features):
+    _own_process_group()
     try:
         q.put(("ok", analyze_geometry(params, material_name, load_n, subsystem_name, cut_features)))
     except Exception:
@@ -272,11 +284,30 @@ def _run_optimize(subsystem_name, candidates, base_params, material_name, load_n
 
 
 def _optimize_worker(q, candidates, base_params, material_name, load_n, fs_floor, subsystem_name, cut_features):
+    _own_process_group()
     try:
         q.put(("ok", _run_optimize(subsystem_name, candidates, base_params, material_name, load_n, fs_floor,
                                    cut_features)))
     except Exception:
         q.put(("error", traceback.format_exc()))
+
+
+def _kill_worker_group(p: mp.process.BaseProcess) -> None:
+    """Timeout containment: `p.terminate()` only signals the ONE worker Process, not its process
+    group -- if the worker is blocked inside calculix.py's `subprocess.run(..., timeout=600)` call to
+    `ccx` when this outer timeout fires, that grandchild is orphaned and keeps running untracked (up
+    to its own internal timeout, or longer if ccx itself hangs). The worker put itself in its own
+    session/process group as its first action (`_own_process_group`, called from `_worker` /
+    `_optimize_worker`), so `os.killpg` here takes the grandchild down with it -- the same technique
+    sandbox.py's `run_sandboxed` already uses for OCCT jobs. Falls back to plain `terminate()` on
+    non-POSIX, where this module's solver work never actually runs anyway."""
+    if os.name == "posix" and p.pid:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # already exited
+    else:
+        p.terminate()
 
 
 def optimize_in_subprocess(candidates: list[float], base_params: dict, material_name: str,
@@ -297,7 +328,7 @@ def optimize_in_subprocess(candidates: list[float], base_params: dict, material_
     try:
         status, payload = q.get(timeout=timeout_s)
     except queue.Empty:
-        p.terminate()
+        _kill_worker_group(p)
         raise RuntimeError("optimize timed out") from None
     finally:
         p.join(10)
@@ -323,7 +354,7 @@ def analyze_in_subprocess(params: dict[str, float], material_name: str, load_n: 
     try:
         status, payload = q.get(timeout=timeout_s)
     except queue.Empty:
-        p.terminate()
+        _kill_worker_group(p)
         raise RuntimeError("analysis timed out") from None
     finally:
         p.join(10)

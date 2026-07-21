@@ -5,6 +5,9 @@ BaseEventLog.fold() now caches the last-folded ledger and only replays events ap
 
 from __future__ import annotations
 
+import threading
+import time
+
 from packages.ledger.deltas import ParameterDelta
 from packages.ledger import events as events_module
 from packages.ledger.events import EventKind, EventLog
@@ -100,6 +103,67 @@ def test_a_different_reconcile_callable_invalidates_the_cache(base_ledger, monke
 
     log.fold(reconcile=None)
     assert len(calls) == 3  # None is ALSO a distinct identity from either callable
+
+
+def test_concurrent_fold_calls_never_overlap_and_never_lose_events(base_ledger):
+    """2026-07-21 fix (foundations-audit H1): fold()'s cache read/write used to be several separate,
+    non-atomic steps on a store shared across concurrent requests to the same file (most transport
+    routes are plain `def`, dispatched to a real thread pool -- ordinary traffic, not an edge case). A
+    traced interleaving could read a stale cache_ledger paired with an already-advanced cache_count,
+    causing a real slice of events to be silently and PERMANENTLY dropped from every future read.
+    `_count()` runs first thing inside fold()'s lock on every single call (cache-hit or miss) -- wrapping
+    it to detect concurrent entry is a direct probe of whether the lock is actually serializing calls,
+    not just an indirect timing check."""
+    log = EventLog()
+    log.append_genesis(base_ledger, actor="system", ts=TS)
+    # append everything up front, sequentially -- append()'s own count->hash->store race is a
+    # separate, already-tracked issue (H8), not what this test is isolating. This test is purely
+    # about concurrent READERS of an already-written log racing on fold()'s cache.
+    for v in (3.0, 3.5, 4.0, 4.5, 5.0, 5.5):
+        log.append_mutation(ParameterDelta(target_node=SKIN, requested_value=v), actor="user", ts=TS)
+
+    in_critical_section = threading.Event()
+    overlap_detected = threading.Event()
+    real_count = log._count
+
+    def _slow_count():
+        if in_critical_section.is_set():
+            overlap_detected.set()
+        in_critical_section.set()
+        try:
+            time.sleep(0.02)  # widen the window a real interleaving would need
+            return real_count()
+        finally:
+            in_critical_section.clear()
+
+    log._count = _slow_count
+
+    results: list = []
+    errors: list = []
+
+    def _worker() -> None:
+        try:
+            results.append(log.fold())
+        except Exception as e:  # pragma: no cover - surfaced via `errors`, not a silent pass
+            errors.append(e)
+
+    threads = [threading.Thread(target=_worker) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors, errors
+    assert not overlap_detected.is_set(), "two fold() calls entered the cache critical section concurrently"
+
+    # the definitive correctness check: nothing got lost. Every concurrent caller's result -- and the
+    # log's own cache afterward -- must match a totally independent from-scratch replay over every
+    # event actually appended -- exactly what a permanently-dropped event slice would violate.
+    log._count = real_count
+    cold = events_module.replay(log.events())
+    assert log.fold().model_dump() == cold.model_dump()
+    for r in results:
+        assert r.model_dump() == cold.model_dump()
 
 
 def test_events_since_matches_a_slice_of_all_events(base_ledger):

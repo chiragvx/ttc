@@ -261,18 +261,32 @@ export default function App() {
     return out;
   };
 
-  const undo = async (outcomes: DeltaOutcome[]) => {
+  // 2026-07-21 (foundations-audit H6): the caller used to mark this "undone" unconditionally, even
+  // when the backend REJECTED/CONFLICTed a reversal (e.g. the node got HARD_LOCK'd since, or a
+  // tightened cross-field invariant now rejects the old value) -- the AI-applied value stayed live
+  // in the ledger with no error surfaced anywhere, and the button just showed "undone" regardless.
+  // Returning a real result lets the caller (Chat.tsx) show a failure instead, matching the
+  // status-checked pattern already used by the feature_op/instance_op Undo handlers in the same file.
+  const undo = async (outcomes: DeltaOutcome[]): Promise<{ ok: boolean; reason?: string }> => {
     let touched = false;
+    const failures: string[] = [];
     for (const o of outcomes) {
       if (o.oldValue != null) {
-        await mutate(o.node, o.oldValue, undefined, false);
-        touched = true;
+        const resp = await mutate(o.node, o.oldValue, undefined, false);
+        if (resp.event_type === "PARAMETER_CASCADE_UPDATE") {
+          touched = true;
+        } else {
+          // keep attempting the rest of the batch -- one node's reversal being blocked shouldn't
+          // stop genuinely revertible siblings from being reverted too.
+          failures.push(`${o.node.split(".").pop()}: ${resp.reason || resp.status}`);
+        }
       }
     }
     if (touched) {
       setMeshKey((k) => k + 1);
       void onGeometryChanged();
     }
+    return failures.length ? { ok: false, reason: failures.join("; ") } : { ok: true };
   };
 
   // human accepts one AI-proposed hole/pocket/slot cut -> POST /feature_ops (rules-validated, same
