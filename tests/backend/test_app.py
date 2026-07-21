@@ -328,6 +328,35 @@ def test_chat_without_key_streams_no_llm():
     assert '"type": "no_llm"' in res.text
 
 
+def test_chat_survives_an_unhandled_exception_mid_stream(monkeypatch):
+    """foundations-audit follow-up (2026-07-22, live-reproduced): stream_chat's own internal
+    try/except only covers ITS OWN streaming-fetch loop -- an exception raised anywhere ELSE inside
+    it (a future bug in the post-stream tool-call processing, or any other unanticipated failure)
+    used to propagate as a raw, uncaught exception out of the /chat generator with NO SSE frame at
+    all -- not even the "error"+"done" pair this whole subsystem exists to guarantee. Confirmed via
+    TestClient before this fix: the response delivered ZERO bytes and the client saw a raw
+    RuntimeError, not a clean stream. This proves the fix holds the contract even for a failure mode
+    stream_chat itself didn't anticipate."""
+    import packages.agents.openrouter_provider as orp_module
+
+    def broken_stream_chat(self, *, messages, ledger_json):
+        yield ("token", "partial reply...")
+        raise RuntimeError("simulated unexpected bug deep in stream_chat")
+
+    monkeypatch.setattr(orp_module.OpenRouterDeltaProvider, "stream_chat", broken_stream_chat)
+
+    c = _client()
+    with c.stream("POST", "/chat", json={"messages": [{"role": "user", "content": "hi"}], "api_key": "x"}) as resp:
+        assert resp.status_code == 200
+        text = "".join(resp.iter_text())
+    assert '"type": "token"' in text
+    assert '"type": "error"' in text and "simulated unexpected bug" in text
+    assert '"type": "done"' in text
+    # the error frame must come before done, and both must actually be present (not just anywhere
+    # in an arbitrary byte soup) -- a crude but real ordering check via string position.
+    assert text.index('"type": "error"') < text.index('"type": "done"')
+
+
 @pytest.mark.needs_kernel
 @pytest.mark.skipif(importlib.util.find_spec("build123d") is None, reason="needs build123d")
 def test_mesh_returns_real_geometry():

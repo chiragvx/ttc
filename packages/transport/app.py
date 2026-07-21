@@ -11,6 +11,7 @@ import concurrent.futures
 import contextvars
 import dataclasses
 import json
+import logging
 import os
 import secrets
 import tempfile
@@ -63,6 +64,8 @@ from packages.transport.protocol import (
     TelemetryDelta,
     ValidRange,
 )
+
+logger = logging.getLogger(__name__)
 
 _PROFILE = "PLA"
 _TS = "2026-06-28T00:00:00Z"
@@ -1552,23 +1555,40 @@ def create_app() -> FastAPI:
             from packages.agents.openrouter_provider import OpenRouterDeltaProvider
             provider = OpenRouterDeltaProvider(api_key=req.api_key, model=req.model or None)
             ledger_json = state.ledger().model_dump_json()
-            for kind, payload in provider.stream_chat(messages=req.messages, ledger_json=ledger_json):
-                if kind == "token":
-                    yield _sse({"type": "token", "text": payload})
-                elif kind == "proposal":
-                    yield _sse({"type": "proposal",
-                                "deltas": [d.model_dump(mode="json") for d in payload.deltas],
-                                "feature_ops": [fo.model_dump(mode="json") for fo in payload.feature_ops],
-                                "instance_ops": [io.model_dump(mode="json") for io in payload.instance_ops],
-                                "connection_ops": [co.model_dump(mode="json") for co in payload.connection_ops],
-                                "coupling_ops": [co.model_dump(mode="json") for co in payload.coupling_ops],
-                                "scope_proposal": payload.scope_proposal.model_dump(mode="json") if payload.scope_proposal else None,
-                                "clarification": payload.request_clarification,
-                                "suggestions": payload.suggestions})
-                elif kind == "error":
-                    yield _sse({"type": "error", "message": payload})
-                elif kind == "done":
-                    yield _sse({"type": "done"})
+            try:
+                for kind, payload in provider.stream_chat(messages=req.messages, ledger_json=ledger_json):
+                    if kind == "token":
+                        yield _sse({"type": "token", "text": payload})
+                    elif kind == "proposal":
+                        yield _sse({"type": "proposal",
+                                    "deltas": [d.model_dump(mode="json") for d in payload.deltas],
+                                    "feature_ops": [fo.model_dump(mode="json") for fo in payload.feature_ops],
+                                    "instance_ops": [io.model_dump(mode="json") for io in payload.instance_ops],
+                                    "connection_ops": [co.model_dump(mode="json") for co in payload.connection_ops],
+                                    "coupling_ops": [co.model_dump(mode="json") for co in payload.coupling_ops],
+                                    "scope_proposal": payload.scope_proposal.model_dump(mode="json") if payload.scope_proposal else None,
+                                    "clarification": payload.request_clarification,
+                                    "suggestions": payload.suggestions})
+                    elif kind == "error":
+                        yield _sse({"type": "error", "message": payload})
+                    elif kind == "done":
+                        yield _sse({"type": "done"})
+            except Exception as e:
+                # Defense-in-depth backstop (2026-07-22, foundations-audit follow-up) — mirrors
+                # Chat.tsx's OWN "never leave the bubble permanently blank" comment on the frontend
+                # side of this exact contract. `stream_chat`'s internal try/except only covers ITS
+                # OWN streaming-fetch loop; live-verified (TestClient) that anything raising past that
+                # point today propagates as a raw, uncaught exception out of this generator with NO
+                # SSE frame at all -- not even the "error"+"done" pair stream_chat's own docstring
+                # promises ("Never silently empty end-to-end... never just a bare done with nothing
+                # else"). A real browser likely surfaces this as a confusing network error rather than
+                # the specific, actionable messages this whole file was built to produce. Catching here
+                # guarantees the SSE contract holds even for a failure mode stream_chat itself didn't
+                # anticipate, without weakening any of its own more specific error messages (those are
+                # already yielded before this could ever trigger).
+                logger.exception("chat: unhandled exception mid-stream")
+                yield _sse({"type": "error", "message": f"an unexpected error occurred: {e}"})
+                yield _sse({"type": "done"})
 
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
