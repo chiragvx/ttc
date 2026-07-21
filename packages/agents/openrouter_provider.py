@@ -233,14 +233,34 @@ class OpenRouterDeltaProvider(LLMProvider):
         # (2026-07-19 live repro: a multi-part build request truncated mid-tool-call-JSON, and the
         # user only needed to know to try a smaller request, not that "parsing failed").
         #
-        # finish_reason ALONE is not reliable for this (a second live repro, same session: the raw
-        # stream never surfaced finish_reason=="length" for an OpenRouter/DeepSeek tool-call stream
-        # that was, by every other signal, truncated — the misleading message still showed). Detect it
-        # from the JSON failure itself instead — see _looks_truncated's own docstring for why pos alone
-        # isn't enough (an "Unterminated string" error's pos points at the string's OPENING quote, not
-        # where the stream actually ran out, so it can sit far from len(args) even when truncation is
-        # exactly what happened).
-        truncated = finish_reason not in (None, "stop", "tool_calls")
+        # finish_reason ALONE is not reliable for DETECTING a cutoff (a second live repro, same
+        # session: the raw stream never surfaced finish_reason=="length" for an OpenRouter/DeepSeek
+        # tool-call stream that was, by every other signal, truncated — the misleading message still
+        # showed). Detect a missed cutoff from the JSON failure itself instead — see
+        # _looks_truncated's own docstring for why pos alone isn't enough (an "Unterminated string"
+        # error's pos points at the string's OPENING quote, not where the stream actually ran out, so
+        # it can sit far from len(args) even when truncation is exactly what happened).
+        #
+        # It is ALSO not reliable in the OPPOSITE direction (found 2026-07-21, live-reproduced below):
+        # OpenRouter proxies many backend models, each free to report its own terminal-state string:
+        # `{"stop", "tool_calls"}` are the two ROUTINE OpenAI-compatible reasons for "finished
+        # normally, nothing missing" — anything else this code had never seen before (a model that
+        # says "eos", a proxy quirk, a legacy "function_call") got blanket-treated as truncation, even
+        # when every tool call in the response went on to parse AND validate cleanly. That produced a
+        # genuine self-contradiction: a fully successful, fully-applied proposal (real geometry
+        # already mutated) landing next to "the response was cut off before finishing — try a shorter
+        # or simpler request" in the SAME chat turn — confusing at best, and an invitation to retry an
+        # already-applied edit at worst. "length"/"content_filter" are UNAMBIGUOUS, well-known
+        # OpenAI-compatible signals that content is genuinely missing beyond what streamed, so those
+        # must still override even a successfully-parsed proposal (test:
+        # test_stream_chat_truncated_finish_reason_yields_error) — only a truly UNRECOGNIZED reason
+        # gets the benefit of the doubt once a proposal actually validates.
+        _KNOWN_TRUNCATION_REASONS = frozenset({"length", "content_filter"})
+        _KNOWN_COMPLETE_REASONS = frozenset({None, "stop", "tool_calls", "function_call"})
+        truncated = finish_reason in _KNOWN_TRUNCATION_REASONS
+        finish_reason_unrecognized = (
+            finish_reason not in _KNOWN_TRUNCATION_REASONS and finish_reason not in _KNOWN_COMPLETE_REASONS
+        )
         for args in tool_args.values():
             try:
                 parsed = json.loads(args)
@@ -299,8 +319,11 @@ class OpenRouterDeltaProvider(LLMProvider):
             # don't yield it (the frontend would no-op on it anyway) and don't count it as having
             # "seen" a proposal, so the no-response check below still fires for this genuinely
             # empty case instead of also emitting a redundant, contradictory empty-proposal event.
-        if truncated:
-            # e.g. "length" — cut off by the max_tokens cap; "content_filter" etc. also land here.
+        if truncated or (finish_reason_unrecognized and not saw_proposal):
+            # e.g. "length" — cut off by the max_tokens cap; "content_filter" etc. also land here. An
+            # unrecognized finish_reason with NO successful proposal falls back to the same message
+            # (still the safest guess when nothing usable came through) — but NOT when a proposal
+            # already validated: that's direct, positive evidence the completion was actually fine.
             yield ("error", "the response was cut off before finishing — try a shorter or simpler request")
         elif not saw_token and not saw_proposal:
             # "no response was generated" would be actively wrong here if truncated: something WAS

@@ -340,6 +340,48 @@ def test_stream_chat_truncated_finish_reason_yields_error():
     assert events[-1] == ("done", None)
 
 
+def test_stream_chat_unrecognized_finish_reason_with_a_valid_proposal_yields_no_spurious_cutoff():
+    """foundations-audit follow-up (2026-07-21, live-reproduced): the old check was `finish_reason
+    not in (None, "stop", "tool_calls")` — a BLACKLIST. OpenRouter proxies many backend models, each
+    free to report its own terminal-state string ("eos", a legacy "function_call", a proxy quirk);
+    any of those got blanket-treated as truncation even when the tool call parsed AND validated
+    cleanly. That produced a self-contradiction: a fully successful, ALREADY-APPLIED proposal (real
+    geometry mutated) landing next to "the response was cut off — try a shorter or simpler request"
+    in the same turn, which reads as "your edit failed" when it didn't, and invites a user to retry
+    an already-applied edit. Only "length"/"content_filter" (unambiguous, well-known signals that
+    content is genuinely missing) may still override a successfully-parsed proposal — see
+    test_stream_chat_truncated_finish_reason_yields_error just above, which this must NOT break."""
+    delta_args = json.dumps({"deltas": [{"target_node": SKIN, "requested_value": 3.0}]})
+
+    def fake_stream(*, url, headers, json):
+        yield {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": delta_args}}]}}]}
+        yield {"choices": [{"delta": {}, "finish_reason": "eos"}]}  # unrecognized, not a known-good/bad reason
+
+    prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+    events = list(prov.stream_chat(messages=[{"role": "user", "content": "skin 3mm"}], ledger_json="{}"))
+
+    assert not any(k == "error" for k, _ in events)  # no spurious cutoff alongside the real success
+    assert any(k == "proposal" for k, _ in events)
+    assert events[-1] == ("done", None)
+
+
+def test_stream_chat_unrecognized_finish_reason_with_no_proposal_still_yields_cutoff():
+    """The fallback direction: an unrecognized finish_reason with NOTHING that validated is still the
+    safest guess when there's no positive evidence the completion actually succeeded (mirrors the
+    existing "no response was generated" backstop, just via the finish_reason-suspicious path)."""
+    def fake_stream(*, url, headers, json):
+        yield {"choices": [{"delta": {}, "finish_reason": "eos"}]}  # no tool call at all
+
+    prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+    events = list(prov.stream_chat(messages=[{"role": "user", "content": "skin 3mm"}], ledger_json="{}"))
+
+    errors = [msg for k, msg in events if k == "error"]
+    assert any("cut off" in e for e in errors)
+    assert not any(k == "proposal" for k, _ in events)
+    assert events[-1] == ("done", None)
+
+
 def test_stream_chat_default_chat_max_tokens_higher_than_propose_delta():
     # the streaming/conversational path gets a higher cap than the single-shot delta-emitter path —
     # a multi-part proposal (several add_instance entries + deltas + rationale) needs more room.
