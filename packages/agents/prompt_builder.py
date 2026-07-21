@@ -665,7 +665,7 @@ def _all_geometry_paths(ledger: MasterParametricLedger) -> frozenset[str]:
 
 
 def build_system_prompt(subsystem_ctx: SubsystemContext | None, ledger: MasterParametricLedger) -> str:
-    """Stable system prompt: base rules + subsystem menu + (if a part is active) its own fragment +
+    """Stable system prompt: base rules + subsystem menu + every instantiated type's own fragment +
     the active disciplines' knowledge + the param schema (scoped to EVERY part currently in the
     file, not just the "active" one — see `_all_geometry_paths` — plus cross-cutting params).
     `subsystem_ctx` is `None` for an empty file (no parts yet, 2026-07-04) — there's nothing to
@@ -675,8 +675,32 @@ def build_system_prompt(subsystem_ctx: SubsystemContext | None, ledger: MasterPa
     active_name = subsystem_ctx.name if subsystem_ctx is not None else None
     sections = [_BASE_RULES, _subsystems_section(active_name, ledger), _INSTANCE_OPS_SECTION,
                 _airframe_pacing_section(ledger)]
+    # Every DISTINCT subsystem type actually instantiated in the file gets its own domain-knowledge
+    # fragment (design-intent mapping, worked sizing examples, unit conventions — e.g.
+    # longeron.py's own "stiffer -> increase height_mm (bending stiffness scales with height^3)"
+    # guidance) — not just whichever ONE instance happens to be "active". A genuine multi-domain
+    # assembly (a longeron + a bracket + a naca_wing in the same file — exactly the multi-subsystem
+    # case this engine exists for) used to get this guidance for only ONE of its three types; the
+    # other two got nothing beyond their bare name + param list (found 2026-07-21, foundations-audit
+    # follow-up — verified live: build a 3-type ledger, only the first instance's own fragment text
+    # appeared in the prompt). Ordered by first appearance (subsystem_ctx first, matching the prior
+    # position, then ledger.instances iteration order) for determinism; deduped so N instances of the
+    # same type show its fragment once, not N times.
+    fragment_types: list[str] = []
+    seen_types: set[str] = set()
     if subsystem_ctx is not None:
-        sections.append(subsystem_ctx.prompt_fragment)
+        fragment_types.append(subsystem_ctx.name)
+        seen_types.add(subsystem_ctx.name)
+    for inst in ledger.instances.values():
+        if inst.subsystem_type in seen_types:
+            continue
+        seen_types.add(inst.subsystem_type)
+        fragment_types.append(inst.subsystem_type)
+    for name in fragment_types:
+        try:
+            sections.append(get_subsystem(name).prompt_fragment)
+        except KeyError:
+            continue  # an instance of an unregistered type shouldn't be reachable, but never crash the prompt over it
     disciplines = active_discipline_fragments(ledger)
     if disciplines:
         sections.append(disciplines)

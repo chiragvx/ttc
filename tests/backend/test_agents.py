@@ -147,6 +147,30 @@ def test_system_prompt_lifts_pacing_once_an_airframe_part_exists():
     assert "Airframe-first pacing" not in prompt
 
 
+def test_system_prompt_includes_every_instantiated_types_fragment_not_just_one():
+    """foundations-audit follow-up (2026-07-21, live-verified): only `subsystem_ctx`'s own
+    `prompt_fragment` (whichever ONE instance happened to be "active") was ever included — a genuine
+    multi-domain assembly (a longeron + a bracket + a naca_wing in the same file, exactly the
+    multi-subsystem case this engine exists for) got the design-intent/sizing-guidance fragment for
+    only ONE of its three types; the other two got nothing beyond their bare name + param list. Also
+    covers dedup: a second instance of an already-seen type must not repeat its fragment."""
+    led = make_demo_ledger()
+    led = add_instance(led, "longeron", "longeron1")
+    led = add_instance(led, "bracket", "bracket1")
+    led = add_instance(led, "naca_wing", "wing1")
+    led = add_instance(led, "longeron", "longeron2")  # second instance of an already-seen type
+
+    prompt = build_system_prompt(get_subsystem("longeron"), led)
+
+    longeron_frag = get_subsystem("longeron").prompt_fragment
+    bracket_frag = get_subsystem("bracket").prompt_fragment
+    wing_frag = get_subsystem("naca_wing").prompt_fragment
+    assert longeron_frag in prompt
+    assert bracket_frag in prompt
+    assert wing_frag in prompt
+    assert prompt.count(longeron_frag) == 1  # deduped, not once per instance
+
+
 def test_eval_harness_computes_metrics(stub_provider):
     cases = [
         EvalCase("make the skin 3 mm", [(SKIN, 3.0)]),     # stub correct
