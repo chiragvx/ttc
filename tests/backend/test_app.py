@@ -67,6 +67,48 @@ def test_ws_unknown_material_name_is_nacked():
     assert c.get("/ledger").json()["domains"]["structure"]["material_profile"] == "PLA"
 
 
+def test_telemetry_never_touches_the_kernel_for_an_auto_laid_out_instance(monkeypatch):
+    """foundations-audit follow-up (2026-07-21): `_telemetry` (the WS mutation response's
+    `telemetry_delta`, and `metrics()`'s /requirements read) is the INTERACTIVE plane -- Inversion #2
+    (packages/CLAUDE.md) forbids a real geometry_builder call there outright, not just "bound it with
+    a timeout" the way `/mesh` legitimately does. Before this fix, `instance_world_offsets()`'s
+    auto-layout spacing (`assembly.py::_y_extent_mm`) called `geometry_builder` directly for ANY
+    multi-instance ledger with an auto-laid-out (unconnected) instance -- on every parameter
+    mutation. This proves the doctrine property ITSELF (the builder is never invoked), not just that
+    a response comes back fast/correct -- a fast, wrong answer would also pass a pure return-value
+    check."""
+    import dataclasses
+
+    from packages.subsystems import SUBSYSTEM_REGISTRY, get_subsystem
+
+    called: list[str] = []
+
+    def _must_not_be_called(ledger, instance_id):
+        called.append(instance_id)
+        raise AssertionError("geometry_builder must never be called from the interactive plane")
+
+    watched_bracket = dataclasses.replace(get_subsystem("bracket"), geometry_builder=_must_not_be_called)
+    monkeypatch.setitem(SUBSYSTEM_REGISTRY, "bracket", watched_bracket)
+
+    c = _client()
+    # a second, auto-laid-out (no connection, no explicit transform) instance -- exactly the case
+    # that used to seed/advance the auto-layout cursor via a real geometry build.
+    c.post("/instances", json={"subsystem_type": "bracket", "instance_id": "second"})
+
+    with c.websocket_connect("/ws") as ws:
+        ws.send_json({"target_node": SKIN, "requested_value": 3.0})
+        msg = ws.receive_json()
+
+    assert called == []  # the doctrine property itself
+    assert msg["event_type"] == "PARAMETER_CASCADE_UPDATE"
+    assert msg["telemetry_delta"]["total_mass_g"] > 0
+
+    # /requirements (metrics()) shares the exact same _telemetry() call -- same guarantee.
+    called.clear()
+    assert c.get("/requirements").status_code == 200
+    assert called == []
+
+
 def test_ws_out_of_recommended_range_is_applied_advisory():
     """Soft bounds: WS mutation with a value past the recommended range still applies (with an
     APPLIED_ADVISORY status). The value is NOT clamped to the upper bound."""

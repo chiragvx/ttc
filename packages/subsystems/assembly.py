@@ -49,11 +49,25 @@ def _is_airframe_defining(ledger: "MasterParametricLedger", instance_id: str) ->
     return get_subsystem(inst.subsystem_type).is_airframe_defining
 
 
-def _y_extent_mm(ledger: "MasterParametricLedger", instance_id: str) -> float:
+def _y_extent_mm(ledger: "MasterParametricLedger", instance_id: str, *,
+                  allow_kernel_build: bool = True) -> float:
     """Build `instance_id`'s geometry ONCE and read its bounding box's Y-span, for auto-layout
     spacing. Falls back to `_FALLBACK_SPACING_MM` if the instance's subsystem has no
-    `geometry_builder`, the build returns None, or building raises for any reason."""
+    `geometry_builder`, the build returns None, or building raises for any reason.
+
+    `allow_kernel_build` (2026-07-21, foundations-audit follow-up): False on the INTERACTIVE plane
+    (`packages/transport/app.py::_telemetry`, the WS mutation response's telemetry_delta) — a real
+    geometry_builder call is genuine OCCT kernel work, which Inversion #2 (packages/CLAUDE.md)
+    forbids there outright, timeout or not (unlike `/mesh`'s `_bounded_geometry_build`, which bounds
+    but doesn't forbid a kernel-tier build). False means this ALWAYS returns `_FALLBACK_SPACING_MM`
+    for an instance with no analytic extent available -- the same honest "can't tell, use the
+    fallback" outcome auto-layout already produces today for a subsystem with no geometry_builder,
+    just applied more broadly. True (default) preserves the exact prior behavior for kernel-regen-
+    tier callers (`render_assembly`, `list_pickable_features`) -- both already run through
+    `_bounded_geometry_build` as a whole at the HTTP layer, so a real build here is bounded, not raw."""
     inst = ledger.instances[instance_id]
+    if not allow_kernel_build:
+        return _FALLBACK_SPACING_MM
     try:
         builder = get_subsystem(inst.subsystem_type).geometry_builder
         if builder is None:
@@ -68,8 +82,16 @@ def _y_extent_mm(ledger: "MasterParametricLedger", instance_id: str) -> float:
         return _FALLBACK_SPACING_MM
 
 
-def instance_world_offsets(ledger: "MasterParametricLedger") -> dict[str, tuple[float, float, float]]:
+def instance_world_offsets(
+    ledger: "MasterParametricLedger", *, allow_kernel_build: bool = True,
+) -> dict[str, tuple[float, float, float]]:
     """Every instance id -> its (x_mm, y_mm, z_mm) WORLD-SPACE translation offset.
+
+    `allow_kernel_build` (2026-07-21) is threaded straight through to every `_y_extent_mm` call
+    below (see its own docstring) -- `resolve_placements` (the connection-mate path) is separately
+    confirmed closed-form/OCCT-free (pure param arithmetic over each interface's declared `Frame`
+    callable), so it needs no such gate; only the auto-layout extent lookup ever touches a real
+    geometry_builder.
 
     Parts are a FLAT set brought into a file (2026-07-04) — there is no root, so a top-level part
     (`parent_id is None`) resolves against the ORIGIN directly, not a root instance's own offset.
@@ -135,7 +157,8 @@ def instance_world_offsets(ledger: "MasterParametricLedger") -> dict[str, tuple[
                 if parent_id is not None:
                     # a REAL parent's own body needs clearing — seed at its Y-extent so the first
                     # child doesn't nest back inside it.
-                    auto_cursor_by_parent[cursor_key] = _y_extent_mm(ledger, parent_id)
+                    auto_cursor_by_parent[cursor_key] = _y_extent_mm(
+                        ledger, parent_id, allow_kernel_build=allow_kernel_build)
                 else:
                     # the top-level stack has no body to clear — seed at -GAP so the formula below
                     # (`cursor + GAP`) places the FIRST top-level part's center at exactly 0, not
@@ -149,7 +172,7 @@ def instance_world_offsets(ledger: "MasterParametricLedger") -> dict[str, tuple[
             # parent, then packed subsequent siblings back-to-back with center-to-center spacing equal
             # to the PREVIOUS sibling's extent alone — safe only when extents were non-increasing,
             # and capable of overlapping two instances outright otherwise).
-            this_extent = _y_extent_mm(ledger, instance_id)
+            this_extent = _y_extent_mm(ledger, instance_id, allow_kernel_build=allow_kernel_build)
             local = (0.0, cursor + _AUTO_LAYOUT_GAP_MM, 0.0)
             auto_cursor_by_parent[cursor_key] = cursor + _AUTO_LAYOUT_GAP_MM + this_extent
         world = (px + local[0], py + local[1], pz + local[2])

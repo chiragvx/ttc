@@ -222,7 +222,16 @@ def _telemetry(ledger: MasterParametricLedger, instance_id: str | None = None) -
         # WORLD-SPACE offset (packages/subsystems/assembly.py) instead of reporting the active part
         # alone. This is the "next increment" the Item 3 MVP explicitly deferred.
         from packages.subsystems.assembly import instance_world_offsets
-        offsets = instance_world_offsets(ledger)
+        # allow_kernel_build=False (2026-07-21, foundations-audit follow-up): this WS mutation
+        # response (and metrics()'s /requirements read) is the interactive plane -- Inversion #2
+        # forbids a real geometry_builder call here outright (not just "bound it with a timeout",
+        # which /mesh does; a wedged-but-bounded OCCT call on every parameter mutation is still a
+        # doctrine violation, just a survivable one). An auto-laid-out instance with no connection
+        # falls back to _FALLBACK_SPACING_MM for CG weighting instead -- the same honest "can't tell"
+        # outcome auto-layout already produces for a subsystem with no geometry_builder at all; see
+        # assembly.py::_y_extent_mm's own docstring. Connection-placed instances are unaffected
+        # (resolve_placements is separately confirmed closed-form, no OCCT).
+        offsets = instance_world_offsets(ledger, allow_kernel_build=False)
         structural_g = 0.0
         moment = [bom_mass * bom_cg[0], bom_mass * bom_cg[1], bom_mass * bom_cg[2]]
         total_vol = 0.0
