@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from packages.agents.eval import CLARIFY, EvalCase, grade
-from packages.agents.prompt_builder import build_system_prompt
+from packages.agents.prompt_builder import build_system_prompt, build_system_prompt_from_json
 from packages.agents.runtime import CoModelingSession
 from packages.ledger.events import EventLog
-from packages.ledger.nodes import SKIN
+from packages.ledger.nodes import BUILD_ORIENTATION, OPERATING_TEMP, POWER_DISSIPATION, SKIN, SLIP_FIT
+from packages.ledger.parameter import LockState
 from packages.ledger.schema import ReviewState
 from packages.subsystems import add_instance, get_subsystem
 from packages.transport.app import make_demo_ledger
@@ -169,6 +170,57 @@ def test_system_prompt_includes_every_instantiated_types_fragment_not_just_one()
     assert bracket_frag in prompt
     assert wing_frag in prompt
     assert prompt.count(longeron_frag) == 1  # deduped, not once per instance
+
+
+def test_system_prompt_marks_a_locked_param_and_only_that_one(base_ledger):
+    # mutation-sweep follow-up (2026-07-22): no test in this suite ever asserted on the literal
+    # "LOCKED" marker text -- an undetected mutation inverted the condition, so every HARD_LOCK
+    # param would render with NO warning (the copilot could propose a delta against something that
+    # must never be touched) while every ordinary DYNAMIC param would falsely show as locked.
+    locked = base_ledger.model_copy(deep=True)
+    locked.instances["root"].params["skin_thickness_mm"] = (
+        locked.instances["root"].params["skin_thickness_mm"].model_copy(
+            update={"lock_state": LockState.HARD_LOCK}))
+    prompt = build_system_prompt(get_subsystem("bracket"), locked)
+    skin_line = next(l for l in prompt.splitlines() if "instances.root.params.skin_thickness_mm" in l)
+    plate_line = next(l for l in prompt.splitlines() if "instances.root.params.plate_width_mm" in l)
+    assert "[LOCKED" in skin_line
+    assert "[LOCKED" not in plate_line
+
+
+def test_system_prompt_lists_all_four_cross_cutting_params():
+    # mutation-sweep follow-up: an undetected mutation silently dropped power_dissipation_w from the
+    # cross-cutting param set every part gets shown -- the copilot would stop being able to
+    # propose/adjust power-dissipation deltas at all, on a thermal/safety-adjacent input, since it
+    # can only target a node it has actually seen listed.
+    led = add_instance(make_demo_ledger(), "bracket", "root")
+    prompt = build_system_prompt(get_subsystem("bracket"), led)
+    for node in (BUILD_ORIENTATION, SLIP_FIT, OPERATING_TEMP, POWER_DISSIPATION):
+        assert f"`{node}`" in prompt, f"missing cross-cutting node {node!r}"
+
+
+def test_system_prompt_marks_active_on_the_right_subsystem_only(base_ledger):
+    # mutation-sweep follow-up: an undetected mutation flipped the "— ACTIVE" marker's condition, so
+    # every subsystem EXCEPT the actually-active one got tagged, misleading the copilot about which
+    # part type the conversation is currently scoped to.
+    prompt = build_system_prompt(get_subsystem("bracket"), base_ledger)
+    bracket_line = next(l for l in prompt.splitlines() if l.startswith("- **bracket**"))
+    other_line = next(l for l in prompt.splitlines() if l.startswith("- **enclosure**"))
+    assert "— ACTIVE" in bracket_line
+    assert "— ACTIVE" not in other_line
+
+
+def test_build_system_prompt_from_json_falls_back_cleanly_on_invalid_input():
+    # mutation-sweep follow-up: build_system_prompt_from_json is NOT test-only scaffolding -- it's
+    # called on the LIVE /chat path (openrouter_provider.py's stream_chat) to build the real system
+    # prompt for every production conversation turn, and had ZERO direct test coverage anywhere in
+    # this repo before this test. Its own docstring promises a graceful fallback to the bare
+    # part-type menu for "incomplete/unparseable" ledger JSON -- never a crash, never a fabricated
+    # ledger state ("never fake a green light"). Covers both failure shapes: not-JSON-at-all, and
+    # valid JSON that fails MasterParametricLedger's own schema validation.
+    for bad_json in ("not json at all {{{", '{"totally": "wrong shape"}'):
+        prompt = build_system_prompt_from_json(bad_json)
+        assert "Part types" in prompt  # the bare-menu fallback, not an exception
 
 
 def test_eval_harness_computes_metrics(stub_provider):
