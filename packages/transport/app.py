@@ -1753,7 +1753,25 @@ def create_app() -> FastAPI:
                         status="REJECTED", reason=f"malformed frame: {e}",
                     ).model_dump(mode="json"))
                     continue
-                await socket.send_json(state.mutate(req).model_dump(mode="json"))
+                try:
+                    resp = state.mutate(req)
+                except WebSocketDisconnect:
+                    raise
+                except Exception as e:
+                    # Same failure mode as the malformed-frame guard above, just further downstream:
+                    # live-verified (TestClient) that an exception raised INSIDE state.mutate() itself
+                    # (cascade logic, apply_delta, telemetry — all considerably more code than the
+                    # parse/validate step already guarded above, and so more likely to have a real bug
+                    # someday) killed the whole socket with NO response sent for that mutation at all,
+                    # and the connection was unusable for every SUBSEQUENT mutation too — the Tier-0
+                    # interactive plane going dead until the frontend reconnects, not just one rejected
+                    # edit. 2026-07-22, foundations-audit follow-up: this is the identical contract the
+                    # comment above already established for a malformed frame, extended to cover the
+                    # mutation processing itself, not just the wire parsing in front of it.
+                    logger.exception("ws: unhandled exception in mutate()")
+                    resp = MutationRejected(target_node=req.target_node, status="REJECTED",
+                                            reason=f"internal error: {e}")
+                await socket.send_json(resp.model_dump(mode="json"))
         except WebSocketDisconnect:
             return
         finally:

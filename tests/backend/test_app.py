@@ -67,6 +67,43 @@ def test_ws_unknown_material_name_is_nacked():
     assert c.get("/ledger").json()["domains"]["structure"]["material_profile"] == "PLA"
 
 
+def test_ws_survives_an_unhandled_exception_in_mutate(monkeypatch):
+    """foundations-audit follow-up (2026-07-22, live-reproduced): the existing malformed-frame guard
+    (a few tests up) only covers the receive_json()/model_validate() step -- an exception raised
+    INSIDE state.mutate() itself (cascade logic, apply_delta, telemetry -- considerably more code
+    than the parse step, and so more likely to have a real bug someday) used to kill the WHOLE
+    socket with no response for that mutation and left the connection unusable for every SUBSEQUENT
+    mutation too: the Tier-0 interactive plane going dead until the frontend reconnects, confirmed via
+    TestClient before this fix (the client's next send_json/receive_json raised outright). Now it
+    must degrade to a clean REJECTED for the failing mutation while the socket stays alive for the
+    next one."""
+    import packages.transport.app as app_module
+
+    orig_mutate = app_module.FileState.mutate
+    calls = {"n": 0}
+
+    def flaky_mutate(self, req):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated bug deep in mutate()")
+        return orig_mutate(self, req)
+
+    monkeypatch.setattr(app_module.FileState, "mutate", flaky_mutate)
+
+    c = _client()
+    with c.websocket_connect("/ws") as ws:
+        ws.send_json({"target_node": SKIN, "requested_value": 3.0})
+        msg = ws.receive_json()
+        assert msg["event_type"] == "PARAMETER_MUTATION_REJECTED"
+        assert "internal error" in msg["reason"]
+
+        # the socket must still be alive and functional for a SUBSEQUENT mutation
+        ws.send_json({"target_node": SKIN, "requested_value": 4.0})
+        msg2 = ws.receive_json()
+        assert msg2["event_type"] == "PARAMETER_CASCADE_UPDATE"
+        assert msg2["mutations_applied"][0]["value"] == 4.0
+
+
 def test_telemetry_never_touches_the_kernel_for_an_auto_laid_out_instance(monkeypatch):
     """foundations-audit follow-up (2026-07-21): `_telemetry` (the WS mutation response's
     `telemetry_delta`, and `metrics()`'s /requirements read) is the INTERACTIVE plane -- Inversion #2
