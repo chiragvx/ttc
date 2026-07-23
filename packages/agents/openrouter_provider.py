@@ -68,6 +68,33 @@ def _looks_truncated(args: str, e: "json.JSONDecodeError") -> bool:
     return e.pos >= len(args)
 
 
+def _extract_json_values(s: str) -> list[tuple[dict, str]]:
+    """Repeatedly `raw_decode` complete top-level JSON values out of `s`, in order, returning
+    [(value, remaining_string_after_it), ...]. Stops at the first position that doesn't decode
+    (whitespace-only tail, or a genuine syntax error) — so a single valid value followed by
+    non-JSON trailing junk still yields exactly one entry (the original 2026-07-19 recovery case).
+
+    Exists because a model can second-guess itself mid-generation and emit MORE than one complete
+    JSON object into a single tool call's arguments (2026-07-23 live repro on Qwen: a hesitant,
+    wrongly-shaped "let me ask a clarifying question" draft — `deltas` as a list of "key=value"
+    strings instead of the real schema — immediately followed by a second, complete, CORRECTLY
+    shaped proposal covering the same build). The old single-`raw_decode` recovery only ever kept
+    the FIRST complete value and logged everything after it as discarded "trailing junk" — which
+    silently threw away a fully valid, later proposal because an earlier abandoned draft happened
+    to parse (but fail schema validation) first."""
+    out: list[tuple[dict, str]] = []
+    rest = s.lstrip()
+    decoder = json.JSONDecoder()
+    while rest:
+        try:
+            value, end = decoder.raw_decode(rest)
+        except json.JSONDecodeError:
+            break
+        rest = rest[end:].lstrip()
+        out.append((value, rest))
+    return out
+
+
 class OpenRouterDeltaProvider(LLMProvider):
     def __init__(self, *, model: str | None = None, api_key: str | None = None,
                  base_url: str | None = None, max_tokens: int = 1024,
@@ -274,22 +301,33 @@ class OpenRouterDeltaProvider(LLMProvider):
                 # args string: a fully valid ~10KB tool call followed by ~35 bytes of something else,
                 # finish_reason=="tool_calls" — a NORMAL completion, not a cutoff). json.loads demands
                 # the WHOLE string be one JSON value and throws the real proposal away over transport
-                # noise appended after it. raw_decode parses just the first complete value and reports
-                # where it stopped; genuinely malformed JSON (a missing value, an unterminated string)
-                # fails raw_decode identically to json.loads (there is no complete value to extract),
-                # so this can only ever help the "valid prefix + trailing junk" case — it never masks a
-                # real parse failure or a genuine truncation, and _looks_truncated below is unaffected.
+                # noise appended after it. genuinely malformed JSON (a missing value, an unterminated
+                # string, a syntax error INSIDE the structure) yields zero extracted values, identical
+                # to the old single-raw_decode behavior — so this can only ever help a "valid value(s)
+                # + trailing junk" case, never mask a real parse failure or a genuine truncation, and
+                # _looks_truncated below is unaffected.
+                values = _extract_json_values(args)
                 recovered, leftover = None, None
-                try:
-                    stripped = args.lstrip()
-                    recovered, end = json.JSONDecoder().raw_decode(stripped)
-                    leftover = stripped[end:].strip()
-                except json.JSONDecodeError:
-                    pass
+                if values:
+                    # Prefer the LAST candidate that actually validates, not just the first complete
+                    # value found (2026-07-23 live repro: a model emitted an abandoned, wrongly-shaped
+                    # draft FIRST, then a complete correctly-shaped proposal second, both inside one
+                    # tool call — picking "first complete value" silently kept the bad draft and threw
+                    # away the good one as "trailing junk"). Falls back to the first value (old
+                    # behavior) if nothing validates, so schema-invalidation still reports normally.
+                    recovered = values[0][0]
+                    for candidate, _ in reversed(values):
+                        try:
+                            DeltaProposal.model_validate(candidate)
+                        except Exception:
+                            continue
+                        recovered = candidate
+                        break
+                    leftover = values[-1][1]
                 if recovered is not None:
-                    logger.warning("stream_chat: recovered a complete tool-call payload; ignored %d "
-                                   "bytes of trailing data (finish_reason=%r): %r",
-                                   len(leftover), finish_reason, leftover[:200])
+                    logger.warning("stream_chat: recovered a tool-call payload out of %d complete JSON "
+                                   "value(s); ignored %d bytes of trailing data (finish_reason=%r): %r",
+                                   len(values), len(leftover), finish_reason, leftover[:200])
                     parsed = recovered
                 else:
                     # finish_reason + len(args) alongside the parse error itself (2026-07-19 live

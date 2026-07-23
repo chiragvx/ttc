@@ -128,6 +128,30 @@ def test_delta_proposal_scope_proposal_defaults_to_none():
     assert proposal.model_dump()["scope_proposal"] is None
 
 
+def test_delta_proposal_coerces_a_json_string_scope_proposal():
+    # 2026-07-23 live repro (Qwen3.6-plus via OpenRouter): the model double-encoded this field as a
+    # JSON string ('"scope_proposal": "{\\"goal\\": ...}"') instead of a real nested object, sinking
+    # an otherwise fully valid, correctly-shaped 53-delta/13-instance proposal over one field's shape.
+    # scope_proposal is pure display data (see its own field description) -- tolerate the model's own
+    # over-eager string-encoding here rather than reject the whole proposal for it.
+    import json
+    encoded = json.dumps({
+        "goal": "make a drone", "parts": [{"subsystem_type": "standoff", "role": "arm"}],
+        "out_of_scope": [], "open_questions": [],
+    })
+    proposal = DeltaProposal.model_validate({"scope_proposal": encoded})
+    assert proposal.scope_proposal is not None
+    assert proposal.scope_proposal.goal == "make a drone"
+    assert proposal.scope_proposal.parts[0].subsystem_type == "standoff"
+
+
+def test_delta_proposal_scope_proposal_still_rejects_genuinely_malformed_string():
+    # the coercion must fall through to normal (strict) validation on a string that ISN'T valid JSON
+    # -- never silently swallow a real error.
+    with pytest.raises(ValidationError):
+        DeltaProposal.model_validate({"scope_proposal": "not json at all"})
+
+
 # --- 3. /chat SSE threading: scope_proposal reaches the `proposal` event --------------------------
 
 

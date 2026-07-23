@@ -9,9 +9,10 @@ enforces INVARIANTS (bounds clamp, HARD_LOCK, coupled invariants).
 
 from __future__ import annotations
 
+import json
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from packages.ledger.parameter import LockState
 
@@ -257,6 +258,23 @@ class DeltaProposal(BaseModel):
                     "instance_ops in the SAME turn (they still auto-apply immediately, unchanged); if "
                     "genuinely unsure of the decomposition, pair this with request_clarification and "
                     "suggestions instead of instance_ops, and wait for the user's next message")
+
+    @field_validator("scope_proposal", mode="before")
+    @classmethod
+    def _coerce_scope_proposal_string(cls, v):
+        """Tolerate a model double-encoding this field as a JSON string instead of a real nested
+        object (2026-07-23 live repro on Qwen: `"scope_proposal": "{\\"goal\\": ...}"` — a whole
+        valid ScopeProposal, just wrapped as a string). `scope_proposal` is pure display data (see
+        its own docstring/field description — nothing downstream parses it for safety), so parsing
+        a model's own over-eager string-encoding here is leniency at the LLM wire boundary, not a
+        weakened safety check — a non-string/unparseable value still falls through to normal
+        (strict) validation and reports its real error."""
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                return v
+        return v
 
 
 def parameter_delta_tool_schema() -> dict:

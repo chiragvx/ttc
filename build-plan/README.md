@@ -643,6 +643,242 @@ at the origin; fixed against the actual rule in `placement.py`, not assumed), an
 topology from a flat plate) remains deliberately deferred — noted, not guessed at. Full suite green:
 **1723 backend passed / 29 skipped**.
 
+**2026-07-22 — root-caused and fixed the live antenna-bracket placement bug: `enclosure`/`lbracket`
+now declare mount interfaces, plus a real prompt contradiction fixed.** Live-tested a satellite-bus
+prompt; two `lbracket` "antenna bracket" instances landed wrong (one overshooting the enclosure's
+edge, one embedded inside it) — the classic half-dimension/origin-convention-mismatch signature.
+Root-caused via a 3-agent research fan-out, confirmed by direct code reading:
+1. `enclosure` and `lbracket` (like ~21 of 24 box/tray-shaped catalog "mount targets") declared zero
+`InterfaceSpec`s, so `connection_ops` was categorically unavailable for this pair — the copilot had
+no grounded way to mate them.
+2. Forced to hand-compute, the copilot got CONTRADICTORY prompt guidance for the identical
+"no interface" trigger: `_CONNECTION_OPS_SECTION` (read first) said "reach for explicit x/y/z when
+the parts have no matching interface"; `_ASSEMBLY_CONNECTIVITY_SECTION` (read later) said the
+opposite — "you do NOT have enough information to hand-compute, use auto-layout + disclose."
+3. `enclosure` is center-origin on all 3 axes; `lbracket` (via `render_lbracket`) is corner-anchored
+on X/Z, center-origin only on Y — a real convention mismatch that produces exactly the observed
+one-overshoots/one-embeds asymmetry if hand-computed assuming uniform centering.
+
+Fixed (1) and (2) by removing the need to hand-compute at all. Added
+`box_face_interfaces(width_param, depth_param, height_param)` (six faces — `left`/`right`/`front`/
+`back`/`bottom`/`top` — for any subsystem whose `_build` centers a plain box, verified against
+`enclosure`'s outer shell) and a bespoke (not a shared generic helper — `render_lbracket`'s shape is
+asymmetric, and ~36 other catalog entries reuse the same builder under different param names,
+deliberately not touched this pass) `lbracket_interfaces(leg_a_param, leg_b_param, thickness_param)`
+declaring `wall_mount` (the vertical flange's outer face) and `top` (the horizontal flange's outer
+face). Reconciled the `_CONNECTION_OPS_SECTION` contradiction (now points at the auto-layout +
+disclosure path instead of telling the model to hand-compute) and added a worked box-face-mount
+recipe to `_INSTANCE_OPS_SECTION`.
+
+One honest, verified limitation: mating is still pure translation (rotation deferred to Phase 1b) —
+`wall_mount`'s fixed -X normal only mates CLEANLY (anti-parallel) against `enclosure`'s `right` face;
+connecting it to `left`/`front`/`back` instead (the natural symmetric choice for a SECOND, opposite-
+side antenna bracket) still resolves a translation but leaves the bracket embedded/facing the wrong
+way. Traced whether anything catches that before shipping this: a declared Connection counts as
+"joined" for the `connectivity` floating-part check, so that channel stays silent — but
+`connection_issues()` separately flags the normal mismatch as a `check="connections"`, `severity=
+"warning"` issue (verified:
+`test_lbracket_mated_to_a_non_matching_enclosure_face_is_flagged_not_silently_wrong` in
+`test_placement.py`, and end-to-end through `validate_geometry` in
+`test_mismatched_face_bracket_mate_surfaces_as_an_actionable_connections_warning` in
+`test_validate.py`). That "connections" channel already drives the auto-correct loop —
+`shouldAutoCorrect.ts` was extended to fire on it back in the 2026-07-21 foundations-audit pass (H7,
+commit `afc258c`), predating this fix and already covered by its own test — so a mismatched-face
+mate doesn't silently render as a clean joined assembly; it forces a corrective turn carrying the
+connection's own "need a rotation to mate" message. The new box-face-mount recipe in
+`_INSTANCE_OPS_SECTION` also steers the copilot toward `right` (the one clean face) up front, so the
+auto-correct path is a backstop, not the primary defense. Net: this closes the FIRST antenna bracket
+outright (clean, correct mate) and closes the loop on the second (no longer a silent bad render) — but
+does not make a second, opposite-side bracket mount cleanly; that needs real rotation support
+(Phase 1b). Whether the original live session actually hand-computed or hit some other path can't be
+confirmed after the fact (that session's ledger was already wiped by a server restart) — this fixes
+the confirmed structural gap, not a traced exact replay; and without a live LLM call, this verifies
+the *solver*+*self-check* place and catch a declared connection correctly, not that the model
+reliably *emits* one in the first place.
+
+Deliberately deferred (raised, not actioned): (a) a separate, real latent bug found along the way in
+`assembly.py::instance_world_offsets`'s auto-layout cursor math — its own "no overlap" guarantee is
+false for origin-centered geometry (the convention every real subsystem actually uses) — NOT the
+cause of this symptom (an auto-laid-out part can't land at another's center) but a genuine defect;
+fixing it moves every auto-laid-out position, which will re-trigger the mesh-determinism golden-hash
+rebaseline from the earlier F1 fix, so per this repo's "never quietly re-baseline a drifted golden"
+rule it needs its own commit + explicit human sign-off, not folded in here. (b) `apply_instance_op`
+still accepts an explicit hand-computed transform with zero cross-part plausibility/overlap check — a
+real backstop gap, but invasive (risks a kernel call on the interactive-plane hot path, Inversion #2)
+and largely superseded by (1)/(2) removing the need for hand-computed transforms in the first place.
+Full suite green: **1768 backend passed / 32 skipped**, frontend **64 passed**.
+
+**2026-07-22 — a live multi-part build (relay box: enclosure + 2 antenna brackets + solar plate)
+surfaced a deeper pattern than the fix above closes, plus a strategic decision.** Live-testing the
+fix above against the transcript's own follow-up (the copilot's self-correction attempt) reproduced —
+pixel-matched against the user's own screenshot via a scripted replay — a THIRD, more serious bug:
+the copilot's fix-up move (`bracket_left` → explicit position + 180° rotation) sent only `ry_deg`,
+got atomically rejected by the all-or-nothing rotation rule, and left `bracket_left` with no
+transform at all. A transform-less part falls back to auto-layout (`instance_world_offsets`), which
+has ZERO awareness of where connection-MATED instances (`bracket_right`) already sit — it dropped
+`bracket_left` at the exact same origin `bracket_right` already occupied. The two coincident brackets
+then evaded BOTH self-check guards: `embedding` only fires when the contained part's volume is under
+half the container's (`_EMBED_VOLUME_RATIO = 0.5` in `validate.py`) — two identical parts are a 1:1
+ratio, exempt by construction — and bbox-touching (full overlap counts) merges them into one
+"connected" component, so `connectivity` didn't fire either. Net: `validate_geometry` returned
+`ok=True, "all structurally sound"` on a design with two stacked-identical brackets and a floating
+solar plate — the deterministic backstop this whole architecture is betting on has a coincident-part-
+sized hole. (Separately, easy: `mounting_plate_grid` is the textbook `plate_face_interfaces` shape
+and declares none, so "plate on top" had no grounded mate to `enclosure`'s new `top` interface.)
+
+Zoomed out from there to the actual strategic question this raised: why does a generative-mesh tool
+(compared live, same prompt) nail assembly/placement while this system doesn't, despite (or because
+of) all the grounding machinery. Answer, argued from the observable (not the competitor's internals):
+that tool reasons directly in the perceptual/geometric space it outputs — intent-match IS its whole
+training objective. This system's LLM reasons in language, blind, through a symbolic tool-call layer,
+and only gets to "see" its own output via an OPTIONAL, off-by-default vision check. Reframed in this
+repo's own doctrine: Inversion #3 already treats topological identity as deterministic kernel work
+the LLM never touches — placement is the same class of thing, and it's the one place that discipline
+leaked: with a declared interface, the mate solver places correctly-by-construction; without one
+(most of the catalog, still), the LLM hand-computes x/y/z — originating a number, the exact pattern
+Inversion #1 bans, just for geometry instead of physics.
+
+**Decision (user, after weighing the alternative of chasing perceptual/intent-breadth instead):
+double down on grounding** — expand interface coverage aggressively and eventually give the mate
+solver real rotation (Phase 1b), rather than lean on vision-model aesthetics to paper over ungrounded
+placement. Explicitly NOT sold as "solved" by interface coverage alone: the mate solver is still
+translation-only, so the exact symmetric two-antenna case in this test still can't mate its second
+bracket cleanly without Phase 1b.
+
+First concrete step under that decision, shipped this pass: **a client-side vision-model setting**
+(`packages/frontend/src/settings.ts`'s `LlmSettings.visionModel`, a new field in `SettingsModal.tsx`,
+threaded through `api.ts::runValidate` to the backend's already-existing per-request
+`ValidateRequest.vision_model` override — `packages/agents/vision_validator.py`/`/validate` needed no
+backend change at all, only frontend surfacing). Reuses the existing OpenRouter key — no second key
+field. Confirmed the payoff chain in the existing code (not just wiring for its own sake): a visual
+warning sets `visual.ok=false` → `/validate`'s `ok = geo.ok and visual.ok` goes false → the
+already-shipped `shouldAutoCorrect` gate fires on `!report.ok` — so configuring a vision model
+actually feeds the auto-correct loop, not just a display card. Framed honestly: this is a cheap,
+probabilistic backstop layer (the model may or may not notice "only one bracket is visible" on any
+given render) — it complements the grounding investment above, it is NOT itself that investment, and
+it does not fix the coincident-part self-check hole found this pass (that fix is still open: widen
+`embedding`/`connectivity` to catch full/near-full overlap regardless of the size ratio). Full
+frontend suite green: **66 passed**, `npm run build` clean.
+
+**2026-07-22 — grounding pass 2: closed the coincident-part self-check hole, shipped a generic
+keepout mechanism, a real rail+plates catalog part, and made `Connection.kind` mean something.**
+Direct follow-through on the "double down on grounding" decision above, covering the user's own
+follow-on list (EKG rules, a real rail-and-plates assembly pattern, and making connection `kind`
+visible/meaningful on the graph) — the camera-needs-line-of-sight semantic rule was explicitly
+deferred by the user pending further discussion, not built.
+
+1. **`"interference"` check** (`packages/truth_plane/validate.py`) — the direct fix for the
+   coincident-bracket hole found in the pass above. New true-3D-penetration helpers (`_overlap_mm`/
+   `_interferes`, distinct from the pre-existing `_axis_gap`/`_touching`, which return 0 for both
+   "just touching" and "fully overlapping" and so couldn't distinguish a clean mate from a stacked
+   duplicate). Fires only when two instances have a genuine 3-axis bbox intersection, neither is
+   comparably-sized-exempt (reuses `embedding`'s existing `_EMBED_VOLUME_RATIO = 0.5` gate), and no
+   `Connection` is declared between the pair. A Plan-agent critique caught a real false-positive risk
+   before this shipped: `assembly.py`'s own 2026-07-20 two-lane auto-layout cursor deliberately
+   clusters an ordinary system part near/inside an airframe body pre-connection — a large, legitimate,
+   connectionless overlap a naive check would have wrongly flagged mid-build; the comparable-size gate
+   exempts this case the same way `embedding` already does, pinned down with a dedicated regression
+   test. Verified against the ACTUAL reproduced bug (not just a simplified unit construction): re-ran
+   the exact stage-2 four-instance ledger from the live relay-box repro through the new check —
+   `bracket_right`/`bracket_left` now surface as `check="interference", severity="warning"` with an
+   actionable message ("two comparably-sized parts occupying the same space is almost always a
+   placement mistake... add a connection between them; otherwise reposition one of them"), `ok` stays
+   `True` (still a warning, not a hard error), and nothing else spuriously fires. `shouldAutoCorrect.ts`
+   extended to fire on it, so this actually drives a corrective turn, not just a display warning.
+2. **`keepout_mm` — a generic clearance mechanism, plumbing only.** `InterfaceSpec` gets a new
+   `keepout_mm: float = 0.0` field; `placement.py` gains `world_frame_for_interface` (resolves ANY
+   instance's interface to a world frame, not just ones already in `resolve_placements`'s connected
+   set — combines `instance_world_offsets`'s translation with the instance's own transform rotation);
+   `validate.py` gains a `"keepout"` check (any other instance's bbox coming within `keepout_mm` of a
+   declared interface, excluding a legitimately-connected partner at that exact interface, is flagged).
+   Deliberately no subsystem sets `keepout_mm > 0` yet — deciding which real parts need how much
+   clearance (camera line-of-sight, connector/cable service loops, etc.) is domain judgment being
+   explicitly left for a future pass, not invented here; this pass ships and tests the mechanism only.
+3. **`rail_mount_assembly`** (`packages/subsystems/rail_mount_assembly.py`, new) — the "a relay box is
+   a rail + plates, not an empty box" pattern the user pointed out real relay/electronics enclosures
+   follow, as one addable catalog part instead of something the LLM hand-assembles from primitives.
+   Uses the already-proven `assembly_template` mechanism (`table.py`'s pattern exactly, closed-form
+   `ChildSpec` positions, no LLM coordinate math): one `flat_bar` rail plus N `mounting_plate_grid`
+   plates, evenly spaced along the rail and resting on top of it. Confirmed empirically (not just
+   reasoned through) that the new part doesn't trip its own new checks — `validate_geometry` on a
+   reconciled default instance fires neither `"interference"` nor `"connectivity"`, despite the rail
+   and plates having no declared `Connection`s between them.
+4. **`Connection.kind` made real.** The field (`mate`/`bolted`/`slip_fit`/`containment`) was already
+   100% wired end-to-end (`ConnectionOp` → `apply_connection_op` → `Connection.kind`) but 100%
+   advisory — no behavior ever differed by kind, and the LLM was never told the concept existed.
+   `prompt_builder.py`'s `_CONNECTION_OPS_SECTION` now teaches when to pick `containment` (one part
+   meant to sit inside/around another — a board inside an enclosure) vs `bolted` (an ordinary rigid
+   flush join) vs `slip_fit` (a designed small clearance), framed as the reason the self-check's new
+   `interference` finding won't misread an intentional containment as a placement mistake.
+   `EKGGraphView.tsx` gained per-kind edge styling (`edgeStyleFor` — containment dotted, bolted solid,
+   slip_fit thin-dashed, mate default) so the graph itself communicates the relationship, not just a
+   text label — directly targeting the user's observation that visually/code-distinct link types
+   should help the model connect parts correctly, not just help a human read the graph after the fact.
+
+Full suite green throughout, verified incrementally per piece then end-to-end: backend **1786 passed
+/ 32 skipped** (up from the 1768 baseline above — delta matches new tests added), frontend **71
+passed**, `npm run build` clean. Not yet done: a live end-to-end re-run of the original relay-box
+prompt against a running server (the unit/integration-level fix is confirmed against the actual
+reproduced ledger state above; a fresh live LLM call through the full corrective loop is still open
+and needs the servers up plus an API key in the browser session).
+
+**2026-07-23 — live-tested the relay-box fix, then found and fixed a REAL bug in our own tool-call
+recovery code (not a model-reliability issue) via three separate live model failures.** Restarted
+both servers and re-ran a similarly-shaped "microsat" build; hit a NEW, different failure first:
+`deepseek/deepseek-chat`'s tool-call output devolved into repeated garbled `<｜DSML｜...｜>`-tagged
+text rendered as raw chat prose. Web research confirmed this is a documented upstream vLLM/DeepSeek
+streaming-parser bug class (chunk-splitting on the model's own tool-call start markers in `auto` +
+streaming mode) — not something fixable from this side of the wire. Rather than guess further,
+instrumented `stream_chat`'s raw delta stream with temporary logging and had the user re-run live.
+
+That capture showed the DSML leak did NOT reproduce that time — instead the model (still DeepSeek)
+produced a clean, correctly-channeled tool call that failed `json.loads` with `Expecting ','
+delimiter` deep inside a nested `open_questions` array: the model duplicated a fragment of a prior
+array element and mis-escaped its own closing brackets while generating a large compound schema
+(scope_proposal + 5 op-kinds in one forced call). Confirmed via direct byte-level reconstruction
+from the log, not inference. This is a genuine model-generation defect, not a code bug — the existing
+`_looks_truncated` classification correctly identified it as non-truncation and the correct error
+fired as designed.
+
+Since three failures in one session pointed at "model reliability under a large compound schema," ran
+a 3-agent parallel research workflow (pricing/specs, function-calling reliability, OpenRouter-specific
+known issues) before recommending a model switch to `gemini-2.5-flash` — verdict: **don't switch**,
+with sourced evidence (GitHub issues, Google's own forums) that Gemini 2.5 Flash shares the identical
+"chokes on large nested/compound JSON schemas with repetition/malformed output" failure class,
+specifically on the Flash/Flash-Lite tier (not Pro) — a same-tier swap wasn't the fix.
+
+The user independently tried `qwen/qwen3.6-plus` — SAME generic "could not be parsed" error a third
+time. This time the live capture (instrumentation was still in place) revealed something different
+and directly fixable: Qwen actually produced a fully valid, complete, correctly-shaped proposal (13
+instance_ops, 53 deltas, 2 connection_ops, 12 feature_ops, a real 6-part scope_proposal) — but it
+second-guessed itself mid-generation, first emitting an abandoned, wrongly-shaped clarification-only
+draft (`deltas` as `"key=value"` strings instead of the real `ParameterDelta` schema), THEN the real,
+complete answer — both concatenated inside the SAME tool call's `arguments` string. The existing
+"recover a valid JSON prefix, ignore trailing junk" logic (`_extract_json_values`'s predecessor, a
+single `raw_decode` call) only ever kept the FIRST complete JSON value it found — the abandoned draft
+— which then failed Pydantic schema validation, and the fully-valid SECOND draft was discarded as
+"trailing junk" and never even attempted. **Root-caused and fixed, not a model problem**: extended the
+recovery into `_extract_json_values` (`packages/agents/openrouter_provider.py`), which repeatedly
+`raw_decode`s every complete top-level JSON value concatenated in the stream (not just the first), then
+`stream_chat` now prefers the LAST candidate that actually validates against `DeltaProposal` — falling
+back to the old first-value behavior only if nothing validates, so a genuine schema-invalidation still
+reports normally. Verified against the real captured Qwen bytes directly (not a synthetic repro): the
+fix recovers the complete, correct proposal end-to-end.
+
+A SECOND, distinct bug surfaced investigating why the "good" second draft still failed validation even
+once correctly extracted: Qwen had ALSO double-encoded `scope_proposal` as a JSON string
+(`"scope_proposal": "{\"goal\": ...}"`) instead of a real nested object. Added a
+`field_validator(mode="before")` on `DeltaProposal.scope_proposal` (`packages/ledger/deltas.py`) that
+tolerates a string value by `json.loads`-ing it, falling through to normal strict validation
+unchanged if the string isn't valid JSON — `scope_proposal` is documented pure display data (no
+downstream code reads it for safety), so this is leniency at the LLM wire boundary, not a weakened
+safety check, and mirrors the existing "tolerate a model wrapping JSON in prose" leniency already in
+`judge_image()`. Both fixes together were verified against the actual captured Qwen response and now
+recover it in full. 6 new tests added (`_extract_json_values` directly, the `stream_chat`
+prefer-the-later-valid-draft behavior, and the `scope_proposal` string-coercion + its rejection of a
+genuinely non-JSON string). Full suite green: **1793 backend passed / 32 skipped** (up from 1786).
+Live end-to-end re-confirmation with the user is the natural next step, not yet done as of this entry.
+
 **Also uncommitted-until-2026-07-14, now landed:** the whole catalog/architecture wave below was
 sitting uncommitted in the working tree for ~2 weeks (HEAD was `a38732d`, dated 2026-06-28) — CI had
 validated none of it. It's now split across 7 logical commits (ledger → truth-plane →

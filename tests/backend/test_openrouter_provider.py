@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from packages.agents.openrouter_provider import OpenRouterDeltaProvider, _looks_truncated
+from packages.agents.openrouter_provider import OpenRouterDeltaProvider, _extract_json_values, _looks_truncated
 from packages.ledger.deltas import ParameterDelta
 
 SKIN = "instances.root.params.skin_thickness_mm"
@@ -202,6 +202,54 @@ def test_stream_chat_recovers_a_complete_payload_with_trailing_junk():
     assert len(proposals) == 1
     assert proposals[0].instance_ops[0].instance_id == "top_ring"
     assert events[-1] == ("done", None)
+
+
+def test_extract_json_values_returns_one_value_with_trailing_non_json_junk():
+    good = {"instance_ops": [{"op": "add_instance", "subsystem_type": "bracket"}]}
+    values = _extract_json_values(json.dumps(good) + "\nsome trailing junk here")
+    assert len(values) == 1
+    assert values[0][0] == good
+
+
+def test_extract_json_values_returns_every_complete_value_found_back_to_back():
+    # 2026-07-23 live repro (Qwen3.6-plus): a model second-guessed itself mid-generation and emitted
+    # TWO complete JSON objects into one tool call's arguments -- an abandoned draft immediately
+    # followed by a complete one. The old single-raw_decode recovery only ever surfaced the first.
+    first = {"request_clarification": "need more info"}
+    second = {"instance_ops": [{"op": "add_instance", "subsystem_type": "bracket"}]}
+    values = _extract_json_values(json.dumps(first) + json.dumps(second))
+    assert [v for v, _ in values] == [first, second]
+
+
+def test_extract_json_values_returns_empty_for_genuinely_malformed_json():
+    # a syntax error INSIDE the structure (not at the very start) must yield zero values -- this is
+    # what keeps the recovery path from ever masking a real parse failure or a truncation.
+    values = _extract_json_values('{"instance_ops": [{"op": }]}')
+    assert values == []
+
+
+def test_stream_chat_recovers_the_later_valid_draft_over_an_earlier_invalid_one():
+    # 2026-07-23 live repro: the model emitted an abandoned, WRONGLY-shaped draft first (deltas as
+    # "key=value" strings instead of the real ParameterDelta schema), then a complete, correctly
+    # shaped proposal second -- both inside the SAME tool call. The old recovery kept only the first
+    # complete JSON value found, which happened to be the bad draft, and threw the good one away as
+    # "trailing junk" -- reporting "could not be parsed" over a proposal that was actually fine.
+    bad_draft = json.dumps({"deltas": ["instances.root.params.skin_thickness_mm=3.0"]})
+    good_draft = json.dumps({"instance_ops": [{"op": "add_instance", "subsystem_type": "bracket", "instance_id": "root"}]})
+    args = bad_draft + good_draft
+
+    def fake_stream(*, url, headers, json):
+        yield {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": args}}]}}]}
+        yield {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}
+
+    prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+    events = list(prov.stream_chat(messages=[{"role": "user", "content": "add a bracket"}], ledger_json="{}"))
+
+    assert not any(k == "error" for k, _ in events)
+    proposals = [p for k, p in events if k == "proposal"]
+    assert len(proposals) == 1
+    assert proposals[0].instance_ops[0].instance_id == "root"
+    assert proposals[0].deltas == []  # the bad draft's malformed deltas were correctly discarded
 
 
 def test_stream_chat_genuinely_truncated_json_is_not_falsely_recovered():
