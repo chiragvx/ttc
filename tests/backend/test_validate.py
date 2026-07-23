@@ -134,6 +134,166 @@ def test_dangling_connection_surfaces_in_the_self_check():
     assert any(i.check == "connections" for i in r.issues)
 
 
+def test_mismatched_face_bracket_mate_surfaces_as_an_actionable_connections_warning():
+    # 2026-07-22 antenna-bracket follow-up: lbracket's wall_mount (fixed -X normal) only mates
+    # CLEANLY against enclosure's `right` face -- connecting it to `left` (the natural symmetric
+    # choice for a second, opposite-side antenna bracket) still resolves a placement but leaves the
+    # bracket embedded/facing the wrong way. This must not be a SILENT bad render: the self-check
+    # has to surface it as a "connections" warning (not "connectivity" -- a declared Connection
+    # counts as joined) so the already-shipped auto-correct gate (shouldAutoCorrect.ts, H7 fix)
+    # fires on it instead of the copilot's reply reporting a clean, joined assembly.
+    from packages.truth_plane.validate import validate_geometry
+    from packages.ledger.schema import Connection, InterfaceRef
+    led = _make([
+        ("enclosure", "box", {}, {}),
+        ("lbracket", "brk", {}, {}),
+    ])
+    led.connections = [
+        Connection(id="c1", a=InterfaceRef(instance_id="brk", interface="wall_mount"),
+                   b=InterfaceRef(instance_id="box", interface="left")),
+    ]
+    r = validate_geometry(led)
+    connections_issues = [i for i in r.issues if i.check == "connections"]
+    assert len(connections_issues) == 1
+    assert "need a rotation to mate" in connections_issues[0].message
+    # not flagged as floating/disconnected -- the declared Connection counts as joined, which is
+    # exactly why the "connections" channel (not "connectivity") has to carry this signal
+    assert not any(i.check == "connectivity" for i in r.issues)
+
+
+def test_coincident_comparable_size_parts_flagged_as_interference():
+    # 2026-07-22 -- THE bug this check exists for: two identical lbrackets forced to the exact same
+    # world position (no connection between them) -- this is what a botched self-correction actually
+    # produced live (a connection-mated part's sibling fell back to auto-layout, which is blind to
+    # where the mated part already sits). Neither `embedding` (equal volumes, ratio check fails) nor
+    # `connectivity` (bbox-touching counts as "joined") catches this -- `interference` must.
+    from packages.truth_plane.validate import validate_geometry
+    led = _make([
+        ("lbracket", "brk_a", {"x_mm": 0, "y_mm": 0, "z_mm": 0}, {}),
+        ("lbracket", "brk_b", {"x_mm": 0, "y_mm": 0, "z_mm": 0}, {}),
+    ])
+    r = validate_geometry(led)
+    interference = [i for i in r.issues if i.check == "interference"]
+    assert len(interference) == 1
+    assert set(interference[0].instances) == {"brk_a", "brk_b"}
+    assert r.ok  # warning, not error -- never blocks export
+
+
+def test_comparable_size_parts_connected_are_not_flagged_as_interference():
+    # Two identical lbrackets, mated wall_mount<->wall_mount (both interfaces share the SAME fixed
+    # -X normal, so this is a "rotation-needed" mate per placement.py -- the solver still translates
+    # them to the exact same position, same as the coincident case above). The declared Connection
+    # is what must exempt this from `interference` -- it's already reported, correctly, as a
+    # `connections` rotation-needed warning; it must not ALSO double-report under a new check name.
+    from packages.truth_plane.validate import validate_geometry
+    from packages.ledger.schema import Connection, InterfaceRef
+    led = _make([("lbracket", "ba", {}, {}), ("lbracket", "bb", {}, {})])
+    led.connections = [
+        Connection(id="c1", a=InterfaceRef(instance_id="ba", interface="wall_mount"),
+                   b=InterfaceRef(instance_id="bb", interface="wall_mount")),
+    ]
+    r = validate_geometry(led)
+    assert not any(i.check == "interference" for i in r.issues), r.summary
+    assert any(i.check == "connections" for i in r.issues)  # still caught, just under the right name
+
+
+def test_small_part_inside_big_part_is_not_flagged_as_interference():
+    # A small standoff fully inside a much bigger enclosure, no connection -- today's ordinary
+    # ambiguous "maybe a legitimate internal component" case (embedding's own territory, info-only).
+    # The size-ratio gate must exempt this from the NEW, more confident `interference` check too.
+    from packages.truth_plane.validate import validate_geometry
+    led = _make([
+        ("enclosure", "box", {}, {"box_width_mm": 120, "box_depth_mm": 90, "box_height_mm": 50}),
+        ("standoff", "post", {"x_mm": 0, "y_mm": 0, "z_mm": 0}, {}),
+    ])
+    r = validate_geometry(led)
+    assert not any(i.check == "interference" for i in r.issues), r.summary
+    assert any(i.check == "embedding" for i in r.issues)  # still flagged, just as the ambiguous heads-up
+
+
+def test_clean_bracket_enclosure_mate_is_not_flagged_as_interference():
+    # The one clean, correct mate shipped earlier this session (lbracket.wall_mount <-> enclosure's
+    # +X-normal face): touches flush, never truly interpenetrates in 3D -- confirms the check doesn't
+    # fire on ordinary, correctly-flush-mounted geometry.
+    from packages.truth_plane.validate import validate_geometry
+    from packages.ledger.schema import Connection, InterfaceRef
+    led = _make([("enclosure", "box", {}, {}), ("lbracket", "brk", {}, {})])
+    led.connections = [
+        Connection(id="c1", a=InterfaceRef(instance_id="brk", interface="wall_mount"),
+                   b=InterfaceRef(instance_id="box", interface="right")),
+    ]
+    r = validate_geometry(led)
+    assert not any(i.check == "interference" for i in r.issues), r.summary
+
+
+def test_auto_layout_clustering_an_ordinary_part_near_an_airframe_body_is_not_interference():
+    # assembly.py's 2026-07-20 two-lane auto-layout cursor DELIBERATELY seeds an airframe-defining
+    # body's lane and an ordinary system part's lane independently, so an untouched system part can
+    # legitimately land at/inside the airframe's own footprint pre-connection -- a real, EXPECTED
+    # mid-build state, not a placement mistake. The comparable-size gate (bracket volume << wing
+    # volume) must exempt this, or every ordinary multi-part build would spuriously self-correct.
+    from packages.truth_plane.validate import validate_geometry
+    led = _make([("naca_wing", "wing", {}, {}), ("bracket", "brk", {}, {})])
+    r = validate_geometry(led)
+    assert not any(i.check == "interference" for i in r.issues), r.summary
+
+
+def _with_lbracket_wall_mount_keepout(monkeypatch, keepout_mm: float):
+    # 2026-07-22 -- no real subsystem sets keepout_mm > 0 yet (deliberately deferred domain
+    # judgment), so this monkeypatches lbracket's registered model for the duration of one test --
+    # reverted automatically by pytest's monkeypatch fixture, never a permanent catalog change.
+    import dataclasses
+    from packages.subsystems import SUBSYSTEM_MODELS, get_subsystem_model
+    model = get_subsystem_model("lbracket")
+    new_interfaces = [
+        dataclasses.replace(spec, keepout_mm=keepout_mm) if spec.name == "wall_mount" else spec
+        for spec in model.interfaces
+    ]
+    monkeypatch.setitem(SUBSYSTEM_MODELS, "lbracket", dataclasses.replace(model, interfaces=new_interfaces))
+
+
+def test_keepout_violation_is_flagged(monkeypatch):
+    _with_lbracket_wall_mount_keepout(monkeypatch, 10.0)
+    from packages.truth_plane.validate import validate_geometry
+    # lbracket "brk" at the origin -> wall_mount world origin is (0, 0, leg_a_mm/2) = (0, 0, 20).
+    # A standoff placed right next to that point (well within the 10mm keepout) with NO connection.
+    led = _make([
+        ("lbracket", "brk", {"x_mm": 0, "y_mm": 0, "z_mm": 0}, {}),
+        ("standoff", "post", {"x_mm": 5, "y_mm": 0, "z_mm": 20}, {}),
+    ])
+    r = validate_geometry(led)
+    keepout = [i for i in r.issues if i.check == "keepout"]
+    assert len(keepout) == 1, r.summary
+    assert set(keepout[0].instances) == {"brk", "post"}
+    assert r.ok  # warning, not error
+
+
+def test_keepout_does_not_fire_on_the_legitimately_connected_partner(monkeypatch):
+    _with_lbracket_wall_mount_keepout(monkeypatch, 10.0)
+    from packages.truth_plane.validate import validate_geometry
+    from packages.ledger.schema import Connection, InterfaceRef
+    led = _make([("enclosure", "box", {}, {}), ("lbracket", "brk", {}, {})])
+    led.connections = [
+        Connection(id="c1", a=InterfaceRef(instance_id="brk", interface="wall_mount"),
+                   b=InterfaceRef(instance_id="box", interface="right")),
+    ]
+    r = validate_geometry(led)
+    # "box" IS within 10mm of brk's wall_mount (that's the whole point of a flush mate) but it's the
+    # legitimately-connected partner for that exact interface -- must not be flagged.
+    assert not any(i.check == "keepout" for i in r.issues), r.summary
+
+
+def test_keepout_does_not_fire_when_nothing_is_within_range(monkeypatch):
+    _with_lbracket_wall_mount_keepout(monkeypatch, 10.0)
+    from packages.truth_plane.validate import validate_geometry
+    led = _make([
+        ("lbracket", "brk", {"x_mm": 0, "y_mm": 0, "z_mm": 0}, {}),
+        ("standoff", "post", {"x_mm": 500, "y_mm": 0, "z_mm": 20}, {}),
+    ])
+    r = validate_geometry(led)
+    assert not any(i.check == "keepout" for i in r.issues), r.summary
+
+
 def test_visual_validation_skipped_cleanly_without_a_model(monkeypatch):
     from packages.agents.vision_validator import validate_visual
     from packages.transport.app import make_demo_ledger

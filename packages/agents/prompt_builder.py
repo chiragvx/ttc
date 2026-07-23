@@ -220,6 +220,24 @@ body that stays compact while the wings extend further), rather than one continu
   panel's is a straight line, so while the chord/thickness match EXACTLY at the seam (no step), the \
   outline's SLOPE may not, leaving a possible subtle curvature kink right at the join.
 
+- **Worked recipe — mounting a bracket/plate flush against a box-shaped part's side** (e.g. an \
+L-bracket bolted to an enclosure wall — the canonical "bracket + case" functional assembly). \
+`enclosure` declares SIX face interfaces on its outer box shell — `left`/`right`/`front`/`back`/`top`/ \
+`bottom`, one per side (check the part-types menu above before assuming another box-shaped part has \
+the same six — only `enclosure` does so far). `lbracket` declares \
+`wall_mount` (the outer face of its vertical flange — the face that bolts flat against a wall) and \
+`top` (the outer face of its horizontal flange, where a carried part sits). PREFER `connection_ops`: \
+`{op:"add_connection", a_instance:<bracket id>, a_interface:"wall_mount", b_instance:<enclosure id>, \
+b_interface:"right"}` — leave the bracket's x_mm/y_mm/z_mm UNSET. One honest limitation: mates in this \
+engine are pure translation (no rotation solving yet), so `wall_mount`'s fixed outward-facing normal \
+only lands flush against the ONE enclosure face whose own outward normal points the opposite way — \
+concretely, `right` is the clean match; connecting to `left`/`front`/`back` instead still resolves a \
+position but leaves the bracket facing the wrong way (surfaced afterward as an advisory warning, not \
+blocked). For a different side, either ask the user which face they actually mean, or fall back to \
+the auto-layout + honest-disclosure path below rather than guessing a hand-computed position — a \
+bracket meant to sit flush against a wall is off by exactly half a dimension when guessed instead of \
+connected, which is worse than an honestly-disclosed rough placement.
+
 Single tapered body vs. segmented skeleton — pick the recipe that actually matches the request. Not \
 every "fuselage" (or similar streamlined shape) needs the bulkhead_frame+longeron recipe above: for a \
 SINGLE smoothly-tapered body of revolution — a fuselage, a bottle, a rocket body, a tool handle, a \
@@ -291,9 +309,21 @@ Rules:
 rejected loudly). Both endpoint instances must already exist (add them first / same call).
 - When you connect a part, leave its `x_mm`/`y_mm`/`z_mm` UNSET on the add_instance — the connection \
 places it. Setting both a position AND a connection is contradictory.
-- Only reach for explicit x/y/z when the parts genuinely have no matching interface. As more parts \
-declare interfaces, connection_ops becomes the default way to assemble.
-- `remove_connection` (with the connection `id`) unmates two parts.\
+- If NEITHER side has a matching interface, do NOT reach for a hand-computed x/y/z as a substitute — \
+see "Loose kit vs. functional assembly" below for what a missing interface actually calls for (auto-\
+layout + honest disclosure for a functional assembly). Explicit x/y/z is for when the USER gave an \
+actual intentional placement in their own request (e.g. "stack it on top of the enclosure", "shift it \
+20mm forward") — never a stand-in for a connection that doesn't exist yet. As more parts declare \
+interfaces, connection_ops becomes the default way to assemble.
+- `remove_connection` (with the connection `id`) unmates two parts.
+- `kind` (optional on add_connection, defaults to `"mate"`) describes the RELATIONSHIP, not just \
+which two interfaces touch — set it deliberately rather than leaving the default: use `"containment"` \
+when one part is meant to sit INSIDE or around another (a board mounted inside an enclosure, a payload \
+inside a housing) — this tells the self-check the overlap is intentional, not a placement mistake; use \
+`"bolted"` for an ordinary rigid, flush, touching join (a bracket bolted to a wall, a plate screwed to \
+a rail); use `"slip_fit"` for a designed small clearance fit (a shaft in a bore, a lid in a lip). This \
+is not cosmetic labeling — a part legitimately meant to sit inside another needs `"containment"` or the \
+self-check's `interference` finding may flag the overlap as an unexplained placement mistake.\
 """
 
 

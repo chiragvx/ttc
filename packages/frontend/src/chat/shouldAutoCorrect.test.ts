@@ -42,6 +42,13 @@ describe("shouldAutoCorrect", () => {
     expect(shouldAutoCorrect(r)).toBe(true);
   });
 
+  it("fires on an interference issue even when report.ok is true", () => {
+    // 2026-07-22: two comparably-sized parts truly interpenetrating with no declared connection --
+    // also hardcoded severity=warning in validate.py, same gap class as connectivity/connections.
+    const r = report({ ok: true, geometricIssues: [issue("interference", "warning")] });
+    expect(shouldAutoCorrect(r)).toBe(true);
+  });
+
   it("does not fire when there are no issues at all", () => {
     expect(shouldAutoCorrect(report())).toBe(false);
   });

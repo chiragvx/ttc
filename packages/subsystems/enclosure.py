@@ -11,7 +11,7 @@ axis is supposed to eliminate.
 
 from __future__ import annotations
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import ParamSpec, Subsystem, box_face_interfaces, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -133,4 +133,5 @@ ENCLOSURE = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    interfaces=box_face_interfaces("box_width_mm", "box_depth_mm", "box_height_mm"),  # 2026-07-22
 ))

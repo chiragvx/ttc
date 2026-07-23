@@ -67,6 +67,11 @@ export interface EKGComputedEdge {
   target: string;
   label: string;
   kind: "connection" | "coupling";
+  // The underlying Connection.kind ("mate" | "bolted" | "slip_fit" | "containment") -- only set for
+  // kind === "connection" edges. 2026-07-22: previously kind was only ever shown as plain text in
+  // the edge label, with zero visual distinction -- this is what lets the graph itself communicate
+  // the relationship type (a rigid bolted join vs. an intentional containment) at a glance.
+  connectionKind?: string;
 }
 
 export function computeGraphData(ledger: LedgerGraphData): { nodes: EKGComputedNode[]; edges: EKGComputedEdge[] } {
@@ -89,6 +94,7 @@ export function computeGraphData(ledger: LedgerGraphData): { nodes: EKGComputedN
       target: c.b.instance_id,
       label: `${c.kind}: ${c.a.interface}<->${c.b.interface}`,
       kind: "connection",
+      connectionKind: c.kind,
     });
   }
 
@@ -227,6 +233,25 @@ function formatParamValue(value: number): string {
   return Number(value.toFixed(2)).toString();
 }
 
+// Pure, unit-testable edge styling (2026-07-22) — Couplings stay dashed green (unchanged). A
+// Connection's stroke now varies by its `Connection.kind` (previously kind was only ever text in
+// the label, cosmetically identical for every kind) so the relationship type is visible at a
+// glance: `containment` (intentional nesting, e.g. a board inside an enclosure) gets a distinct
+// dotted purple so it reads as deliberately different from a rigid join; `bolted` gets a solid
+// amber (a fastened, load-bearing join); `slip_fit` gets a thin dashed teal (a designed clearance
+// fit); `mate` (the default, generic touch) keeps the original solid blue baseline.
+const _CONNECTION_KIND_STYLE: Record<string, React.CSSProperties> = {
+  containment: { stroke: "#a371f7", strokeWidth: 1.5, strokeDasharray: "2 4" },
+  bolted: { stroke: "#f0883e", strokeWidth: 1.5 },
+  slip_fit: { stroke: "#39c5cf", strokeWidth: 1, strokeDasharray: "6 3" },
+  mate: { stroke: "#58a6ff", strokeWidth: 1.5 },
+};
+
+export function edgeStyleFor(e: EKGComputedEdge): React.CSSProperties {
+  if (e.kind === "coupling") return { stroke: "#3fb950", strokeWidth: 1.5, strokeDasharray: "6 3" };
+  return _CONNECTION_KIND_STYLE[e.connectionKind ?? "mate"] ?? _CONNECTION_KIND_STYLE.mate;
+}
+
 function EKGCardNode({ id, data }: NodeProps<EKGFlowNode>) {
   const { subsystemType, disconnected, selected, params } = data;
   const visibleParams = params.slice(0, _MAX_VISIBLE_PARAMS);
@@ -321,9 +346,10 @@ function EKGGraphCanvas({ ledger, selectedInstanceId, onSelectInstance }: EKGGra
     setNodes((prev) => mergeNodePositions(prev, computed.nodes, selectedInstanceId));
   }, [computed.nodes, selectedInstanceId, setNodes]);
 
-  // Edges — constraint 7: Connections render solid blue, symmetric, no arrowhead. Couplings render
-  // dashed green WITH a directional arrowhead pointing at the target (value flows FROM source INTO
-  // target) — this directional distinction is the whole point of "how they interact".
+  // Edges — constraint 7: Connections are symmetric, no arrowhead, styled per `connectionKind` (see
+  // edgeStyleFor). Couplings render dashed green WITH a directional arrowhead pointing at the
+  // target (value flows FROM source INTO target) — this directional distinction is the whole point
+  // of "how they interact".
   useEffect(() => {
     setEdges(
       computed.edges.map((e) => ({
@@ -333,10 +359,7 @@ function EKGGraphCanvas({ ledger, selectedInstanceId, onSelectInstance }: EKGGra
         label: e.label,
         labelStyle: { fill: "#8b949e", fontSize: 9 },
         labelBgStyle: { fill: "#0d1117", fillOpacity: 0.8 },
-        style:
-          e.kind === "connection"
-            ? { stroke: "#58a6ff", strokeWidth: 1.5 }
-            : { stroke: "#3fb950", strokeWidth: 1.5, strokeDasharray: "6 3" },
+        style: edgeStyleFor(e),
         markerEnd: e.kind === "coupling" ? { type: MarkerType.ArrowClosed, color: "#3fb950" } : undefined,
       })),
     );

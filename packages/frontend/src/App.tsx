@@ -68,7 +68,7 @@ export default function App() {
   };
   const runStandaloneValidate = async () => {
     setValidationRunning(true);
-    try { setValidationResult(await runValidate("", settings.apiKey)); }
+    try { setValidationResult(await runValidate("", settings.apiKey, settings.visionModel)); }
     catch { /* ignore */ }
     finally { setValidationRunning(false); }
   };
@@ -592,7 +592,7 @@ export default function App() {
                   onOpsApplied={refreshAfterOps}
                   onApplyConnectionOp={applyConnectionOp}
                   onApplyCouplingOp={applyCouplingOp}
-                  onValidate={(intent) => runValidate(intent, settings.apiKey)}
+                  onValidate={(intent) => runValidate(intent, settings.apiKey, settings.visionModel)}
                   onUserMessage={applyGoal} onHoverInstance={setHoveredInstanceId}
                   onOpenSettings={() => setSettingsOpen(true)} />
           </div>

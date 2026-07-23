@@ -18,6 +18,7 @@ from packages.subsystems.placement import (
     _rot_apply,
     connection_issues,
     resolve_placements,
+    world_frame_for_interface,
 )
 from packages.transport.app import make_demo_ledger
 
@@ -65,6 +66,55 @@ def test_plate_shaped_subsystems_declare_face_interfaces(name):
     # 2026-07-20 — the generic plate_face_interfaces() helper, applied to the render_bracket-derived
     # shape family confirmed by direct code reading to share the identical width/depth/thickness box.
     assert [i.name for i in get_subsystem_model(name).interfaces] == ["top", "bottom"]
+
+
+def test_enclosure_declares_box_face_interfaces():
+    # 2026-07-22 — the generic box_face_interfaces() helper, applied to enclosure's outer box shell
+    # (confirmed a plain bd.Box(box_width_mm, box_depth_mm, box_height_mm) centered at the origin).
+    assert [i.name for i in get_subsystem_model("enclosure").interfaces] == [
+        "left", "right", "front", "back", "bottom", "top"]
+
+
+def test_lbracket_declares_wall_mount_and_top_interfaces():
+    # 2026-07-22 — bespoke (not a shared generic helper, since render_lbracket's shape is asymmetric):
+    # wall_mount is the vertical flange's outer face, top is the horizontal flange's outer face.
+    assert [i.name for i in get_subsystem_model("lbracket").interfaces] == ["wall_mount", "top"]
+
+
+def test_lbracket_mates_cleanly_to_the_enclosures_right_face():
+    # This is the fix for the antenna-bracket root cause: lbracket's wall_mount (fixed -X normal) is
+    # anti-parallel to enclosure's right face (+X normal) — the ONE clean, rotation-free mate. "box" <
+    # "brk" alphabetically, so "box" is the datum at the origin (see placement.py's datum-selection
+    # rule) and "brk" derives relative to it.
+    led = make_demo_ledger()
+    led = add_instance(led, "enclosure", "box")   # box_width_mm=80 default -> right face at x=40
+    led = add_instance(led, "lbracket", "brk")    # leg_a_mm=40 default -> wall_mount at local z=20
+    led.connections = [
+        Connection(id="c1", a=InterfaceRef(instance_id="brk", interface="wall_mount"),
+                   b=InterfaceRef(instance_id="box", interface="right")),
+    ]
+    pl = resolve_placements(led)
+    assert pl["box"] == Transform()  # datum at origin
+    assert pl["brk"].x_mm == pytest.approx(40.0)
+    assert pl["brk"].y_mm == pytest.approx(0.0)
+    assert pl["brk"].z_mm == pytest.approx(-20.0)
+    assert connection_issues(led) == []
+
+
+def test_lbracket_mated_to_a_non_matching_enclosure_face_is_flagged_not_silently_wrong():
+    # The honest limitation, verified: wall_mount's normal is fixed -X, so mating it to enclosure's
+    # "left" face (also -X, i.e. PARALLEL not anti-parallel) still resolves a translation -- but
+    # connection_issues() must catch the rotation-needed mismatch rather than reporting it clean.
+    led = make_demo_ledger()
+    led = add_instance(led, "enclosure", "box")
+    led = add_instance(led, "lbracket", "brk")
+    led.connections = [
+        Connection(id="c1", a=InterfaceRef(instance_id="brk", interface="wall_mount"),
+                   b=InterfaceRef(instance_id="box", interface="left")),
+    ]
+    issues = connection_issues(led)
+    assert len(issues) == 1
+    assert "need a rotation to mate" in issues[0]
 
 
 def test_two_plate_shaped_parts_mate_face_to_face_via_the_generic_helper():
@@ -224,6 +274,32 @@ def test_rotated_datum_mate_is_flagged_not_silently_wrong():
 def test_clean_identity_datum_mate_is_not_flagged():
     # the flip side — the real current use case (identity datum) must stay clean, no false positive
     assert connection_issues(_bwb_with_two_wings()) == []
+
+
+def test_world_frame_for_interface_resolves_an_unconnected_instance():
+    # 2026-07-22 -- unlike _world_frame (only resolves instances already in resolve_placements'
+    # connected set), world_frame_for_interface must work for a plain, unconnected instance too --
+    # this is what the "keepout" self-check needs (a clearance zone regardless of how the instance
+    # ended up positioned).
+    led = make_demo_ledger()
+    led = add_instance(led, "enclosure", "box")
+    led.instances["box"].transform = Transform(x_mm=10.0, y_mm=20.0, z_mm=30.0)
+    wf = world_frame_for_interface(led, "box", "right")
+    assert wf is not None
+    assert wf.origin == pytest.approx((50.0, 20.0, 30.0))  # local (40,0,0) [box_width_mm=80/2] + offset
+    assert wf.normal == pytest.approx((1.0, 0.0, 0.0))
+    assert world_frame_for_interface(led, "box", "no_such_interface") is None
+    assert world_frame_for_interface(led, "ghost", "right") is None
+
+
+def test_world_frame_for_interface_matches_resolve_placements_for_a_connected_instance():
+    # Cross-check against the already-verified mate solver numbers (root is at wing_panel's own
+    # local origin, so its world origin equals the resolved translation exactly).
+    led = _bwb_with_two_wings()
+    pl = resolve_placements(led)
+    wf = world_frame_for_interface(led, "wr", "root")
+    assert wf is not None
+    assert wf.origin == pytest.approx((pl["wr"].x_mm, pl["wr"].y_mm, pl["wr"].z_mm))
 
 
 def test_multiple_anchors_in_one_component_are_flagged():

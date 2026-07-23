@@ -163,6 +163,38 @@ def _world_frame(ledger, placements, instance_id: str, interface: str) -> Option
     return _apply_transform_to_frame(t, lf)
 
 
+def world_frame_for_interface(
+    ledger: "MasterParametricLedger", instance_id: str, interface: str,
+) -> Optional[Frame]:
+    """Any instance's declared interface, resolved to its WORLD frame (2026-07-22) -- unlike
+    `_world_frame` above (which only resolves an instance already reached by `resolve_placements`'s
+    connection graph), this works for EVERY instance regardless of whether it's mate-solver-placed,
+    auto-laid-out, or explicitly transformed. Combines `assembly.instance_world_offsets`'s
+    translation (which already handles all three placement paths uniformly, returning one
+    world (x,y,z) per instance) with the instance's own `Transform.rx/ry/rz_deg` rotation -- the
+    SAME two-piece combination `validate.py::_placed` and `assembly.render_assembly` already use to
+    place real geometry, so this stays consistent with how the rest of the system interprets
+    "where an instance actually sits" rather than inventing a second convention.
+
+    For the "keepout" self-check (validate.py), which needs a world-space clearance zone around an
+    interface no matter how that instance got positioned."""
+    from packages.ledger.schema import Transform
+    from packages.subsystems.assembly import instance_world_offsets
+
+    lf = _local_frame(ledger, instance_id, interface)
+    if lf is None:
+        return None
+    inst = ledger.instances.get(instance_id)
+    if inst is None:
+        return None
+    ox, oy, oz = instance_world_offsets(ledger).get(instance_id, (0.0, 0.0, 0.0))
+    rx = ry = rz = 0.0
+    if inst.transform is not None:
+        rx, ry, rz = inst.transform.rx_deg, inst.transform.ry_deg, inst.transform.rz_deg
+    t = Transform(x_mm=ox, y_mm=oy, z_mm=oz, rx_deg=rx, ry_deg=ry, rz_deg=rz)
+    return _apply_transform_to_frame(t, lf)
+
+
 def connection_issues(ledger: "MasterParametricLedger", instance_id: str | None = None) -> list[str]:
     """Human-readable problems with the connection graph, for the self-check:
     - DANGLING: an endpoint whose instance or interface doesn't exist.

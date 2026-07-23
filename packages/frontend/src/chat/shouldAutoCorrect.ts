@@ -21,5 +21,11 @@ export function shouldAutoCorrect(report: ValidationResult): boolean {
   // "connectivity" above -- validate.py's own comment calls an unresolved connection "a real
   // error", not an ambiguous judgment call -- it's just hardcoded severity="warning" there too,
   // so it needs the same override of the !report.ok gate.
-  return issues.some((i) => i.check === "connectivity" || i.check === "connections");
+  //
+  // "interference" (2026-07-22, validate.py) -- two comparably-sized parts truly interpenetrating
+  // with no declared connection between them. Unlike "embedding" (deliberately excluded above --
+  // a much-smaller part fully inside a bigger one is genuinely ambiguous), two comparable-sized
+  // unrelated parts occupying the same space is not ambiguous the same way -- it's the coincident-
+  // bracket failure this check exists to catch, so it belongs in the confident/actionable group.
+  return issues.some((i) => i.check === "connectivity" || i.check === "connections" || i.check === "interference");
 }

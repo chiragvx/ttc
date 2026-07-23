@@ -62,11 +62,20 @@ class InterfaceSpec:
     point tracks the geometry: change `span_mm` and the wing-tip interface moves with it, and the
     placement solver re-mates automatically. `kind`: 'mount' (a part hangs off it), 'containment' (an
     envelope others sit inside — the body-vs-frame-dissolving edge), 'port' (a future coupling attach
-    point, Phase 2)."""
+    point, Phase 2).
+
+    `keepout_mm` (2026-07-22, mechanism only — no subsystem sets this yet): a clearance radius this
+    interface needs kept clear of any OTHER instance's geometry (e.g. a sensor that needs an
+    unobstructed cone/volume in front of its mount face). Checked by
+    `packages/truth_plane/validate.py`'s "keepout" check via `placement.py::world_frame_for_interface`.
+    Deciding WHICH parts need how much clearance is a domain-semantic judgment (what "line of sight"
+    means for a given part) deliberately deferred — this field exists so that judgment has somewhere
+    to plug in later without a schema change. 0.0 (default) = no keepout requirement."""
 
     name: str
     kind: str  # "mount" | "containment" | "port"
     frame: Callable[["Namespace"], Frame]
+    keepout_mm: float = 0.0
 
 
 def bar_end_interfaces(length_param: str, names: tuple[str, str] = ("end_a", "end_b")) -> list[InterfaceSpec]:
@@ -107,6 +116,86 @@ def plate_face_interfaces(thickness_param: str, names: tuple[str, str] = ("top",
     name_a, name_b = names
     return [InterfaceSpec(name=name_a, kind="mount", frame=_face(1.0)),
             InterfaceSpec(name=name_b, kind="mount", frame=_face(-1.0))]
+
+
+_BOX_FACE_AXIS: dict[str, tuple[float, float, float]] = {
+    "left": (1.0, 0.0, 0.0), "right": (1.0, 0.0, 0.0),
+    "front": (0.0, 1.0, 0.0), "back": (0.0, 1.0, 0.0),
+    "bottom": (0.0, 0.0, 1.0), "top": (0.0, 0.0, 1.0),
+}
+_BOX_FACES: tuple[tuple[str, float], ...] = (
+    ("left", -1.0), ("right", 1.0), ("front", -1.0), ("back", 1.0), ("bottom", -1.0), ("top", 1.0),
+)
+
+
+def box_face_interfaces(width_param: str, depth_param: str, height_param: str) -> list[InterfaceSpec]:
+    """Six mount interfaces at the +/- faces of a subsystem's own local X/Y/Z axes (2026-07-22) —
+    generic for any subsystem whose `_build` centers a plain width x depth x height box at the origin
+    using three named dimension params (confirmed for `enclosure`'s outer box shell by reading the
+    file directly before reuse — `bd.Box(box_width_mm, box_depth_mm, box_height_mm)`, centered at the
+    origin by construction; `enclosure`'s lid is a SEPARATE body shifted off in +Y purely for
+    print-bed visual separation and is NOT one of these six — they describe the box shell only).
+    Named by a fixed physical convention — width axis is left(-X)/right(+X), depth axis is
+    front(-Y)/back(+Y), height axis is bottom(-Z)/top(+Z) — so a part "mounted on the side" has an
+    unambiguous, LLM-readable target. `normal` points OUTWARD from each face, matching `Frame`'s
+    anti-parallel-normals mating convention. Unlike `plate_face_interfaces` (2 faces, thin plate) or
+    `bar_end_interfaces` (2 faces, bar ends) this covers all 6 box faces since a box-shaped mount
+    target (an enclosure, a case) can have parts mounted on any side, not just top/bottom.
+
+    HONEST LIMITATION shared with every interface pair in this v1 (translation-only mating, rotation
+    deferred to Phase 1b — see placement.py's module docstring): a directional part with a FIXED local
+    mount-face normal (e.g. `lbracket`'s `wall_mount`, always -X) only mates CLEANLY here against the
+    ONE face whose own outward normal is anti-parallel to it (for `wall_mount`, that's `right`) —
+    connecting it to a different face still resolves a translation but leaves the part facing the
+    wrong way, surfaced only as an advisory `connections`-check warning, not a hard rejection."""
+    param_by_axis = {"x": width_param, "y": depth_param, "z": height_param}
+
+    def _frame_for(sign: float, unit: tuple[float, float, float]) -> Callable[["Namespace"], Frame]:
+        axis = "x" if unit[0] else ("y" if unit[1] else "z")
+        param = param_by_axis[axis]
+
+        def _frame(p: "Namespace") -> Frame:
+            half = getattr(p, param) / 2.0
+            return Frame(origin=tuple(sign * half * c for c in unit),
+                         normal=tuple(sign * c for c in unit))
+        return _frame
+
+    return [InterfaceSpec(name=name, kind="mount", frame=_frame_for(sign, _BOX_FACE_AXIS[name]))
+            for name, sign in _BOX_FACES]
+
+
+def lbracket_interfaces(
+    leg_a_param: str, leg_b_param: str, thickness_param: str,
+    names: tuple[str, str] = ("wall_mount", "top"),
+) -> list[InterfaceSpec]:
+    """Two mount interfaces for the `render_lbracket`-shaped part family (2026-07-22): a vertical
+    flange (`leg_a`, running local +Z from the shared corner) and a horizontal flange (`leg_b`,
+    running local +X from the corner), confirmed against
+    `packages/truth_plane/regen/templated.py::render_lbracket` directly — `base` occupies x in
+    [0,leg_b], z in [0,t]; `wall` occupies x in [0,t], z in [0,leg_a]; both centered on y.
+    `wall_mount` is the OUTER face of the vertical flange (x=0, normal -X) — the face that bolts flat
+    against whatever this bracket mounts TO. `top` is the OUTER (upper) face of the horizontal flange
+    (z=thickness, normal +Z) — where a carried part/payload sits.
+
+    Applied to `lbracket` itself only (fully verified) — NOT yet applied to the ~36 other catalog
+    subsystems that reuse the same `render_lbracket` builder under their own param names/proportions
+    (`angle_iron`, `servo_bracket`, `wing_root_fitting`, ...); each would need its own param names
+    confirmed before adopting this, same "verify before reuse" discipline as `plate_face_interfaces`.
+
+    ONE HONEST LIMITATION (v1 translation-only mating — see `box_face_interfaces`'s docstring for the
+    general case): `wall_mount`'s normal is fixed at -X, so it only mates CLEANLY against a box-shaped
+    target's `right` face (the one face with an anti-parallel +X normal) — a different face still
+    silently translates without correcting orientation, surfaced only as an advisory warning."""
+    def _wall_mount(p: "Namespace") -> Frame:
+        return Frame(origin=(0.0, 0.0, getattr(p, leg_a_param) / 2.0), normal=(-1.0, 0.0, 0.0))
+
+    def _top(p: "Namespace") -> Frame:
+        return Frame(origin=(getattr(p, leg_b_param) / 2.0, 0.0, getattr(p, thickness_param)),
+                     normal=(0.0, 0.0, 1.0))
+
+    name_wall, name_top = names
+    return [InterfaceSpec(name=name_wall, kind="mount", frame=_wall_mount),
+            InterfaceSpec(name=name_top, kind="mount", frame=_top)]
 
 
 class Namespace:

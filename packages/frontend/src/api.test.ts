@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { analyze, analyzeStatus, optimize, signoff } from "./api";
+import { analyze, analyzeStatus, optimize, runValidate, signoff } from "./api";
 
 // Captures exactly what apiFetch handed to the real fetch() — this is what pins down the
 // 2026-07-15 load-threading fix: analyze()/analyzeStatus()/optimize() must OMIT load_n by default
@@ -61,6 +61,27 @@ describe("apiFetch auth header (settings.ts::loadSettings -> Authorization)", ()
     const calls = stubFetch();
     await analyze();
     expect((calls[0].init?.headers as Record<string, string>).Authorization).toBe("Bearer secret123");
+  });
+});
+
+// 2026-07-22 -- the Settings-modal vision-model field (settings.ts::LlmSettings.visionModel) has to
+// actually reach the backend's per-request ValidateRequest.vision_model override
+// (packages/transport/app.py) for the visual self-check to ever turn on client-side.
+describe("runValidate vision_model threading", () => {
+  it("sends vision_model: null when no vision model is configured", async () => {
+    const calls = stubFetch();
+    await runValidate("intent", "key123");
+    expect(JSON.parse(calls[0].init!.body as string)).toEqual({
+      intent: "intent", api_key: "key123", vision_model: null,
+    });
+  });
+
+  it("sends the configured vision model straight through", async () => {
+    const calls = stubFetch();
+    await runValidate("intent", "key123", "a-vision-capable-model");
+    expect(JSON.parse(calls[0].init!.body as string)).toEqual({
+      intent: "intent", api_key: "key123", vision_model: "a-vision-capable-model",
+    });
   });
 });
 

@@ -36,7 +36,8 @@ export function ValidationCard({ result }: { result: ValidationResult }) {
       )}
       {!result.vision_enabled && (
         <div style={{ fontSize: 10, color: "#6e7681", marginTop: 6, fontStyle: "italic" }}>
-          Visual (blueprint) check is off — set VISION_MODEL to enable the "does it look right" judgment.
+          Visual (blueprint) check is off — set a vision-capable model in Settings to enable the
+          "does it look right" judgment.
         </div>
       )}
     </div>

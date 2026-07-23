@@ -22,9 +22,9 @@ from typing import TYPE_CHECKING, Optional
 
 from pydantic import BaseModel, ConfigDict
 
-from packages.subsystems import get_subsystem
+from packages.subsystems import get_subsystem, get_subsystem_model
 from packages.subsystems.assembly import instance_world_offsets
-from packages.subsystems.placement import connection_issues
+from packages.subsystems.placement import connection_issues, world_frame_for_interface
 
 if TYPE_CHECKING:
     from packages.ledger.schema import MasterParametricLedger
@@ -40,11 +40,14 @@ _MIN_VOLUME_MM3 = 1e-3
 # smaller — i.e. it contributes no visible/structural extent of its own.
 _EMBED_MARGIN_MM = 0.5
 _EMBED_VOLUME_RATIO = 0.5  # engulfed part's volume < this * the container's
+# A true 3D intersection deeper than this (on EVERY axis) is "interference", not a flush touching
+# seam — see _overlap_mm/_interferes below.
+_INTERFERE_TOL_MM = 0.5
 
 
 class ValidationIssue(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    check: str                 # "degeneracy" | "connectivity" | "embedding"
+    check: str                 # "degeneracy" | "connections" | "connectivity" | "embedding" | "interference" | "keepout"
     severity: str              # "error" | "warning" | "info"
     message: str
     instances: list[str]       # the instance ids involved
@@ -116,6 +119,38 @@ def _touching(b1: BBox, b2: BBox, tol: float = _GAP_TOL_MM) -> bool:
 def _inside(inner: BBox, outer: BBox, margin: float = _EMBED_MARGIN_MM) -> bool:
     (i0, i1), (o0, o1) = inner, outer
     return all(o0[ax] - margin <= i0[ax] and i1[ax] <= o1[ax] + margin for ax in range(3))
+
+
+def _overlap_mm(b1: BBox, b2: BBox) -> float:
+    """The MINIMUM per-axis overlap depth between two AABBs — positive ONLY when they truly
+    intersect in 3D on every axis at once, unlike `_axis_gap` (which reports 0 for both "just
+    touching" and "deeply overlapping", since it only cares about separation, not penetration).
+    Two boxes that merely touch/abut on one axis while nesting on the others (e.g. a bracket's
+    mount face flush against a wall) have zero-or-negative overlap on that one axis, so the min
+    across all 3 stays <= 0 — correctly NOT interference."""
+    (a0, a1), (c0, c1) = b1, b2
+    return min(min(a1[ax], c1[ax]) - max(a0[ax], c0[ax]) for ax in range(3))
+
+
+def _interferes(b1: BBox, b2: BBox, tol: float = _INTERFERE_TOL_MM) -> bool:
+    return _overlap_mm(b1, b2) > tol
+
+
+def _point_to_bbox_mm(point: tuple[float, float, float], bbox: BBox) -> float:
+    """Shortest distance from a point to an AABB (0 if the point is inside/on it)."""
+    (o0, o1) = bbox
+    d = [max(o0[ax] - point[ax], 0.0, point[ax] - o1[ax]) for ax in range(3)]
+    return (d[0] ** 2 + d[1] ** 2 + d[2] ** 2) ** 0.5
+
+
+def _connected_partner(ledger: "MasterParametricLedger", instance_id: str, interface: str) -> Optional[str]:
+    """The OTHER instance a specific (instance_id, interface) is declared connected to, or None."""
+    for c in ledger.connections:
+        if c.a.instance_id == instance_id and c.a.interface == interface:
+            return c.b.instance_id
+        if c.b.instance_id == instance_id and c.b.interface == interface:
+            return c.a.instance_id
+    return None
 
 
 def validate_geometry(ledger: "MasterParametricLedger") -> ValidationReport:
@@ -208,6 +243,75 @@ def validate_geometry(ledger: "MasterParametricLedger") -> ValidationReport:
                              f"external, enlarge it or move it so part of it projects outside {oid}."),
                     instances=[iid, oid]))
                 break
+
+    # --- interference: two COMPARABLY-SIZED parts truly interpenetrating (positive overlap on
+    # every axis, not just touching/abutting) with NOTHING declaring it intentional. Distinct from
+    # `embedding` above (which is specifically about a much-SMALLER part fully engulfed by a much
+    # bigger one — ambiguous, often a legitimate internal component) and from `connectivity`'s
+    # bbox-touching (which treats overlap as a POSITIVE "joined" signal). Two comparably-sized,
+    # unrelated parts truly overlapping is not ambiguous the same way — it's the "two brackets
+    # stacked exactly on top of each other" failure (2026-07-22, live-observed + reproduced from a
+    # botched self-correction that fell back to auto-layout, which is blind to where a
+    # connection-mated part already sits): the embedding ratio didn't fire (equal volumes, not
+    # < 0.5x) and bbox-touching filed it as "connected." Warning, not error — same philosophy as
+    # `connections`/`connectivity` above (a bbox heuristic, advisory, never blocks export) — but
+    # confident enough to drive the self-correct loop, unlike `embedding`.
+    #
+    # Gated on comparable size (same 0.5x ratio as embedding) so this does NOT fire on the
+    # legitimate, EXPECTED mid-build state where `assembly.py`'s 2026-07-20 two-lane auto-layout
+    # cursor deliberately clusters an ordinary system part near/inside a big airframe body's own
+    # footprint before it's ever connected — that stays embedding's territory, not this one.
+    # Exempted by ANY declared Connection between the exact pair (regardless of its advisory
+    # `kind` — a declared connection already means "this touching/overlap is intentional"). ---
+    connected_pairs = {frozenset((c.a.instance_id, c.b.instance_id)) for c in ledger.connections}
+    for a in range(len(ids)):
+        for b in range(a + 1, len(ids)):
+            iid, oid = ids[a], ids[b]
+            if frozenset((iid, oid)) in connected_pairs:
+                continue
+            bi, bo = healthy[iid], healthy[oid]
+            smaller, larger = min(bi["volume"], bo["volume"]), max(bi["volume"], bo["volume"])
+            if larger > 0 and smaller < _EMBED_VOLUME_RATIO * larger:
+                continue  # comparable-size gate — a much-smaller part is embedding's territory
+            if _interferes(bi["bbox"], bo["bbox"]):
+                issues.append(ValidationIssue(check="interference", severity="warning",
+                    message=(f"{iid} ({bi['subsystem']}) and {oid} ({bo['subsystem']}) physically "
+                             f"overlap with no declared connection between them — two comparably-"
+                             f"sized parts occupying the same space is almost always a placement "
+                             f"mistake, not an intentional design. If this is intentional, add a "
+                             f"connection between them; otherwise reposition one of them."),
+                    instances=[iid, oid]))
+
+    # --- keepout: an interface with a declared `keepout_mm` (InterfaceSpec, packages/subsystems/
+    # base.py) needs that much clearance around its WORLD origin from every OTHER instance's
+    # geometry, excluding whichever instance (if any) is legitimately connected to that exact
+    # interface. Mechanism only today — no subsystem sets keepout_mm > 0 yet (deciding which parts
+    # need how much clearance, e.g. a camera's line-of-sight cone, is a domain judgment deliberately
+    # deferred); this check exists so that judgment has somewhere real to plug into once made. ---
+    for iid, inst in ledger.instances.items():
+        if iid not in healthy:
+            continue
+        try:
+            model = get_subsystem_model(inst.subsystem_type)
+        except KeyError:
+            continue
+        for spec in model.interfaces:
+            if spec.keepout_mm <= 0:
+                continue
+            wf = world_frame_for_interface(ledger, iid, spec.name)
+            if wf is None:
+                continue
+            partner = _connected_partner(ledger, iid, spec.name)
+            for oid in ids:
+                if oid == iid or oid == partner:
+                    continue
+                dist = _point_to_bbox_mm(wf.origin, healthy[oid]["bbox"])
+                if dist < spec.keepout_mm:
+                    issues.append(ValidationIssue(check="keepout", severity="warning",
+                        message=(f"{iid} ({inst.subsystem_type})'s '{spec.name}' interface needs "
+                                 f"{spec.keepout_mm:.0f} mm clear, but {oid} "
+                                 f"({healthy[oid]['subsystem']}) comes within {dist:.1f} mm."),
+                        instances=[iid, oid]))
 
     errors = [i for i in issues if i.severity == "error"]
     warnings = [i for i in issues if i.severity == "warning"]

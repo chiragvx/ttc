@@ -23,7 +23,9 @@ from packages.subsystems.base import (
     ParamSpec,
     Subsystem,
     bar_end_interfaces,
+    box_face_interfaces,
     geometry_paths,
+    lbracket_interfaces,
     plate_face_interfaces,
     resolve_namespace,
     seed_instance,
@@ -512,3 +514,8 @@ from packages.subsystems import bwb_fuselage as _bwb_fuselage  # noqa: E402, F40
 # Half-span wing panel (2026-07-19) -- root at the inner/body end, single taper to the outer tip;
 # side_sign picks left/right. The side-panel `naca_wing` can't be. See wing_panel.py's docstring.
 from packages.subsystems import wing_panel as _wing_panel  # noqa: E402, F401
+
+# Rail-mount assembly (2026-07-22) -- a universal mounting rail + N subassembly plates bolted along
+# it, the real pattern an electronics enclosure uses instead of an empty box. assembly_template
+# composite (flat_bar rail + mounting_plate_grid plates), same live mechanism as `table.py`.
+from packages.subsystems import rail_mount_assembly as _rail_mount_assembly  # noqa: E402, F401

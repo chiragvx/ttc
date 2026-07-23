@@ -210,6 +210,45 @@ def test_system_prompt_marks_active_on_the_right_subsystem_only(base_ledger):
     assert "— ACTIVE" not in other_line
 
 
+def test_system_prompt_lists_the_new_box_and_bracket_face_interfaces():
+    # 2026-07-22 antenna-bracket root-cause fix: enclosure/lbracket now declare mount interfaces, so
+    # the copilot has a real connection_ops target instead of hand-computing a mount position.
+    led = add_instance(make_demo_ledger(), "enclosure", "box")
+    led = add_instance(led, "lbracket", "brk")
+    prompt = build_system_prompt(get_subsystem("enclosure"), led)
+    box_line = next(l for l in prompt.splitlines() if "interfaces (mate points" in l and "`left`" in l)
+    for name in ("left", "right", "front", "back", "bottom", "top"):
+        assert f"`{name}`" in box_line
+    bracket_line = next(l for l in prompt.splitlines() if "interfaces (mate points" in l and "`wall_mount`" in l)
+    assert "`top`" in bracket_line
+
+
+def test_system_prompt_no_longer_tells_the_copilot_to_hand_compute_when_no_interface_exists():
+    # foundations-audit follow-up (2026-07-22): _CONNECTION_OPS_SECTION used to say "reach for
+    # explicit x/y/z when the parts have no matching interface" -- directly contradicting
+    # _ASSEMBLY_CONNECTIVITY_SECTION's "you do NOT have enough information to hand-compute, use
+    # auto-layout + disclose" for the identical trigger. The antenna-bracket placement bug is the
+    # live symptom of a model reading the first (wrong) instruction.
+    prompt = build_system_prompt(get_subsystem("bracket"), make_demo_ledger())
+    assert "Only reach for explicit x/y/z when the parts genuinely have no matching interface" not in prompt
+    assert "do NOT reach for a hand-computed x/y/z as a substitute" in prompt
+
+
+def test_system_prompt_teaches_the_box_face_mount_recipe():
+    prompt = build_system_prompt(get_subsystem("bracket"), make_demo_ledger())
+    assert "wall_mount" in prompt and "flush against a box-shaped part's side" in prompt
+
+
+def test_system_prompt_teaches_connection_kind_and_when_to_use_containment():
+    # 2026-07-22: Connection.kind (mate/bolted/slip_fit/containment) was 100% advisory and the model
+    # was never told it exists -- it always left connections at the default "mate", so the new
+    # `interference` self-check's containment-aware exemption could never actually engage. Teaching
+    # the model this vocabulary is what lets it express "this is intentionally nested" up front.
+    prompt = build_system_prompt(get_subsystem("bracket"), make_demo_ledger())
+    assert "\"containment\"" in prompt and "sit INSIDE or around another" in prompt
+    assert "\"bolted\"" in prompt and "\"slip_fit\"" in prompt
+
+
 def test_build_system_prompt_from_json_falls_back_cleanly_on_invalid_input():
     # mutation-sweep follow-up: build_system_prompt_from_json is NOT test-only scaffolding -- it's
     # called on the LIVE /chat path (openrouter_provider.py's stream_chat) to build the real system

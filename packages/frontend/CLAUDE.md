@@ -14,8 +14,10 @@ Hard rules:
 - Wire types in `src/types.ts` mirror `packages/transport/protocol.py` — keep them in sync.
 - Tier 0 only: this talks to the analytic-telemetry WS. Kernel regen / solver results arrive on their
   own (future) message channels — do not block the UI on them.
-- `npm run dev` proxies `/ws`, `/ledger`, `/export` to the FastAPI backend on :8000 (run
-  `uvicorn packages.transport.app:create_app --factory` to serve it).
+- `npm run dev` proxies `/ws`, `/ledger`, `/export` (and everything else `vite.config.ts` lists) to
+  the FastAPI backend on **:8001** — not :8000 (2026-07-22: found live, every proxied route 500'd
+  with an empty body when the backend was started on :8000 instead). Serve it with
+  `uvicorn packages.transport.app:create_app --factory --port 8001`.
 - `npm test` (2026-07-15) runs the vitest suite (`vitest.config.ts`, jsdom env, React Testing
   Library) — kept in a separate config file from `vite.config.ts` so the vitest-only `test` field
   never risks the dev/build config. Prefer testing pure logic (`api.ts`'s request-building) and

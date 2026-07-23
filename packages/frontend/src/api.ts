@@ -262,11 +262,14 @@ export async function getManufacturingManifest(): Promise<ManufacturingManifest>
 }
 
 // Self-check the current assembly (2026-07-19). Geometric check always runs (no model); the visual
-// check runs only if a vision model is configured server-side (VISION_MODEL) and a key is passed.
-export async function runValidate(intent: string, apiKey?: string | null): Promise<ValidationResult> {
+// check runs only if a vision model is configured — either server-side (VISION_MODEL) or per-request
+// via `visionModel` (2026-07-22, the Settings-modal path) — and a key is available.
+export async function runValidate(
+  intent: string, apiKey?: string | null, visionModel?: string | null,
+): Promise<ValidationResult> {
   const res = await apiFetch("/validate", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ intent, api_key: apiKey ?? null }),
+    body: JSON.stringify({ intent, api_key: apiKey ?? null, vision_model: visionModel || null }),
   });
   // same class of bug as getManufacturingManifest/getLedger's same-day fix: a 401/503 error body
   // parses fine as JSON and would otherwise be stored as a fake ValidationResult, crashing

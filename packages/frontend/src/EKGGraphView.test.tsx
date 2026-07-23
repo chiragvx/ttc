@@ -4,7 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   EKGGraphView,
   computeGraphData,
+  edgeStyleFor,
   mergeNodePositions,
+  type EKGComputedEdge,
   type EKGComputedNode,
   type EKGFlowNode,
 } from "./EKGGraphView";
@@ -134,7 +136,7 @@ describe("computeGraphData", () => {
     });
     const { edges } = computeGraphData(ledger);
     expect(edges).toEqual([
-      { id: "conn-c1", source: "i1", target: "i2", label: "mate: top<->bottom", kind: "connection" },
+      { id: "conn-c1", source: "i1", target: "i2", label: "mate: top<->bottom", kind: "connection", connectionKind: "mate" },
       { id: "cpl-k1-0", source: "i1", target: "i3", label: "bolt_preload", kind: "coupling" },
     ]);
   });
@@ -178,6 +180,50 @@ describe("computeGraphData", () => {
     const ledger = makeLedger({ instances: { i1: { id: "i1", subsystem_type: "bracket" } } });
     const { nodes } = computeGraphData(ledger);
     expect(nodes[0].params).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// edgeStyleFor — pure per-Connection.kind styling (2026-07-22). Previously `kind` was only ever
+// text in the edge label, cosmetically identical for every value -- this is what actually makes
+// the relationship type visible in the graph, not just named.
+// ---------------------------------------------------------------------------------------------
+describe("computeGraphData connectionKind threading", () => {
+  it("carries Connection.kind through onto the computed edge", () => {
+    const ledger = makeLedger({
+      instances: {
+        i1: { id: "i1", subsystem_type: "bracket" },
+        i2: { id: "i2", subsystem_type: "bracket" },
+      },
+      connections: [
+        { id: "c1", a: { instance_id: "i1", interface: "top" }, b: { instance_id: "i2", interface: "bottom" }, kind: "containment", gap_mm: 0 },
+      ],
+    });
+    const { edges } = computeGraphData(ledger);
+    expect(edges[0].connectionKind).toBe("containment");
+  });
+});
+
+describe("edgeStyleFor", () => {
+  const edge = (over: Partial<EKGComputedEdge>): EKGComputedEdge => ({
+    id: "e", source: "a", target: "b", label: "", kind: "connection", ...over,
+  });
+
+  it("styles a coupling edge dashed green, ignoring connectionKind", () => {
+    expect(edgeStyleFor(edge({ kind: "coupling" })).stroke).toBe("#3fb950");
+  });
+
+  it("styles containment, bolted, slip_fit, and mate connections DIFFERENTLY from each other", () => {
+    const kinds = ["containment", "bolted", "slip_fit", "mate"];
+    const styles = kinds.map((k) => edgeStyleFor(edge({ connectionKind: k })));
+    const strokes = styles.map((s) => `${s.stroke}|${s.strokeDasharray ?? ""}`);
+    expect(new Set(strokes).size).toBe(kinds.length); // all four visually distinct
+  });
+
+  it("falls back to the mate style for an unset or unrecognized connectionKind", () => {
+    const mate = edgeStyleFor(edge({ connectionKind: "mate" }));
+    expect(edgeStyleFor(edge({}))).toEqual(mate);
+    expect(edgeStyleFor(edge({ connectionKind: "some_future_kind" }))).toEqual(mate);
   });
 });
 
