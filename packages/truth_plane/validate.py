@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict
 
 from packages.subsystems import get_subsystem, get_subsystem_model
 from packages.subsystems.assembly import instance_world_offsets
+from packages.subsystems.fit import fit_drift_findings
 from packages.subsystems.placement import connection_issues, world_frame_for_interface
 
 if TYPE_CHECKING:
@@ -47,7 +48,7 @@ _INTERFERE_TOL_MM = 0.5
 
 class ValidationIssue(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    check: str                 # "degeneracy" | "connections" | "connectivity" | "embedding" | "interference" | "keepout"
+    check: str                 # "degeneracy" | "connections" | "connectivity" | "embedding" | "interference" | "keepout" | "fit"
     severity: str              # "error" | "warning" | "info"
     message: str
     instances: list[str]       # the instance ids involved
@@ -61,6 +62,27 @@ class ValidationReport(BaseModel):
 
 
 BBox = tuple[tuple[float, float, float], tuple[float, float, float]]  # (min xyz, max xyz)
+
+
+def _connection_resolves(ledger: "MasterParametricLedger", c) -> bool:
+    """True iff both of `c`'s endpoints exist AND each names a real interface declared on its own
+    subsystem — same validity bar `packages/subsystems/placement.py::_adjacency` already applies
+    before a connection enters the mate-placement graph. A dangling connection (e.g. one whose target
+    interface no longer exists because the subsystem's declared interfaces changed) must not silently
+    exempt its own endpoints from the connectivity/interference checks that unfiltered iteration over
+    `ledger.connections` used to allow (2026-07-27, verified live: two coincident enclosures joined
+    only by a bogus connection passed both checks silently before this filter)."""
+    if c.a.instance_id not in ledger.instances or c.b.instance_id not in ledger.instances:
+        return False
+    for ref in (c.a, c.b):
+        inst = ledger.instances[ref.instance_id]
+        try:
+            model = get_subsystem_model(inst.subsystem_type)
+        except KeyError:
+            return False
+        if not any(s.name == ref.interface for s in model.interfaces):
+            return False
+    return True
 
 
 def _placed(ledger: "MasterParametricLedger") -> dict[str, dict]:
@@ -200,9 +222,16 @@ def validate_geometry(ledger: "MasterParametricLedger") -> ValidationReport:
         def union(x, y):
             if x in parent and y in parent:
                 parent[find(x)] = find(y)
-        # EXACT edges first: every valid connection joins its two endpoints
+        # EXACT edges first: every valid (both endpoints exist AND both name a real interface —
+        # _connection_resolves below, same validity bar _adjacency already applies in placement.py)
+        # connection joins its two endpoints. 2026-07-27: this loop used to run over EVERY connection
+        # unconditionally — a dangling connection (naming an interface that no longer exists, e.g.
+        # after a subsystem's declared interfaces changed) silently exempted its own two endpoints
+        # from this check (an unresolvable edge still unions them) even though the parts are, in
+        # fact, not actually joined by anything real.
         for c in ledger.connections:
-            union(c.a.instance_id, c.b.instance_id)
+            if _connection_resolves(ledger, c):
+                union(c.a.instance_id, c.b.instance_id)
         # then implicit bbox adjacency
         for a in range(len(ids)):
             for b in range(a + 1, len(ids)):
@@ -262,8 +291,11 @@ def validate_geometry(ledger: "MasterParametricLedger") -> ValidationReport:
     # cursor deliberately clusters an ordinary system part near/inside a big airframe body's own
     # footprint before it's ever connected — that stays embedding's territory, not this one.
     # Exempted by ANY declared Connection between the exact pair (regardless of its advisory
-    # `kind` — a declared connection already means "this touching/overlap is intentional"). ---
-    connected_pairs = {frozenset((c.a.instance_id, c.b.instance_id)) for c in ledger.connections}
+    # `kind` — a declared connection already means "this touching/overlap is intentional"), but only
+    # a connection that actually RESOLVES (2026-07-27, same fix as the connectivity loop above) — a
+    # dangling connection must not exempt two truly-interpenetrating parts from this check. ---
+    connected_pairs = {frozenset((c.a.instance_id, c.b.instance_id))
+                       for c in ledger.connections if _connection_resolves(ledger, c)}
     for a in range(len(ids)):
         for b in range(a + 1, len(ids)):
             iid, oid = ids[a], ids[b]
@@ -312,6 +344,15 @@ def validate_geometry(ledger: "MasterParametricLedger") -> ValidationReport:
                                  f"{spec.keepout_mm:.0f} mm clear, but {oid} "
                                  f"({healthy[oid]['subsystem']}) comes within {dist:.1f} mm."),
                         instances=[iid, oid]))
+
+    # --- fit: a live FitBinding whose connector's stored dimensions no longer match what the host's
+    # CURRENT cross-section implies (packages/subsystems/fit.py::fit_drift_findings) — the host was
+    # resized after the fit was wired. Warning, drives the auto-correct loop (shouldAutoCorrect.ts) to
+    # propose resync_fit — deliberately NOT export-blocking on its own; a dangling/unresolvable fit
+    # (host deleted, retyped) is a stricter case and blocks via fit_gate_findings at the export gate
+    # instead, mirroring coupling_gate_findings' own dangling-vs-drift split. ---
+    for msg in fit_drift_findings(ledger):
+        issues.append(ValidationIssue(check="fit", severity="warning", message=msg, instances=[]))
 
     errors = [i for i in issues if i.severity == "error"]
     warnings = [i for i in issues if i.severity == "warning"]

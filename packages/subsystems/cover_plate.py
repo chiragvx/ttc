@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import ParamSpec, Subsystem, plate_face_interfaces, register_subsystem
 
 _FRAGMENT = """\
 ## Subsystem: Cover plate
@@ -53,4 +53,5 @@ COVER_PLATE = register_subsystem(Subsystem(
     ],
     build=_build, volume=_volume, invariants=_check,
     fea_eligible=True,  # single Box minus a central bore, span along X — same validated methodology
+    interfaces=plate_face_interfaces("thickness_mm"),  # 2026-07-27 — mounts via a flat face, either side of the bore
 ))

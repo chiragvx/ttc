@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import Frame, InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -71,6 +71,26 @@ def _check(p) -> list[str]:
     return out
 
 
+def _base_frame(p):
+    """Bottom face of the block (z=0, normal -Z). `_build` positions the box with
+    `bd.Pos(0, 0, p.height_mm / 2.0) * bd.Box(...)`, so unlike `plate_face_interfaces`'s assumed
+    ORIGIN-CENTERED box, this block's real faces sit at z=0 and z=height_mm, not +/-height_mm/2 --
+    confirmed by reading `_build` directly. This is the face that seats flush against the fuselage --
+    the two ear bolt holes pass through here, straight down from z=height_mm."""
+    return Frame(origin=(0.0, 0.0, 0.0), normal=(0.0, 0.0, -1.0))
+
+
+def _top_frame(p):
+    """Top face of the block (z=height_mm, normal +Z) -- where a closing strap or a second hose-clamp
+    would sit to turn the open cradle into a closed ring around the boom (per the module docstring:
+    this part is NOT itself a closed ring). The open cradle channel notches into the CENTER of this
+    face (|y| up to ~bore_dia_mm*0.8, per `cradle_z`'s placement in `_build`), but the mounting ears at
+    y=+/-ear_y stay flat all the way out to this face regardless of bore_dia_mm/height_mm, so the frame
+    itself needs no bore-aware offset -- same reasoning `saddle_clamp.py` (identical base-block
+    geometry) uses for its own `top` interface."""
+    return Frame(origin=(0.0, 0.0, p.height_mm), normal=(0.0, 0.0, 1.0))
+
+
 TAIL_BOOM_CLAMP = register_subsystem(Subsystem(
     name="tail_boom_clamp",
     description="Clamp that grips the boom and bolts to the fuselage -- structural/mounting geometry (FDM/FFF or CNC)",
@@ -87,4 +107,14 @@ TAIL_BOOM_CLAMP = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     fea_eligible=False,
+    # 2026-07-28 (interface-coverage sweep) -- bespoke (not a shared-helper) shape: the block is offset
+    # along Z (bottom at z=0, top at z=height_mm), not origin-centered like `plate_face_interfaces`
+    # assumes, so its two real faces are declared directly here instead. See `_base_frame`/`_top_frame`
+    # above for the geometry math -- `base` seats down against the fuselage; `top` is where a closing
+    # strap would sit to turn the open cradle into a closed ring around the boom. Same archetype as
+    # `saddle_clamp.py` (see this file's module docstring), same interface treatment.
+    interfaces=[
+        InterfaceSpec(name="base", kind="mount", frame=_base_frame),
+        InterfaceSpec(name="top", kind="mount", frame=_top_frame),
+    ],
 ))

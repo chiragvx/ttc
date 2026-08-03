@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -67,6 +67,23 @@ def _check(p) -> list[str]:
     return out
 
 
+def _flange_face(p):
+    """Local mate frame at the flange's bottom face -- z=0 by construction (`_build` places the flange
+    from z=0 to z=flange_thickness_mm, NOT centered at the origin, unlike the generic cylinder/plate
+    helpers). This is the wide face that seats flush against the workpiece/mounting surface, so its
+    outward normal points -Z (away from the part, into whatever it's mounted to)."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, 0.0), normal=(0.0, 0.0, -1.0))
+
+
+def _shaft_tip(p):
+    """Local mate frame at the raised shaft/boss's far tip -- z = flange_thickness_mm + shaft_len_mm by
+    construction (the shaft sits stacked directly on top of the flange). Outward normal is +Z."""
+    from packages.subsystems.base import Frame
+    z = p.flange_thickness_mm + p.shaft_len_mm
+    return Frame(origin=(0.0, 0.0, z), normal=(0.0, 0.0, 1.0))
+
+
 FLANGED_BUSHING = register_subsystem(Subsystem(
     name="flanged_bushing",
     description="Bushing with an outboard flange -- structural/mounting geometry (FDM/FFF or CNC)",
@@ -84,4 +101,15 @@ FLANGED_BUSHING = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    # 2026-07-28 (interface-coverage sweep, final wave): a stepped two-diameter shape -- flange base
+    # (z=0..flange_thickness_mm) with a narrower shaft/boss stacked on top (z=flange_thickness_mm..
+    # +shaft_len_mm), NOT centered at the origin, so neither `cylinder_end_interfaces` (assumes a
+    # single-diameter cylinder centered at the origin) nor `plate_face_interfaces` fits -- bespoke
+    # frames computed from the part's own real z-offsets instead (identical geometry to `T_nut`'s own
+    # flange/shaft, same interfaces). `flange_face` is the real mounting face (seats against the
+    # workpiece/mounting surface); `shaft_tip` is the boss's free end.
+    interfaces=[
+        InterfaceSpec(name="flange_face", kind="mount", frame=_flange_face),
+        InterfaceSpec(name="shaft_tip", kind="mount", frame=_shaft_tip),
+    ],
 ))

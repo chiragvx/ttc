@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import plate_face_interfaces
 
 _FRAGMENT = """\
 ## Subsystem: Motor mount
@@ -68,4 +69,5 @@ MOTOR_MOUNT = register_subsystem(Subsystem(
     ],
     build=_build, volume=_volume, invariants=_check,
     fea_eligible=True,  # single Box minus center bore + 4 corner holes, none touching the X ends
+    interfaces=plate_face_interfaces("thickness_mm"),  # 2026-07-28 — square plate, mounts via a flat face
 ))

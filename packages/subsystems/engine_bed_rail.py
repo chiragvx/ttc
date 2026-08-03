@@ -11,7 +11,7 @@ here from shape alone.
 
 from __future__ import annotations
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import ParamSpec, Subsystem, bar_end_interfaces, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -58,4 +58,5 @@ ENGINE_BED_RAIL = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    interfaces=bar_end_interfaces("length_mm"),  # 2026-07-28 — plain Box along local X, same shape family as flat_bar/longeron
 ))

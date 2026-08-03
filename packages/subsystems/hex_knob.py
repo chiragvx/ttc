@@ -11,6 +11,7 @@ structural envelope/mounting geometry, not its full cosmetic profile.
 from __future__ import annotations
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import cylinder_end_interfaces
 
 _FRAGMENT = """\
 ## Subsystem: Hex Knob
@@ -52,4 +53,9 @@ HEX_KNOB = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     fea_eligible=True,  # plain solid cylinder, span along X-equivalent axis -- same shape class longeron.py opts into; left True here since it IS the simple validated-methodology shape, not inferred for a compound one
+    # 2026-07-28 (interface-coverage sweep, final wave) -- a plain bd.Cylinder(radius, height), no
+    # rotation, centered at the origin along local Z (same shape/convention as round_post), so the
+    # generic cylinder_end_interfaces helper applies directly. A knob's real-world mount points are
+    # exactly its two flat end faces (the shaft/panel-facing bottom face and the graspable top face).
+    interfaces=cylinder_end_interfaces("height_mm"),
 ))

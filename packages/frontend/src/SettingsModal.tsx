@@ -33,13 +33,17 @@ export function SettingsModal({
         <label style={lbl}>Server auth token (only if the operator configured AUTH_TOKEN)</label>
         <input type="password" placeholder="leave blank if unset" value={authToken}
                onChange={(e) => setAuthToken(e.target.value)} style={input} />
-        <label style={lbl}>Vision-capable model (optional)</label>
+        <label style={lbl}>Vision-capable model (optional — leave blank to reuse Model above)</label>
         <input placeholder="e.g. a vision-capable Gemma variant on OpenRouter" value={visionModel}
                onChange={(e) => setVisionModel(e.target.value)} style={input} />
         <p style={{ fontSize: 11, color: "#8b949e" }}>
           Enables the "does it look right" visual self-check (renders a blueprint, asks this model to
           judge it against your intent) — reuses the API key above, no separate key needed. Leave blank
-          to keep visual checking off (the deterministic geometric self-check always runs regardless).
+          to try the Model field above instead (if it's already vision-capable, e.g. Qwen/Gemini/GPT-4o
+          variants, this just works with no second field to fill in) — only set something here if you
+          want a DIFFERENT model for the visual check specifically. If neither model can actually see,
+          the check comes back inconclusive and the deterministic geometric self-check still runs
+          regardless.
         </p>
         <p style={{ fontSize: 11, color: "#8b949e" }}>
           Stored only in your browser, sent per-request. Without a key <b>there is no LLM</b>.

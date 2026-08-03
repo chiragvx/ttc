@@ -12,12 +12,19 @@ from __future__ import annotations
 import json
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from packages.ledger.parameter import LockState
+from packages.ledger.parameter import LockState, ParamSource
 
 # Nodes the LLM may NEVER target — these are grounded-solver outputs. A delta touching one is rejected.
 FORBIDDEN_DELTA_PREFIXES: tuple[str, ...] = ("derived.", "review.")
+
+# DeltaProposal's own list-typed fields — see DeltaProposal._repair_known_wire_quirks below (a model
+# double-encoding ANY of these as a JSON string is the same failure class as scope_proposal's own
+# _coerce_scope_proposal_string coercion, just hitting a sibling list field instead).
+_WIRE_REPAIR_LIST_FIELDS: tuple[str, ...] = (
+    "deltas", "feature_ops", "instance_ops", "connection_ops", "coupling_ops", "suggestions",
+)
 
 
 class ParameterDelta(BaseModel):
@@ -32,6 +39,12 @@ class ParameterDelta(BaseModel):
     requested_value: float | str
     set_lock: Optional[LockState] = None
     rationale: Optional[str] = None
+    # 2026-08-01 (scoped MVP — a single passthrough tag, NOT a confidence-scoring system): where this
+    # ONE delta's requested value came from. Fully optional/defaulted so no existing delta payload
+    # (persisted event, replayed history, hand-built test fixture) breaks — a missing/"unsourced" tag
+    # never blocks or changes acceptance (`packages.ledger.apply.apply_delta` doesn't branch on it at
+    # all). Purely descriptive metadata threaded through to `ApplyOutcome.source` for later display.
+    source: ParamSource = "unsourced"
 
 
 class FeatureOp(BaseModel):
@@ -180,6 +193,49 @@ class CouplingOp(BaseModel):
     rationale: Optional[str] = None
 
 
+class FitOp(BaseModel):
+    """Wire/unwire/resync a typed FIT BINDING (2026-07-27) — a CONNECTOR's own fitted-dimension
+    params derived ONCE from a HOST's cross-section and written as ordinary deltas (never a live,
+    never-logged read — see `packages.ledger.schema.FitBinding`'s own docstring for why). The LLM
+    WIRES which connector fits which host; it never computes the fitted dimension itself (Inversion
+    #1, same posture as `CouplingOp` — the arithmetic lives in `packages.subsystems.fit`, never here).
+
+    For `fit_connector`: `connector_instance` and `host_instance` are REQUIRED. `clearance_mm`
+    (signed: positive = clearance/slip fit, negative = interference/press fit) is OPTIONAL — omit it
+    only when a JoinAnnotation on the same pair already implies a default; otherwise state it
+    explicitly, never guess a physical tolerance. For `resync_fit`: `id` (the existing FitBinding) is
+    REQUIRED — re-derives the connector's params against the host's CURRENT state (use this after the
+    self-check flags drift, e.g. the host was resized). For `unfit_connector`: `id` is REQUIRED."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["fit_connector", "unfit_connector", "resync_fit"]
+    id: Optional[str] = None
+    connector_instance: Optional[str] = None
+    host_instance: Optional[str] = None
+    clearance_mm: Optional[float] = None
+    rationale: Optional[str] = None
+
+
+class JoinAnnotationOp(BaseModel):
+    """Add/remove a `JoinAnnotation` (2026-07-27) — records HOW two already-connected parts are
+    joined (bolted/press_fit/welded/adhesive/custom), for the BOM/a human assembling the part. Purely
+    semantic; never affects geometry (contrast `FitOp`, which does). For `add_join_annotation`:
+    `connection_id` (a REAL existing `Connection.id` — the two parts must already be connection_ops-
+    mated) and `method` are REQUIRED. `fastener`/`note` are optional free-text display data. For
+    `remove_join_annotation`: `id` is REQUIRED."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["add_join_annotation", "remove_join_annotation"]
+    id: Optional[str] = None
+    connection_id: Optional[str] = None
+    method: Optional[Literal["bolted", "press_fit", "welded", "adhesive", "custom"]] = None
+    fastener: Optional[str] = None
+    note: Optional[str] = None
+    rationale: Optional[str] = None
+
+
 class ScopePartProposal(BaseModel):
     """One row of a `ScopeProposal`'s part manifest — a proposed decomposition entry, not an op (no
     apply/outcome; see `ScopeProposal` docstring below). Flat, no nested dicts, same precedent as
@@ -251,6 +307,21 @@ class DeltaProposal(BaseModel):
         description="wire a load onto a part FROM another part's condition via a registered relation "
                     "(e.g. force_from_pressure_area) instead of stating a load scalar — use this when "
                     "the load is CAUSED by another part, not a stated duty condition")
+    fit_ops: list[FitOp] = Field(
+        default_factory=list,
+        description="fit_connector: derive a CONNECTOR part's own bore/socket dimensions from a HOST "
+                    "part's actual cross-section (e.g. a sleeve's bore from a post's real dia_mm) "
+                    "instead of leaving it at a generic default or guessing a number — use this "
+                    "whenever a connector-type part needs to physically wrap/grip another specific "
+                    "part. resync_fit: re-derive after the host's dimensions changed. Only works "
+                    "between a HOST that declares a cross-section and a CONNECTOR that declares a "
+                    "matching socket (see the fit catalog below) — not every part pair qualifies")
+    join_annotation_ops: list[JoinAnnotationOp] = Field(
+        default_factory=list,
+        description="record HOW two already-CONNECTED parts are physically joined — bolted, "
+                    "press_fit, welded, adhesive, or custom — for the bill of materials. Purely "
+                    "semantic/documentation, never affects geometry. Requires the two parts to "
+                    "already have a real connection_ops mate (references its id)")
     scope_proposal: Optional[ScopeProposal] = Field(
         default=None,
         description="a structured part-manifest summary for a BIG or AMBIGUOUS multi-part ask ('make "
@@ -275,6 +346,72 @@ class DeltaProposal(BaseModel):
             except json.JSONDecodeError:
                 return v
         return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _repair_known_wire_quirks(cls, data):
+        """Best-effort repair of two independently live-reproduced Qwen3.6-plus tool-call quirks,
+        run BEFORE strict per-field validation — liberal at the wire, never at the ledger (mirrors
+        `_coerce_scope_proposal_string`'s own framing: nothing here is safety-critical, and anything
+        this can't confidently repair falls through to normal strict validation unchanged, reporting
+        its real error exactly as before).
+
+        1. **A list field double-encoded as a JSON string** (2026-07-27 live repro: `'deltas': '\\n[{"
+        requested_value": 800, ...}]\\n'` instead of a real array) — same failure class as
+        `_coerce_scope_proposal_string`, just for `deltas`/`feature_ops`/`instance_ops`/
+        `connection_ops`/`coupling_ops`/`suggestions` instead of the single `scope_proposal` object.
+        Parsed in place when it decodes to a list; left untouched (falls through to the normal
+        "not a valid list" error) on anything else — never masks a genuinely malformed value.
+
+        2. **A dimension field on `add_instance`/`move_instance` itself** instead of a separate
+        top-level `deltas` entry (2026-07-27 live repro: an `add_instance` for a `flat_bar` carrying
+        `length_mm`/`width_mm`/`thickness_mm` directly on the op, all rejected by InstanceOp's
+        extra="forbid"). Recovered ONLY when the extra value is numeric AND the op already names its
+        `instance_id` (never guessed) — redirected into a synthesized `ParameterDelta` targeting
+        `instances.<instance_id>.params.<key>`, appended to the top-level `deltas` list. Anything
+        that doesn't meet both conditions (non-numeric value, or no instance_id to target) is left
+        exactly as emitted, so InstanceOp's own extra_forbid still rejects it normally — this never
+        silently drops data it can't safely redirect.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        for key in _WIRE_REPAIR_LIST_FIELDS:
+            v = data.get(key)
+            if isinstance(v, str):
+                try:
+                    parsed = json.loads(v)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, list):
+                    data[key] = parsed
+
+        instance_ops = data.get("instance_ops")
+        if isinstance(instance_ops, list):
+            known_fields = set(InstanceOp.model_fields.keys())
+            recovered: list[dict] = []
+            for op in instance_ops:
+                if not isinstance(op, dict) or op.get("op") not in ("add_instance", "move_instance"):
+                    continue
+                instance_id = op.get("instance_id")
+                if not instance_id:
+                    continue  # can't safely target a delta without a known id — leave op as-is
+                for extra_key in [k for k in op if k not in known_fields]:
+                    value = op[extra_key]
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        recovered.append({
+                            "target_node": f"instances.{instance_id}.params.{extra_key}",
+                            "requested_value": value,
+                            "rationale": f"recovered from {op['op']}'s own invalid '{extra_key}' field",
+                        })
+                        del op[extra_key]
+                    # else: non-numeric extra — leave it so extra_forbid reports it normally
+
+            if recovered:
+                existing = data.get("deltas")
+                data["deltas"] = (existing if isinstance(existing, list) else []) + recovered
+
+        return data
 
 
 def parameter_delta_tool_schema() -> dict:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import ParamSpec, Subsystem, bar_end_interfaces, register_subsystem
 
 _FRAGMENT = """\
 ## Subsystem: Square tube
@@ -52,4 +52,5 @@ SQUARE_TUBE = register_subsystem(Subsystem(
         ParamSpec("wall_thickness_mm", value=2.0,   min=0.8,  max=10.0,  unit="mm"),
     ],
     build=_build, volume=_volume, invariants=_check,
+    interfaces=bar_end_interfaces("length_mm"),  # a Box(length,width,width) bar, centered at the origin
 ))

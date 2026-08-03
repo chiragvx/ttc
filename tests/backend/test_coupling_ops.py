@@ -246,3 +246,77 @@ def test_prompt_teaches_coupling_ops_and_a_real_relation():
     prompt = build_system_prompt(None, make_demo_ledger())
     assert "coupling_ops" in prompt and "add_coupling" in prompt
     assert "force_from_pressure_area" in prompt
+
+
+def test_prompt_teaches_the_coupling_ops_trigger_not_just_the_mechanics():
+    # 2026-07-26 live repro: a tool-cart request explicitly asked "make sure it can support real tool
+    # weight without buckling, and note anything structurally risky" -- the model only bumped
+    # qualitative dimensions (thicker walls, bigger tubes) with ZERO coupling_ops/derived force or FS.
+    # The section already taught the MECHANICS of wiring a coupling but never taught recognizing a
+    # plain-language load-bearing question as the trigger to reach for one in the first place.
+    from packages.agents.prompt_builder import build_system_prompt
+    from packages.transport.app import make_demo_ledger
+    prompt = build_system_prompt(None, make_demo_ledger())
+    assert "structurally risky" in prompt or "GROUNDED load-bearing judgment" in prompt
+    assert "THIS SAME turn" in prompt
+    assert "fabricated-confidence" in prompt.lower() or "Inversion #1" in prompt
+
+
+def test_prompt_teaches_honesty_about_fea_ineligible_load_bearing_parts():
+    # confirmed live: square_tube (the tool-cart's legs -- its single most load-critical member) is NOT
+    # in the fea_eligible list, so even a correctly-wired coupling can never get a real FS on it today.
+    # The prompt must teach the model to say so plainly, never imply a bigger cross-section is "safe"
+    # when no factor-of-safety was actually computed.
+    from packages.agents.prompt_builder import build_system_prompt
+    from packages.subsystems import SUBSYSTEM_REGISTRY
+    from packages.transport.app import make_demo_ledger
+    prompt = build_system_prompt(None, make_demo_ledger())
+    assert "fea_eligible" in prompt
+    assert "unsupported" in prompt.lower()
+    assert "square_tube" not in prompt.split("Currently FEA-eligible:")[1].split(".")[0]
+    # the eligible-list itself must be generated from the real registry, not hand-typed / stale
+    for s in SUBSYSTEM_REGISTRY.values():
+        if s.fea_eligible:
+            assert f"`{s.name}`" in prompt
+
+
+def test_prompt_teaches_closing_the_loop_after_wiring_a_load_bearing_coupling():
+    # 2026-07-27 live repro: a tool-cart build correctly wired coupling_ops onto every leg the instant
+    # a load-bearing question was asked, but the reply never told the user any of that translates into
+    # an actual number -- the conversation moved on to geometry fixes for many turns and the user's
+    # original safety question was never actually answered. /validate now includes a coarse structural
+    # FS estimate for exactly this reason; the model must be taught to point the user at it.
+    from packages.agents.prompt_builder import build_system_prompt
+    from packages.transport.app import make_demo_ledger
+    prompt = build_system_prompt(None, make_demo_ledger())
+    assert "not the same as answering the safety question" in prompt.lower()
+    assert "structural" in prompt.lower()
+    assert "run analysis" in prompt.lower() or "run /analyze" in prompt.lower()
+
+
+def test_prompt_teaches_the_real_solver_still_ignores_a_moment_only_coupling():
+    # 2026-07-27 deep-dive finding: derived_load_n (and therefore effective_load_n, which grounds the
+    # REAL /analyze solver's load) only ever consumes a force_n-output coupling -- a bending_moment- or
+    # torque-only coupling makes the real solver silently fall back to a hardcoded default load. The
+    # coarse self-check now covers the moment case, but the model must not oversell "Run analysis" as
+    # if it would give a better number for that case -- it currently gives a WRONG one.
+    from packages.agents.prompt_builder import build_system_prompt
+    from packages.transport.app import make_demo_ledger
+    prompt = build_system_prompt(None, make_demo_ledger())
+    assert "effective_load_n" in prompt
+    assert "fall back to a hardcoded" in prompt.lower() or "fabricated" in prompt.lower() \
+        or "wrong (default) load" in prompt.lower() or "not the wrong" in prompt.lower()
+    assert "torque_from_force_radius" in prompt
+
+
+def test_prompt_teaches_the_pinned_vs_cantilever_bending_relation_mismatch():
+    # 2026-07-27 deep-dive finding: bending_from_distributed_load's own registered description says
+    # it's the pinned-both-ends case (M=WL/8), explicitly NOT a cantilever (M=WL/2) -- but a
+    # free-standing leg/post IS a cantilever, and there's no cantilever relation in the catalog yet.
+    # The model must disclose this mismatch rather than presenting the estimate as an exact model.
+    from packages.agents.prompt_builder import build_system_prompt
+    from packages.transport.app import make_demo_ledger
+    prompt = build_system_prompt(None, make_demo_ledger())
+    assert "simply-supported" in prompt.lower() or "pinned-both-ends" in prompt.lower()
+    assert "cantilever" in prompt.lower()
+    assert "no cantilever-bending relation" in prompt.lower() or "human-wall" in prompt.lower()

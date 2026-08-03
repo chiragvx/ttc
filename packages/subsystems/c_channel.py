@@ -10,6 +10,7 @@ convention.
 from __future__ import annotations
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import bar_end_interfaces
 
 _MIN_WALL_MM = 0.8
 
@@ -65,4 +66,5 @@ C_CHANNEL = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    interfaces=bar_end_interfaces("length_mm"),  # 2026-07-27
 ))

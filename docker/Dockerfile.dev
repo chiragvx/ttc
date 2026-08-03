@@ -19,6 +19,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxft2 libxrandr2 libxi6 libxmu6 libsm6 libice6 \
     && rm -rf /var/lib/apt/lists/*
 
+# --- non-root runtime user (containers must not run as root by default) ---
+RUN groupadd --gid 1000 appuser \
+    && useradd --uid 1000 --gid appuser --create-home --shell /usr/sbin/nologin appuser
+
 # --- determinism: pin BLAS/OMP to single thread so tessellation/solve hashes are reproducible ---
 #     (the determinism-vs-latency tension, risk R6: single-thread here is for the GATE, not prod.)
 ENV OMP_NUM_THREADS=1 \
@@ -41,5 +45,9 @@ RUN pip install -e ".[dev]"
 # Sanity: prove the solver + kernel are actually present at build time (fail the build if not).
 RUN ccx -v 2>/dev/null | head -1 || ccx 2>&1 | head -1 ; \
     python -c "import build123d, gmsh; print('build123d', build123d.__version__, '| gmsh', gmsh.__version__)"
+
+# Hand the app tree (code + installed egg-link) to the non-root user, then drop root before CMD.
+RUN chown -R appuser:appuser /app
+USER appuser
 
 CMD ["python", "-m", "pytest", "-q", "-ra"]

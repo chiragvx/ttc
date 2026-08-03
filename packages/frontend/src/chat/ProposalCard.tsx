@@ -18,6 +18,14 @@ function label(o: DeltaOutcome): string {
   return o.status;
 }
 
+// 2026-08-01 — plain provenance tag (packages/ledger/parameter.py::ParamSource), NOT a scoring/
+// ranking system: just the label, verbatim, next to the value it describes. Absent or "unsourced"
+// renders nothing, so this is invisible until a subsystem/delta actually sets a more specific value.
+function sourceLabel(o: DeltaOutcome): string | null {
+  if (!o.source || o.source === "unsourced") return null;
+  return o.source.replace(/_/g, " ");
+}
+
 export function ProposalCard({
   outcomes,
   onUndo,
@@ -36,6 +44,7 @@ export function ProposalCard({
     <div>
       {outcomes.map((o, i) => {
         const failed = o.status === "REJECTED" || o.status === "CONFLICT";
+        const source = sourceLabel(o);
         return (
         <div key={i}
              onMouseEnter={() => onHover?.(instanceIdFromNode(o.node))}
@@ -47,6 +56,9 @@ export function ProposalCard({
               <span style={chip}>{o.oldValue ?? "?"}</span>
               <span style={{ color: "#6e7681" }}> → </span>
               <span style={chip}>{o.applied ?? o.requested}</span>
+              {source && (
+                <span style={sourceTag} title="declared source of this value">{source}</span>
+              )}
             </span>
             <span style={{ color: COLORS[o.status] ?? "#8b949e", fontWeight: 600, fontSize: 11 }}>
               {label(o)}
@@ -80,6 +92,10 @@ const icon: React.CSSProperties = { color: "#8b949e", fontSize: 12, width: 14, t
 const chip: React.CSSProperties = {
   background: "#161b22", border: "1px solid #30363d", borderRadius: 4, padding: "0 5px",
   color: "#8b949e", fontFamily: "monospace", fontSize: 11,
+};
+const sourceTag: React.CSSProperties = {
+  marginLeft: 6, background: "#1c2128", border: "1px solid #30363d", borderRadius: 10,
+  padding: "0 6px", color: "#8b949e", fontSize: 9, textTransform: "uppercase", letterSpacing: 0.3,
 };
 const cascadeLine: React.CSSProperties = {
   display: "flex", justifyContent: "space-between", alignItems: "center",

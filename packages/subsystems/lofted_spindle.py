@@ -59,7 +59,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 from packages.subsystems._loft_profiles import ease_at, taper_stations
 
 _FRAGMENT = """\
@@ -237,6 +237,28 @@ def _check(p) -> list[str]:
     return out
 
 
+def _start_face(p):
+    """Local mate frame at the x=0 tip (`_build` places loft stations at x in [0, length_mm], NOT
+    centered at the origin, unlike `cylinder_end_interfaces`'s assumed-centered cylinder — confirmed
+    directly against `_stations`/`taper_stations`, so that helper doesn't fit here). Outward normal
+    points -X, away from the part. The part is a hollow shell (see module docstring), so at typical
+    (non-zero-wall) params this end is an ANNULAR open ring, not a solid disc — still the right center
+    point for a mate. When `start_width_mm == start_height_mm == 0` this end collapses to a true point
+    instead (`_section` substitutes a `bd.Vertex`) — the default (20 mm) tips are blunt, so the
+    declared face is real for the default config; a caller that tapers a tip to a true point is
+    choosing a degenerate mate point, same honest tradeoff `hex_bolt_blank`/`T_nut` accept for their
+    own stepped-shape tips."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, 0.0), normal=(-1.0, 0.0, 0.0))
+
+
+def _end_face(p):
+    """Local mate frame at the x=length_mm tip — the far end of the loft, stacked directly after the
+    x=0 end (see `_start_face`). Outward normal points +X."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(p.length_mm, 0.0, 0.0), normal=(1.0, 0.0, 0.0))
+
+
 LOFTED_SPINDLE = register_subsystem(Subsystem(
     name="lofted_spindle",
     description="General body-of-revolution primitive — smooth loft between elliptical (or circular, "
@@ -271,4 +293,14 @@ LOFTED_SPINDLE = register_subsystem(Subsystem(
     # "airframe-first pacing" section: the pacing rule only ever surfaces on a whole-VEHICLE request,
     # so a bottle build is never affected by this flag either way).
     is_airframe_defining=True,
+    # 2026-07-28 (interface-coverage sweep, final wave): a lofted body running x in [0, length_mm]
+    # along local X, NOT centered — neither `bar_end_interfaces` (right axis, wrong centering) nor
+    # `cylinder_end_interfaces` (centered, but the wrong axis) fits, so these are bespoke frames
+    # computed from the part's own real x-offsets, same pattern as `hex_bolt_blank`'s
+    # head_face/tip_face. Named `start_face`/`end_face` to match this file's own start_*/end_* param
+    # vocabulary rather than a generic bottom/top.
+    interfaces=[
+        InterfaceSpec(name="start_face", kind="mount", frame=_start_face),
+        InterfaceSpec(name="end_face", kind="mount", frame=_end_face),
+    ],
 ))

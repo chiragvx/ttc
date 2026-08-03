@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 
 _FRAGMENT = """\
 ## Subsystem: Hub
@@ -50,6 +50,26 @@ def _check(p):
     return out
 
 
+def _disc_face(p):
+    """Local mate frame at the disc's bottom face — z = -disc_thickness_mm/2 by construction (`_build`
+    puts the disc `bd.Cylinder(...)` UNROTATED, so build123d centers it at the origin along local Z,
+    unlike `flanged_bushing`'s flange which starts at z=0). This is the wide face on the opposite side
+    from the boss — the one that seats flush against whatever the hub mounts to (a shaft shoulder,
+    another hub, etc). Outward normal points -Z (away from the part)."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, -p.disc_thickness_mm / 2.0), normal=(0.0, 0.0, -1.0))
+
+
+def _boss_tip(p):
+    """Local mate frame at the raised boss's far tip — z = disc_thickness_mm/2 + boss_height_mm by
+    construction (the boss is `Pos(0,0, disc_thickness/2 + boss_height/2) * Cylinder(...)`, i.e. stacked
+    directly on top of the disc's own +Z face). Outward normal is +Z — where a gear/pulley/wheel hub
+    bore would seat over the boss."""
+    from packages.subsystems.base import Frame
+    z = p.disc_thickness_mm / 2.0 + p.boss_height_mm
+    return Frame(origin=(0.0, 0.0, z), normal=(0.0, 0.0, 1.0))
+
+
 HUB = register_subsystem(Subsystem(
     name="hub",
     description="Stepped hub — disc + boss + through-bore (gear/pulley mounting)",
@@ -63,4 +83,16 @@ HUB = register_subsystem(Subsystem(
         ParamSpec("bore_dia_mm",       value=8.0,  min=2.0,  max=80.0,  unit="mm"),
     ],
     build=_build, volume=_volume, invariants=_check,
+    # 2026-07-28 (interface-coverage sweep, final wave): a stepped two-diameter shape — wide disc
+    # (z=-disc_thickness/2..+disc_thickness/2, CENTERED at the origin, unlike `flanged_bushing`'s
+    # flange which starts at z=0) with a narrower boss stacked on top of the disc's +Z face
+    # (z=+disc_thickness/2..+disc_thickness/2+boss_height) — neither `cylinder_end_interfaces` (assumes
+    # a single-diameter cylinder) nor `plate_face_interfaces` fits, so bespoke frames computed from the
+    # part's own real z-offsets instead (same shape family as `flanged_bushing`/`T_nut`, different
+    # origin convention). `disc_face` is the wide mounting face opposite the boss; `boss_tip` is the
+    # boss's free end (where a gear/pulley/wheel would seat).
+    interfaces=[
+        InterfaceSpec(name="disc_face", kind="mount", frame=_disc_face),
+        InterfaceSpec(name="boss_tip", kind="mount", frame=_boss_tip),
+    ],
 ))

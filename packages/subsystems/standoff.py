@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import cylinder_end_interfaces
 
 _MIN_WALL_MM = 0.8
 
@@ -54,4 +55,8 @@ STANDOFF = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    # 2026-07-28 — a cylinder built via bd.Cylinder(radius=..., height=height_mm) stands centered on
+    # local Z by default (same convention as round_post), so its two flat end faces are exactly what
+    # cylinder_end_interfaces expects. The bore is concentric so it doesn't affect either end frame.
+    interfaces=cylinder_end_interfaces("height_mm"),
 ))

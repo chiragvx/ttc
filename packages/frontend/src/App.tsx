@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { activateInstance, addInstance, analyze, analyzeStatus, applyFeatureOp as postFeatureOp, applyConnectionOp as postConnectionOp, applyCouplingOp as postCouplingOp, applyInstanceOp as postInstanceOp, createFile, exportCheck, fetchTelemetry, getLedger, getManufacturingManifest, getParams, getRequirements, getSubsystems, listFiles, listInstances, openFile, optimize, optimizeStatus, removeInstance, runValidate, setGoal, signoff, type FileRow, type InstanceRow, type ParamSpec, type RequirementsData, type SubsystemInfo } from "./api";
+import { activateInstance, addInstance, analyze, analyzeStatus, applyFeatureOp as postFeatureOp, applyConnectionOp as postConnectionOp, applyCouplingOp as postCouplingOp, applyFitOp as postFitOp, applyJoinAnnotationOp as postJoinAnnotationOp, applyInstanceOp as postInstanceOp, createFile, exportCheck, fetchTelemetry, getLedger, getManufacturingManifest, getParams, getRequirements, getSubsystems, listFiles, listInstances, openFile, optimize, optimizeStatus, removeInstance, runValidate, setGoal, signoff, type FileRow, type InstanceRow, type ParamSpec, type RequirementsData, type SubsystemInfo } from "./api";
 import { AnalysisBar, type AnalysisState } from "./AnalysisBar";
 import { OptimizeResult, type OptimizeResultData } from "./OptimizeResult";
 import { Chat } from "./chat/Chat";
@@ -11,7 +11,7 @@ import { SettingsModal } from "./SettingsModal";
 import { Viewport } from "./Viewport";
 import { loadSettings, type LlmSettings } from "./settings";
 import { useCadSocket } from "./useCadSocket";
-import { type ConnectionOp, type ConnectionOpOutcome, type CouplingOp, type CouplingOpOutcome, type DeltaOutcome, type FeatureOp, type FeatureOpOutcome, type InstanceOp, type InstanceOpOutcome, type LedgerGraphData, type ManufacturingManifest, type ParameterDelta, type ServerMessage, type ValidationResult } from "./types";
+import { type ConnectionOp, type ConnectionOpOutcome, type CouplingOp, type CouplingOpOutcome, type DeltaOutcome, type FeatureOp, type FeatureOpOutcome, type FitOp, type FitOpOutcome, type InstanceOp, type InstanceOpOutcome, type JoinAnnotationOp, type JoinAnnotationOpOutcome, type LedgerGraphData, type ManufacturingManifest, type ParameterDelta, type ServerMessage, type ValidationResult } from "./types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -68,7 +68,7 @@ export default function App() {
   };
   const runStandaloneValidate = async () => {
     setValidationRunning(true);
-    try { setValidationResult(await runValidate("", settings.apiKey, settings.visionModel)); }
+    try { setValidationResult(await runValidate("", settings.apiKey, settings.visionModel || settings.model)); }
     catch { /* ignore */ }
     finally { setValidationRunning(false); }
   };
@@ -246,12 +246,12 @@ export default function App() {
         const resp = await mutate(d.target_node, d.requested_value, d.set_lock ?? null, false);
         if (resp.event_type === "PARAMETER_CASCADE_UPDATE") {
           const m = resp.mutations_applied[0];
-          out.push({ node: d.target_node, requested: d.requested_value, applied: m.value, oldValue: m.old_value ?? null, status: m.status as DeltaOutcome["status"], cascades: resp.cascades_applied });
+          out.push({ node: d.target_node, requested: d.requested_value, applied: m.value, oldValue: m.old_value ?? null, status: m.status as DeltaOutcome["status"], cascades: resp.cascades_applied, source: d.source });
         } else {
-          out.push({ node: d.target_node, requested: d.requested_value, applied: null, oldValue: null, status: resp.status as DeltaOutcome["status"], reason: resp.reason });
+          out.push({ node: d.target_node, requested: d.requested_value, applied: null, oldValue: null, status: resp.status as DeltaOutcome["status"], reason: resp.reason, source: d.source });
         }
       } catch (e) {
-        out.push({ node: d.target_node, requested: d.requested_value, applied: null, oldValue: null, status: "REJECTED", reason: String(e) });
+        out.push({ node: d.target_node, requested: d.requested_value, applied: null, oldValue: null, status: "REJECTED", reason: String(e), source: d.source });
       }
     }
     if (deltas.length) {
@@ -342,6 +342,30 @@ export default function App() {
       return { op, status: resp.status, couplingId: resp.coupling_id, message: resp.message };
     } catch (e) {
       return { op, status: "REJECTED", couplingId: op.id ?? null, message: String(e) };
+    }
+  };
+
+  // 2026-07-27: apply a typed fitted-dimension binding (connector <- host). Like applyCouplingOp,
+  // does NOT refresh itself — the proposal loop calls onOpsApplied once for the batch.
+  const applyFitOp = async (op: FitOp): Promise<FitOpOutcome> => {
+    try {
+      const resp = await postFitOp(op);
+      return { op, status: resp.status, fitId: resp.fit_id, message: resp.message };
+    } catch (e) {
+      return { op, status: "REJECTED", fitId: op.id ?? null, message: String(e) };
+    }
+  };
+
+  // 2026-07-27: apply a typed join annotation (HOW two already-connected parts are joined —
+  // bolted/press_fit/welded/adhesive/custom). Purely semantic BOM/documentation data, never touches
+  // geometry (contrast applyFitOp above) — see packages/ledger/schema.py::JoinAnnotation. Like
+  // applyFitOp, does NOT refresh itself — the proposal loop calls onOpsApplied once for the batch.
+  const applyJoinAnnotationOp = async (op: JoinAnnotationOp): Promise<JoinAnnotationOpOutcome> => {
+    try {
+      const resp = await postJoinAnnotationOp(op);
+      return { op, status: resp.status, joinId: resp.join_id, message: resp.message };
+    } catch (e) {
+      return { op, status: "REJECTED", joinId: op.id ?? null, message: String(e) };
     }
   };
 
@@ -592,7 +616,9 @@ export default function App() {
                   onOpsApplied={refreshAfterOps}
                   onApplyConnectionOp={applyConnectionOp}
                   onApplyCouplingOp={applyCouplingOp}
-                  onValidate={(intent) => runValidate(intent, settings.apiKey, settings.visionModel)}
+                  onApplyFitOp={applyFitOp}
+                  onApplyJoinAnnotationOp={applyJoinAnnotationOp}
+                  onValidate={(intent) => runValidate(intent, settings.apiKey, settings.visionModel || settings.model)}
                   onUserMessage={applyGoal} onHoverInstance={setHoveredInstanceId}
                   onOpenSettings={() => setSettingsOpen(true)} />
           </div>

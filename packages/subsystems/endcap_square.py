@@ -8,7 +8,7 @@ archetype, many named catalog entries" convention.
 
 from __future__ import annotations
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import ParamSpec, Subsystem, bar_end_interfaces, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -60,4 +60,9 @@ ENDCAP_SQUARE = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    # 2026-07-28 -- same Box(length_mm, outer_side_mm, outer_side_mm) shape family as flat_bar/
+    # square_tube, centered at the origin, extruded along local X by length_mm (confirmed by reading
+    # _build directly): the two open hollow ends at x = +/-length_mm/2 are exactly where this cap
+    # slides onto/off the tube it caps.
+    interfaces=bar_end_interfaces("length_mm"),
 ))

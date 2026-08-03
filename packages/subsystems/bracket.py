@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import ParamSpec, Subsystem, plate_face_interfaces, register_subsystem
 
 _FRAGMENT = """\
 ## Subsystem: Mounting Bracket
@@ -83,4 +83,8 @@ BRACKET = register_subsystem(Subsystem(
     invariants=_check,
     fea_eligible=True,  # the original validated cantilever case (single box, holes inset from X ends)
     cascades=_cascade,
+    interfaces=plate_face_interfaces("skin_thickness_mm"),  # render_bracket's own Box(width, depth,
+    # thickness), centered at the origin — the same archetype avionics_tray/battery_tray/etc already
+    # adopted this helper for (2026-07-28: bracket itself hadn't adopted it yet, despite being the
+    # source shape those docstrings point back to).
 ))

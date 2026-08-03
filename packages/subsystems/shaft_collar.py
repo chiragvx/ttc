@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import cylinder_end_interfaces
 
 _FRAGMENT = """\
 ## Subsystem: Shaft collar
@@ -65,4 +66,9 @@ SHAFT_COLLAR = register_subsystem(Subsystem(
         ParamSpec("set_screw_dia_mm", value=3.0,  min=1.5, max=8.0,  unit="mm"),
     ],
     build=_build, volume=_volume, invariants=_check,
+    # 2026-07-28 (interface-coverage sweep) — the collar body is `bd.Cylinder(radius=outer_dia_mm/2,
+    # height=thickness_mm)`, centered on the origin along local Z by build123d default; the bore and
+    # radial set-screw hole are subtracted afterward and don't move the outer envelope's two flat end
+    # faces, so cylinder_end_interfaces applies unmodified (same shape family as round_post/standoff).
+    interfaces=cylinder_end_interfaces("thickness_mm"),
 ))

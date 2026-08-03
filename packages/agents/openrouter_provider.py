@@ -14,16 +14,39 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 
 from packages.agents.llm_provider import LLMProvider
 from packages.agents.prompt_builder import build_system_prompt_from_json
+from packages.agents.research_provider import (
+    ResearchFinding,
+    ResearchQuery,
+    get_research_provider,
+    research_provider_configured,
+    research_tool_schema,
+)
 from packages.ledger.deltas import DeltaProposal, parameter_delta_tool_schema
 
 logger = logging.getLogger(__name__)
 
 _FN_NAME = "propose_parameter_delta"
+# The model's OWN decision to look up reference material mid-turn (2026-08-01), replacing the old
+# deterministic pre-turn heuristic — see stream_chat's docstring and research_provider.py's module
+# docstring for why. Offered as a second tool ALONGSIDE _FN_NAME only when a vendor is configured.
+_RESEARCH_FN_NAME = "research_reference"
+# 1 initial completion + at most 1 continuation once the model has a research result in hand — a
+# hard cap, not configurable, so a model that keeps asking to research can never turn one chat turn
+# into an unbounded chain of completion requests.
+_MAX_RESEARCH_ROUNDS = 2
 _DEFAULT_MODEL = "deepseek/deepseek-chat"
 _DEFAULT_BASE = "https://openrouter.ai/api/v1"
+# propose_delta (single-shot delta-emitter, called on slider-release / a chat turn's structured
+# side) is idempotent to resend — nothing is applied to the ledger until it RETURNS a validated
+# proposal — so a transient 429/5xx/timeout there is worth a small bounded retry. stream_chat
+# deliberately does NOT get this: it's already mid-stream by the time a transport error can occur,
+# and it has its own ('error', ...) event contract for exactly this failure class instead.
+_PROPOSE_DELTA_RETRY_ATTEMPTS = 3
+_PROPOSE_DELTA_RETRY_BASE_DELAY_S = 0.5
 # The streaming/conversational path (`stream_chat`, used by POST /chat) gets a higher cap than the
 # single-shot delta-emitter path (`propose_delta`, used by POST /propose): a multi-part assembly
 # reply can plausibly need prose PLUS several add_instance entries PLUS deltas PLUS a rationale, all
@@ -95,10 +118,61 @@ def _extract_json_values(s: str) -> list[tuple[dict, str]]:
     return out
 
 
+def _is_retryable_transport_error(e: Exception) -> bool:
+    """True for a 429, a 5xx, or a request timeout — the transient transport failures worth a bounded
+    retry in propose_delta. Duck-typed rather than an `isinstance` check against `httpx`'s exception
+    classes: an injected test double (see `post=` on the constructor) can raise a plain fake without
+    needing to import/construct a real httpx exception, and this stays honest if `_do_post` is ever
+    backed by something other than httpx. `httpx.HTTPStatusError` (raised by `raise_for_status()`)
+    carries `.response.status_code`; `httpx.TimeoutException` and every subclass of it
+    (`ConnectTimeout`, `ReadTimeout`, `WriteTimeout`, `PoolTimeout`) all have "Timeout" in the class
+    name."""
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    if isinstance(status, int) and (status == 429 or status >= 500):
+        return True
+    return "timeout" in type(e).__name__.lower()
+
+
+def _recover_tool_call_proposal(args) -> "DeltaProposal | None":
+    """Parse one `tool_calls[i].function.arguments` value (already-decoded dict OR a JSON string)
+    into a validated DeltaProposal, or None if nothing recoverable is in it — never raises.
+
+    Applies the SAME recovery `stream_chat` already relies on for this exact failure class (see
+    `_extract_json_values`'s docstring for the live repros this responds to): a JSONDecodeError may
+    still hide one or more complete JSON values (a valid payload followed by trailing junk, or a
+    model that second-guessed itself and emitted an abandoned draft immediately followed by a
+    complete, correctly-shaped proposal, both inside the same arguments string) — in which case the
+    LAST candidate that actually validates against DeltaProposal wins, not just the first complete
+    value found. A dict/str that parses fine but fails DeltaProposal validation (a stale or
+    wrongly-shaped duplicate) also returns None here rather than raising, so the caller can keep
+    looking at later tool_calls entries instead of hard-failing on one bad one."""
+    if not isinstance(args, str):
+        try:
+            return DeltaProposal.model_validate(args)
+        except Exception:
+            return None
+    try:
+        parsed = json.loads(args)
+    except json.JSONDecodeError:
+        recovered = None
+        for candidate, _ in reversed(_extract_json_values(args)):
+            try:
+                recovered = DeltaProposal.model_validate(candidate)
+            except Exception:
+                continue
+            break
+        return recovered
+    try:
+        return DeltaProposal.model_validate(parsed)
+    except Exception:
+        return None
+
+
 class OpenRouterDeltaProvider(LLMProvider):
     def __init__(self, *, model: str | None = None, api_key: str | None = None,
                  base_url: str | None = None, max_tokens: int = 1024,
-                 chat_max_tokens: int = _DEFAULT_CHAT_MAX_TOKENS, post=None, stream_post=None) -> None:
+                 chat_max_tokens: int = _DEFAULT_CHAT_MAX_TOKENS, post=None, stream_post=None,
+                 sleep=None) -> None:
         self.model = model or os.environ.get("OPENROUTER_MODEL", _DEFAULT_MODEL)
         self.api_key = api_key if api_key is not None else os.environ.get("OPENROUTER_API_KEY", "")
         self.base_url = base_url or os.environ.get("OPENROUTER_BASE_URL", _DEFAULT_BASE)
@@ -106,6 +180,7 @@ class OpenRouterDeltaProvider(LLMProvider):
         self.chat_max_tokens = chat_max_tokens     # stream_chat (conversational) cap — see default above
         self._post = post  # injectable (url=, headers=, json=) -> dict, for tests
         self._stream_post = stream_post  # injectable (url=, headers=, json=) -> iterator[chunk dict]
+        self._sleep = sleep or time.sleep  # injectable, so retry-backoff tests don't really sleep
 
     def _do_post(self, url: str, headers: dict, payload: dict) -> dict:
         if self._post is not None:
@@ -114,6 +189,26 @@ class OpenRouterDeltaProvider(LLMProvider):
         resp = httpx.post(url, headers=headers, json=payload, timeout=60.0)
         resp.raise_for_status()
         return resp.json()
+
+    def _do_post_with_retry(self, url: str, headers: dict, payload: dict) -> dict:
+        """`_do_post`, bounded-retried (2 to 3 attempts total, exponential backoff) — propose_delta's
+        own transport wrapper. See `_PROPOSE_DELTA_RETRY_ATTEMPTS`'s docstring for why this is scoped
+        to propose_delta and not shared with judge_image or stream_chat's own `_do_stream`."""
+        delay = _PROPOSE_DELTA_RETRY_BASE_DELAY_S
+        last_exc: Exception | None = None
+        for attempt in range(_PROPOSE_DELTA_RETRY_ATTEMPTS):
+            try:
+                return self._do_post(url, headers, payload)
+            except Exception as e:
+                if not _is_retryable_transport_error(e) or attempt == _PROPOSE_DELTA_RETRY_ATTEMPTS - 1:
+                    raise
+                logger.warning("propose_delta: retryable transport error on attempt %d/%d (%s) — "
+                                "backing off %.2fs before retrying", attempt + 1,
+                                _PROPOSE_DELTA_RETRY_ATTEMPTS, e, delay)
+                last_exc = e
+                self._sleep(delay)
+                delay *= 2
+        raise last_exc  # pragma: no cover — loop above always returns or re-raises first
 
     def propose_delta(self, *, system: str, conversation: list[dict], ledger_json: str) -> DeltaProposal:
         if not self.api_key and self._post is None:
@@ -131,15 +226,25 @@ class OpenRouterDeltaProvider(LLMProvider):
             "tool_choice": {"type": "function", "function": {"name": _FN_NAME}},
         }
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-        data = self._do_post(f"{self.base_url}/chat/completions", headers, payload)
+        data = self._do_post_with_retry(f"{self.base_url}/chat/completions", headers, payload)
 
         message = (data.get("choices") or [{}])[0].get("message", {}) or {}
+        # A forced tool_choice should mean exactly one matching tool_calls entry, but a model can
+        # still double-emit (2026-07-19/23 live repros on stream_chat's identical failure class, see
+        # _extract_json_values/_recover_tool_call_proposal above) — duplicate entries, an abandoned
+        # draft ahead of the real proposal, or valid JSON with trailing junk. Walk every matching
+        # entry and keep the LAST one that actually recovers/validates rather than blindly returning
+        # the first — an earlier stale or malformed entry must not shadow a later good one.
+        proposal: DeltaProposal | None = None
         for call in message.get("tool_calls") or []:
             fn = call.get("function", {})
-            if fn.get("name") == _FN_NAME:
-                args = fn.get("arguments")
-                parsed = json.loads(args) if isinstance(args, str) else args
-                return DeltaProposal.model_validate(parsed)
+            if fn.get("name") != _FN_NAME:
+                continue
+            candidate = _recover_tool_call_proposal(fn.get("arguments"))
+            if candidate is not None:
+                proposal = candidate
+        if proposal is not None:
+            return proposal
         # forced tool_choice should prevent this; fail safe to a clarification rather than guess
         return DeltaProposal(request_clarification="No structured delta was produced.")
 
@@ -204,9 +309,74 @@ class OpenRouterDeltaProvider(LLMProvider):
                 except json.JSONDecodeError:
                     continue
 
+    def _stream_round(self, headers: dict, payload: dict, out: dict):
+        """Stream ONE chat-completion request, yielding ('token', text) live as it arrives.
+        Populates `out['tool_calls']` (`{index: {"id", "name", "arguments"}}`, arguments
+        concatenated across fragments) and `out['finish_reason']` as a side effect once the stream
+        ends — a generator's own `return` value is awkward to retrieve through a driving `for`
+        loop, so this side-channel dict is simpler than threading one through. A tool call's `id`/
+        `name` typically only rides on its FIRST delta fragment (subsequent fragments carry only
+        more `arguments`) — captured once and kept, never overwritten by a later blank one."""
+        tool_calls: dict[int, dict] = {}
+        finish_reason: str | None = None
+        for chunk in self._do_stream(f"{self.base_url}/chat/completions", headers, payload):
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            choice = choices[0]
+            delta = choice.get("delta") or {}
+            if delta.get("content"):
+                yield ("token", delta["content"])
+            for tc in delta.get("tool_calls") or []:
+                idx = tc.get("index", 0)
+                entry = tool_calls.setdefault(idx, {"id": None, "name": None, "arguments": ""})
+                if tc.get("id"):
+                    entry["id"] = tc["id"]
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    entry["name"] = fn["name"]
+                entry["arguments"] += fn.get("arguments") or ""
+            # some providers report finish_reason only on the final (often content-less) chunk —
+            # keep the last non-null one seen, rather than requiring it ride with content/tool_calls.
+            fr = choice.get("finish_reason")
+            if fr:
+                finish_reason = fr
+        out["tool_calls"] = tool_calls
+        out["finish_reason"] = finish_reason
+
+    def _execute_research(self, arguments: str) -> "ResearchFinding | None":
+        """Parse one `research_reference` tool call's arguments and run it through the configured
+        provider. Malformed JSON just drops the call (returns None, same as an inconclusive
+        lookup) — `ResearchQuery` is a single required string field, not worth the multi-candidate
+        JSON recovery machinery `_recover_tool_call_proposal` needs for the much larger
+        `DeltaProposal` schema. Never raises — mirrors every other provider call in this file that
+        must never fabricate a result out of a broken response."""
+        try:
+            query = ResearchQuery.model_validate_json(arguments)
+        except Exception:
+            return None
+        return get_research_provider().research(query.query)
+
     def stream_chat(self, *, messages: list[dict], ledger_json: str):
-        """Yield ('token', text), then ('proposal', DeltaProposal), then ('done', None) — or
-        ('error', msg). The model produces prose AND an optional propose_parameter_delta call.
+        """Yield ('token', text), ('research', ResearchFinding) — at most once per research tool
+        call, only when a vendor is configured — then ('proposal', DeltaProposal), then
+        ('done', None) — or ('error', msg). The model produces prose AND an optional
+        propose_parameter_delta call.
+
+        Runs a BOUNDED (`_MAX_RESEARCH_ROUNDS`) multi-round tool loop (2026-08-01) — the first
+        genuinely agentic loop in this codebase (a tool result fed back into a second completion
+        request), replacing a deterministic pre-turn heuristic that used to decide research
+        unconditionally, with no model judgment at all. If the model calls `research_reference`
+        ALONE (no propose_parameter_delta in the same round), the result is fed back as a tool
+        message and the model gets ONE more completion to actually use it. If it calls BOTH in the
+        same round, that round is treated as final — propose_parameter_delta is self-contained (the
+        model already decided without waiting), and it has no natural "tool result" to feed back
+        anyway: it's applied CLIENT-side, asynchronously, long after this response finishes, so it
+        must never be the reason this loop tries to continue. The conversation built for a
+        continuation round is entirely EPHEMERAL to this one call — `Chat.tsx` already collapses
+        every historical turn back into plain `{role, content}` text before resending, so these raw
+        assistant/tool-call/tool-result messages never need to stay protocol-valid across separate
+        `/chat` requests, only within this one.
 
         Never silently empty end-to-end (see FIX 1 in the investigation this responds to): a
         malformed tool-call JSON, a truncated completion, or a turn that produced neither prose nor
@@ -215,43 +385,74 @@ class OpenRouterDeltaProvider(LLMProvider):
         if not self.api_key and self._stream_post is None:
             yield ("error", "OPENROUTER_API_KEY is not set")
             return
-        tool = {"type": "function", "function": {
+        tools = [{"type": "function", "function": {
             "name": _FN_NAME, "description": "Emit parameter deltas or request clarification.",
-            "parameters": parameter_delta_tool_schema()}}
+            "parameters": parameter_delta_tool_schema()}}]
+        if research_provider_configured():
+            tools.append({"type": "function", "function": {
+                "name": _RESEARCH_FN_NAME,
+                "description": (
+                    "Look up brief reference material (a description + possibly images) for a "
+                    "real-world object or mechanism, to ground which catalog part types to use "
+                    "when decomposing a NEW compound design. Call this ALONE (no "
+                    "propose_parameter_delta in the same turn) when you want to see the result "
+                    "before deciding what to build — it comes back as a tool result and you get "
+                    "one more turn to use it."),
+                "parameters": research_tool_schema()}})
         stable_prompt = build_system_prompt_from_json(ledger_json)
-        payload = {
-            "model": self.model, "max_tokens": self.chat_max_tokens, "stream": True,
-            "messages": [{"role": "system", "content": f"{stable_prompt}\n\n## Current ledger\n{ledger_json}"}]
-                        + messages,
-            "tools": [tool], "tool_choice": "auto",
-        }
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        conversation = list(messages)
         tool_args: dict[int, str] = {}
         saw_token = False
         finish_reason: str | None = None
-        try:
-            for chunk in self._do_stream(f"{self.base_url}/chat/completions", headers, payload):
-                choices = chunk.get("choices") or []
-                if not choices:
-                    continue
-                choice = choices[0]
-                delta = choice.get("delta") or {}
-                if delta.get("content"):
+        for round_num in range(_MAX_RESEARCH_ROUNDS):
+            payload = {
+                "model": self.model, "max_tokens": self.chat_max_tokens, "stream": True,
+                "messages": [{"role": "system",
+                               "content": f"{stable_prompt}\n\n## Current ledger\n{ledger_json}"}]
+                            + conversation,
+                "tools": tools, "tool_choice": "auto",
+            }
+            out: dict = {}
+            try:
+                for kind, text in self._stream_round(headers, payload, out):
                     saw_token = True
-                    yield ("token", delta["content"])
-                for tc in delta.get("tool_calls") or []:
-                    idx = tc.get("index", 0)
-                    args = (tc.get("function") or {}).get("arguments") or ""
-                    tool_args[idx] = tool_args.get(idx, "") + args
-                # some providers report finish_reason only on the final (often content-less) chunk —
-                # keep the last non-null one seen, rather than requiring it ride with content/tool_calls.
-                fr = choice.get("finish_reason")
-                if fr:
-                    finish_reason = fr
-        except Exception as e:  # network / bad key / stream error
-            yield ("error", str(e))
-            yield ("done", None)  # keep the ('error', ...) then ('done', None) contract even here
-            return
+                    yield ("token", text)
+            except Exception as e:  # network / bad key / stream error
+                yield ("error", str(e))
+                yield ("done", None)  # keep the ('error', ...) then ('done', None) contract even here
+                return
+            round_tool_calls: dict[int, dict] = out["tool_calls"]
+            if out["finish_reason"]:
+                finish_reason = out["finish_reason"]
+            research_calls = [tc for tc in round_tool_calls.values()
+                               if (tc["name"] or _FN_NAME) == _RESEARCH_FN_NAME]
+            propose_calls = {idx: tc["arguments"] for idx, tc in round_tool_calls.items()
+                              if (tc["name"] or _FN_NAME) == _FN_NAME}
+            tool_result_messages = []
+            for tc in research_calls:
+                finding = self._execute_research(tc["arguments"])
+                if finding is not None:
+                    yield ("research", finding)
+                tool_result_messages.append({
+                    "role": "tool", "tool_call_id": tc["id"],
+                    "content": json.dumps(finding.model_dump(mode="json") if finding is not None
+                                           else {"note": "no reference results found for this query"}),
+                })
+            tool_args = propose_calls  # this round's propose calls are authoritative either way
+            more_rounds_allowed = round_num < _MAX_RESEARCH_ROUNDS - 1
+            if research_calls and not propose_calls and more_rounds_allowed:
+                assistant_tool_calls = [
+                    {"id": tc["id"], "type": "function",
+                     "function": {"name": tc["name"] or _RESEARCH_FN_NAME, "arguments": tc["arguments"]}}
+                    for tc in research_calls
+                ]
+                conversation = conversation + [
+                    {"role": "assistant", "content": None, "tool_calls": assistant_tool_calls},
+                    *tool_result_messages,
+                ]
+                continue
+            break
         saw_proposal = False
         # Tracks whether a SPECIFIC per-tool-call error was already yielded (a parse failure or a
         # schema-validation failure, neither one truncation-shaped) — see the end-of-stream check
@@ -350,6 +551,7 @@ class OpenRouterDeltaProvider(LLMProvider):
                 # failure than truncation (the syntax was complete), so the position heuristic above
                 # doesn't apply; still worth a signal rather than the old silent `continue`.
                 logger.warning("stream_chat: tool-call arguments failed schema validation (%s)", e)
+                logger.warning("STREAM_DEBUG full parsed payload: %r", parsed)  # TEMP — remove after live capture
                 if not truncated:
                     yield ("error", "the model's proposal could not be parsed — try rephrasing or asking again")
                     yielded_specific_error = True

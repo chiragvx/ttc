@@ -53,6 +53,11 @@ export interface ValidationReport {
 export interface ValidationResult {
   ok: boolean;
   geometric: ValidationReport;
+  // 2026-07-27 — a coarse, closed-form FS estimate for every instance carrying a coupling-derived
+  // load, "check": "structural" — always present (never null: it just reports zero issues when
+  // there's nothing coupled yet), unlike `visual` which is genuinely absent when no vision model is
+  // configured. See packages/transport/app.py::_coarse_structural_summary.
+  structural: ValidationReport;
   visual: ValidationReport | null;
   vision_enabled: boolean;
   vision_ran: boolean;
@@ -78,11 +83,19 @@ export interface MutationRejected {
 
 export type ServerMessage = CascadeUpdate | MutationRejected;
 
+// 2026-08-01 — mirrors packages/ledger/parameter.py::ParamSource. A scoped passthrough provenance
+// tag, NOT a confidence-scoring system: purely descriptive, nothing here ranks/sorts/aggregates on
+// it. Absent or "unsourced" are equivalent and mean "render nothing".
+export type ParamSource = "verified" | "rule_derived" | "solver_validated" | "unsourced";
+
 export interface ParameterDelta {
   target_node: string;
   requested_value: number | string; // string for the one string-valued node, material_profile
   set_lock?: string | null;
   rationale?: string | null;
+  // where this delta's requested value came from (mirrors packages/ledger/deltas.py::ParameterDelta.source).
+  // Optional/defaulted server-side to "unsourced" — absent on any older payload.
+  source?: ParamSource | null;
 }
 
 // Add/update/remove a hole/pocket/slot cut on any instance — mirrors
@@ -218,6 +231,60 @@ export interface CouplingOpOutcome {
   message?: string;
 }
 
+// Wire/unwire/resync a typed FIT BINDING (2026-07-27) — a CONNECTOR's fitted-dimension params
+// derived ONCE from a HOST's cross-section, written as ordinary deltas. Posted to POST /fit_ops on
+// accept, same "propose then explicit accept" boundary as ConnectionOp/CouplingOp above. Mirrors
+// packages/ledger/deltas.py::FitOp.
+export interface FitOp {
+  op: "fit_connector" | "unfit_connector" | "resync_fit";
+  id?: string | null;              // required for unfit_connector/resync_fit; auto-generated for fit_connector
+  connector_instance?: string | null;
+  host_instance?: string | null;
+  clearance_mm?: number | null;
+  rationale?: string | null;
+}
+export interface FitOpOutcome {
+  op: FitOp;
+  status: "APPLIED" | "REJECTED" | "CONFLICT";
+  fitId: string | null;
+  message?: string;
+}
+
+// Add/remove a JoinAnnotation (2026-07-27) — records HOW two already-connected parts are joined
+// (bolted/press_fit/welded/adhesive/custom) for the BOM; purely semantic, never touches geometry
+// (contrast FitOp above). Posted to POST /join_annotation_ops on accept, same "propose then explicit
+// accept" boundary as FitOp/CouplingOp. Mirrors packages/ledger/deltas.py::JoinAnnotationOp.
+export interface JoinAnnotationOp {
+  op: "add_join_annotation" | "remove_join_annotation";
+  id?: string | null;              // required for remove_join_annotation; auto-generated for add
+  connection_id?: string | null;
+  method?: "bolted" | "press_fit" | "welded" | "adhesive" | "custom" | null;
+  fastener?: string | null;
+  note?: string | null;
+  rationale?: string | null;
+}
+export interface JoinAnnotationOpOutcome {
+  op: JoinAnnotationOp;
+  status: "APPLIED" | "REJECTED" | "CONFLICT";
+  joinId: string | null;
+  message?: string;
+}
+
+// The resolved fit wiring, as stored on MasterParametricLedger.fit_bindings — mirrors
+// packages/ledger/schema.py::FitInput/FitBinding.
+export interface FitInput {
+  host_param: string;
+  connector_param: string;
+}
+export interface FitBinding {
+  id: string;
+  connector_instance: string;
+  host_instance: string;
+  kind: "round" | "rect";
+  inputs: FitInput[];
+  clearance_mm: number;
+}
+
 // A proposed part manifest for a big/ambiguous "make an X" request (Phase 5, 2026-07-19) — PURE
 // DISPLAY DATA, unlike ConnectionOp/CouplingOp: there is no apply endpoint, no outcome/status to
 // track, no Undo. It just shows what the copilot intends to build before/alongside actually
@@ -234,6 +301,23 @@ export interface ScopeProposal {
   parts: ScopePartProposal[];
   out_of_scope: string[];
   open_questions: string[];
+}
+
+// Reference research (2026-08-01) — an OPTIONAL, advisory finding fetched automatically before a
+// NEW compound design, so the copilot stops forcing the nearest generic catalog primitive onto
+// something structurally different (see packages/agents/research_provider.py's module docstring —
+// the "laptop stand is not a table" failure this targets). PURE DISPLAY DATA, same as
+// ScopeProposal: no apply endpoint, no outcome, no Undo. Mirrors
+// packages/agents/research_provider.py::ResearchFinding exactly. `suggested_subsystem_types` is
+// UNVERIFIED — it may name a catalog part type or not; only ever used as a hint to the model, never
+// trusted client-side either.
+export interface ResearchFinding {
+  query: string;
+  summary: string;
+  suggested_subsystem_types: string[];
+  source_urls: string[];
+  image_urls: string[];
+  disclaimer: string;
 }
 
 // What POST /instance_ops returns, reshaped for the UI — the InstanceOp analog of FeatureOpOutcome.
@@ -324,16 +408,32 @@ export interface LedgerCoupling {
   relation: string;
   inputs: Record<string, LedgerCouplingInput>;
 }
+// Mirrors packages/ledger/schema.py::JoinAnnotation -- BOM/documentation-grade "how actually joined"
+// data (bolted/press_fit/welded/adhesive/custom) attached to an EXISTING Connection via
+// `connection_id` (2026-07-27; wired into the graph view 2026-08-01). Never geometry-touching.
+export interface LedgerJoinAnnotation {
+  id: string;
+  connection_id: string;
+  method: string;
+  fastener?: string | null;
+  note?: string | null;
+}
 export interface LedgerGraphData {
   instances: Record<string, LedgerInstance>;
   connections: LedgerConnection[];
   couplings: LedgerCoupling[];
+  fit_bindings: FitBinding[];
+  join_annotations: LedgerJoinAnnotation[];
 }
 
 // --- chat (SSE) ---
 export type ChatEvent =
   | { type: "token"; text: string }
-  | { type: "proposal"; deltas: ParameterDelta[]; feature_ops: FeatureOp[]; instance_ops: InstanceOp[]; connection_ops: ConnectionOp[]; coupling_ops: CouplingOp[]; scope_proposal: ScopeProposal | null; clarification: string | null; suggestions: string[] }
+  | { type: "proposal"; deltas: ParameterDelta[]; feature_ops: FeatureOp[]; instance_ops: InstanceOp[]; connection_ops: ConnectionOp[]; coupling_ops: CouplingOp[]; fit_ops: FitOp[]; join_annotation_ops: JoinAnnotationOp[]; scope_proposal: ScopeProposal | null; clarification: string | null; suggestions: string[] }
+  // Fired BEFORE any token/proposal events, at most once per turn, only when a research vendor is
+  // actually configured server-side (see packages/transport/app.py's /chat handler) — most turns
+  // never see this event at all. The fields are ResearchFinding's own, flattened onto the event.
+  | ({ type: "research" } & ResearchFinding)
   | { type: "no_llm" }
   | { type: "error"; message: string }
   | { type: "done" };
@@ -346,6 +446,10 @@ export interface DeltaOutcome {
   status: "APPLIED" | "APPLIED_ADVISORY" | "REJECTED" | "CONFLICT";
   reason?: string;
   cascades?: CascadeEffect[]; // companion changes this SPECIFIC edit triggered, if any
+  // carried straight through from the originating ParameterDelta.source (see App.tsx::applyDeltas) —
+  // the WS mutate() round trip doesn't (yet) echo back a backend-recomputed source, so this reflects
+  // what the proposal itself declared, not a value re-derived post-apply.
+  source?: ParamSource | null;
 }
 
 export interface ChatMessage {
@@ -366,6 +470,11 @@ export interface ChatMessage {
   connectionOpOutcomes?: (ConnectionOpOutcome | undefined)[];
   couplingOps?: CouplingOp[];             // AI-proposed load couplings (Phase 2b) — auto-applied
   couplingOpOutcomes?: (CouplingOpOutcome | undefined)[];
+  fitOps?: FitOp[];                       // AI-proposed fitted-dimension bindings (2026-07-27) — auto-applied
+  fitOpOutcomes?: (FitOpOutcome | undefined)[];
+  joinAnnotationOps?: JoinAnnotationOp[]; // AI-proposed semantic join annotations (2026-07-27) — auto-applied, never touches geometry
+  joinAnnotationOpOutcomes?: (JoinAnnotationOpOutcome | undefined)[];
   scopeProposal?: ScopeProposal | null;   // proposed part manifest for a big/ambiguous ask (Phase 5) — display only, no outcomes
+  researchFinding?: ResearchFinding | null; // reference research checked before this turn's design (2026-08-01) — display only
   validation?: ValidationResult;          // self-check run after this turn's geometry changes (2026-07-19)
 }

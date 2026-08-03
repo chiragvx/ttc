@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 
 _FRAGMENT = """\
 ## Subsystem: Hex standoff
@@ -45,6 +45,22 @@ def _check(p):
     return out
 
 
+def _bottom_face(p):
+    """Local mate frame at the hex prism's near end -- z=0 by construction (`_build` extrudes the
+    hex sketch from z=0 to z=length_mm, NOT centered at the origin, unlike `cylinder_end_interfaces`'
+    `bd.Cylinder` assumption -- confirmed live: `bd.extrude(sketch, amount=length_mm)` bounding box
+    runs z in [0, length_mm]). Outward normal points -Z."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, 0.0), normal=(0.0, 0.0, -1.0))
+
+
+def _top_face(p):
+    """Local mate frame at the hex prism's far end -- z=length_mm by construction. Outward normal
+    points +Z."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, p.length_mm), normal=(0.0, 0.0, 1.0))
+
+
 HEX_STANDOFF = register_subsystem(Subsystem(
     name="hex_standoff",
     description="Hex-profile standoff/spacer with through-bore",
@@ -56,4 +72,13 @@ HEX_STANDOFF = register_subsystem(Subsystem(
         ParamSpec("length_mm",       value=20.0, min=3.0, max=80.0, unit="mm"),
     ],
     build=_build, volume=_volume, invariants=_check,
+    # 2026-07-28 (interface-coverage sweep, final wave): the hex prism is `bd.extrude(sketch,
+    # amount=length_mm)` of a sketch on the default XY plane -- extruded from z=0 to z=length_mm, NOT
+    # centered at the origin, so the generic `cylinder_end_interfaces` (assumes a `bd.Cylinder`
+    # centered on local Z) doesn't fit -- bespoke frames using the part's own real z=0/z=length_mm end
+    # faces instead, same pattern as `button_head_bolt_blank`'s head_face/tip_face.
+    interfaces=[
+        InterfaceSpec(name="bottom_face", kind="mount", frame=_bottom_face),
+        InterfaceSpec(name="top_face", kind="mount", frame=_top_face),
+    ],
 ))

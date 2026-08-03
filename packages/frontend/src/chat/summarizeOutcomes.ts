@@ -71,6 +71,23 @@ export function summarizeOutcomes(m: ChatMessage): string | null {
       parts.push(entry);
     });
   }
+  // 2026-07-27: fit outcomes MUST reach the model too, symmetric with connection/coupling/instance/
+  // feature ops above — otherwise a REJECTED fit (e.g. a non-square host tripping the rotation-safety
+  // gate, or a genuine invariant violation) never gets fed back and the model re-proposes the
+  // identical wrong fit next turn, and an APPLIED fit's minted fit_id is never learned so it can't be
+  // targeted by a later resync_fit/unfit_connector.
+  if (m.fitOps) {
+    m.fitOps.forEach((op, i) => {
+      const outcome = m.fitOpOutcomes?.[i];
+      if (!outcome) return;
+      const what = op.op === "fit_connector" ? `fit ${op.connector_instance} <- ${op.host_instance}`
+        : op.op === "resync_fit" ? `resync_fit ${op.id}` : `unfit_connector ${op.id}`;
+      let entry = `${what} -> ${outcome.status}`;
+      if (outcome.status === "APPLIED" && outcome.fitId) entry += ` (fit_id=${outcome.fitId})`;
+      if (outcome.message && outcome.status !== "APPLIED") entry += `: ${outcome.message}`;
+      parts.push(entry);
+    });
+  }
 
   return parts.length > 0 ? `[outcomes: ${parts.join("; ")}]` : null;
 }

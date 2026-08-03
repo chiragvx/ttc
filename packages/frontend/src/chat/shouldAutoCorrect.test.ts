@@ -7,6 +7,7 @@ function report(overrides: Partial<ValidationResult> & { geometricIssues?: Valid
   return {
     ok: true,
     geometric: { ok: true, issues: geometricIssues ?? [], summary: "" },
+    structural: { ok: true, issues: [], summary: "" },
     visual: null,
     vision_enabled: false,
     vision_ran: false,
@@ -46,6 +47,14 @@ describe("shouldAutoCorrect", () => {
     // 2026-07-22: two comparably-sized parts truly interpenetrating with no declared connection --
     // also hardcoded severity=warning in validate.py, same gap class as connectivity/connections.
     const r = report({ ok: true, geometricIssues: [issue("interference", "warning")] });
+    expect(shouldAutoCorrect(r)).toBe(true);
+  });
+
+  it("fires on a fit-drift issue even when report.ok is true", () => {
+    // 2026-07-27: a connector's stored dimensions no longer match its host's current cross-section --
+    // a confident, quantified mismatch with a single well-defined fix (resync_fit), same class as
+    // interference/connectivity above, not an ambiguous judgment call.
+    const r = report({ ok: true, geometricIssues: [issue("fit", "warning")] });
     expect(shouldAutoCorrect(r)).toBe(true);
   });
 

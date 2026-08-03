@@ -11,6 +11,7 @@ structural envelope/mounting geometry, not its full cosmetic profile.
 from __future__ import annotations
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import cylinder_end_interfaces
 
 _FRAGMENT = """\
 ## Subsystem: Cylindrical Grip
@@ -52,4 +53,8 @@ CYLINDRICAL_GRIP = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     fea_eligible=True,  # plain solid cylinder, span along X-equivalent axis -- same shape class longeron.py opts into; left True here since it IS the simple validated-methodology shape, not inferred for a compound one
+    # a plain bd.Cylinder(radius=p.dia_mm/2.0, height=p.height_mm) -- centered at the origin, standing
+    # along local Z with no rotation, the exact shape cylinder_end_interfaces documents (round_post is
+    # the byte-for-byte same construction). Two real mount faces at each flat end.
+    interfaces=cylinder_end_interfaces("height_mm"),
 ))

@@ -11,6 +11,7 @@ structural envelope/mounting geometry, not its full cosmetic profile.
 from __future__ import annotations
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import FitProfile, cylinder_end_interfaces
 
 _FRAGMENT = """\
 ## Subsystem: Round Bar
@@ -52,4 +53,11 @@ ROUND_BAR = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     fea_eligible=True,  # plain solid cylinder, span along X-equivalent axis -- same shape class longeron.py opts into; left True here since it IS the simple validated-methodology shape, not inferred for a compound one
+    # 2026-07-27 (fitted-joint mechanism) — this bar's own diameter is a real cross-section a
+    # connector (a sleeve, a collar) can be fitted around. See base.py::FitProfile/fit_connector.
+    fit_profile=lambda p: FitProfile(kind="round", dims={"dia_mm": p.dia_mm}),
+    # 2026-07-27 — previously zero mate interfaces despite being a common assembly member; built via
+    # bd.Cylinder, which stands along local Z by default (same as round_post — confirmed live this
+    # session), so its two flat end faces match cylinder_end_interfaces exactly.
+    interfaces=cylinder_end_interfaces("height_mm"),
 ))

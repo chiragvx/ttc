@@ -10,6 +10,20 @@ from packages.ledger.deltas import ParameterDelta
 SKIN = "instances.root.params.skin_thickness_mm"
 
 
+class _FakeResponse:
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+
+
+class _FakeHTTPStatusError(Exception):
+    """Stands in for httpx.HTTPStatusError (same `.response.status_code` shape) without needing a
+    real httpx exception — propose_delta's retry check is duck-typed for exactly this reason."""
+
+    def __init__(self, status_code: int):
+        super().__init__(f"HTTP {status_code}")
+        self.response = _FakeResponse(status_code)
+
+
 def _decode_error(args: str) -> json.JSONDecodeError:
     try:
         json.loads(args)
@@ -133,6 +147,134 @@ def test_missing_api_key_asks_for_it():
     prov = OpenRouterDeltaProvider(api_key="")  # no post injected, no key
     out = prov.propose_delta(system="", conversation=[{"role": "user", "content": "x"}], ledger_json="{}")
     assert "OPENROUTER_API_KEY" in (out.request_clarification or "")
+
+
+def test_propose_delta_recovers_from_trailing_junk_after_a_valid_json_value():
+    # Same failure class stream_chat already recovers from (2026-07-19 live repro:
+    # test_stream_chat_recovers_a_complete_payload_with_trailing_junk): a complete, valid tool-call
+    # `arguments` string followed by trailing non-JSON junk must not be thrown away wholesale via a
+    # bare json.loads.
+    good = json.dumps({"deltas": [{"target_node": SKIN, "requested_value": 4.0}]})
+    args = good + "\nsome trailing junk here"
+
+    def fake_post(*, url, headers, **kw):
+        return _tool_response(args)
+
+    prov = OpenRouterDeltaProvider(api_key="x", post=fake_post)
+    out = prov.propose_delta(system="", conversation=[{"role": "user", "content": "skin 4mm"}], ledger_json="{}")
+
+    assert out.deltas == [ParameterDelta(target_node=SKIN, requested_value=4.0)]
+
+
+def test_propose_delta_prefers_the_last_duplicate_tool_call_when_the_first_is_invalid():
+    # 2026-07-23-style live repro (see test_stream_chat_recovers_the_later_valid_draft_over_an_
+    # earlier_invalid_one): a model can double-emit the forced propose_parameter_delta tool call —
+    # an abandoned, wrongly-shaped draft first (deltas as "key=value" strings, not the real
+    # ParameterDelta schema), then a complete, correctly-shaped proposal second. The stale FIRST
+    # entry must not shadow the later good one.
+    bad_call = {"function": {"name": "propose_parameter_delta",
+                              "arguments": json.dumps({"deltas": ["instances.root.params.skin_thickness_mm=3.0"]})}}
+    good_call = {"function": {"name": "propose_parameter_delta",
+                              "arguments": json.dumps({"deltas": [{"target_node": SKIN, "requested_value": 5.0}]})}}
+
+    def fake_post(*, url, headers, **kw):
+        return {"choices": [{"message": {"tool_calls": [bad_call, good_call]}}]}
+
+    prov = OpenRouterDeltaProvider(api_key="x", post=fake_post)
+    out = prov.propose_delta(system="", conversation=[{"role": "user", "content": "skin 5mm"}], ledger_json="{}")
+
+    assert out.deltas == [ParameterDelta(target_node=SKIN, requested_value=5.0)]
+
+
+def test_propose_delta_prefers_the_last_duplicate_tool_call_even_when_both_validate():
+    # Not just "fall back to the second when the first is broken" — literally prefer the LAST
+    # validating entry, mirroring stream_chat's own "prefer the later candidate" rule.
+    first_call = {"function": {"name": "propose_parameter_delta",
+                                "arguments": json.dumps({"deltas": [{"target_node": SKIN, "requested_value": 1.0}]})}}
+    second_call = {"function": {"name": "propose_parameter_delta",
+                                 "arguments": json.dumps({"deltas": [{"target_node": SKIN, "requested_value": 2.0}]})}}
+
+    def fake_post(*, url, headers, **kw):
+        return {"choices": [{"message": {"tool_calls": [first_call, second_call]}}]}
+
+    prov = OpenRouterDeltaProvider(api_key="x", post=fake_post)
+    out = prov.propose_delta(system="", conversation=[{"role": "user", "content": "x"}], ledger_json="{}")
+
+    assert out.deltas == [ParameterDelta(target_node=SKIN, requested_value=2.0)]
+
+
+def test_propose_delta_retries_on_429_then_succeeds():
+    calls = {"n": 0}
+    sleeps: list[float] = []
+
+    def fake_post(*, url, headers, **kw):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise _FakeHTTPStatusError(429)
+        return _tool_response(json.dumps({"deltas": [{"target_node": SKIN, "requested_value": 6.0}]}))
+
+    prov = OpenRouterDeltaProvider(api_key="x", post=fake_post, sleep=sleeps.append)
+    out = prov.propose_delta(system="", conversation=[{"role": "user", "content": "skin 6mm"}], ledger_json="{}")
+
+    assert calls["n"] == 3  # 2 failed attempts + 1 that succeeded
+    assert out.deltas == [ParameterDelta(target_node=SKIN, requested_value=6.0)]
+    assert sleeps == [0.5, 1.0]  # exponential backoff between the 2 failed attempts
+
+
+def test_propose_delta_retries_on_a_5xx_and_on_a_timeout_too():
+    # 429 is one retryable class; a bare 5xx and a request-timeout-shaped exception (duck-typed on
+    # the class name, mirroring httpx.TimeoutException/ConnectTimeout/ReadTimeout) are the other two
+    # named in the retry contract.
+    for exc in (_FakeHTTPStatusError(503), type("ReadTimeout", (Exception,), {})("timed out")):
+        calls = {"n": 0}
+
+        def fake_post(*, url, headers, _exc=exc, **kw):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise _exc
+            return _tool_response(json.dumps({"deltas": [{"target_node": SKIN, "requested_value": 7.0}]}))
+
+        prov = OpenRouterDeltaProvider(api_key="x", post=fake_post, sleep=lambda s: None)
+        out = prov.propose_delta(system="", conversation=[{"role": "user", "content": "x"}], ledger_json="{}")
+        assert out.deltas == [ParameterDelta(target_node=SKIN, requested_value=7.0)]
+        assert calls["n"] == 2
+
+
+def test_propose_delta_gives_up_after_exhausting_retries_on_a_persistent_429():
+    # bounded, not unlimited: a request that NEVER succeeds must stop after the fixed attempt budget
+    # and propagate the transport error, rather than retry forever.
+    calls = {"n": 0}
+
+    def fake_post(*, url, headers, **kw):
+        calls["n"] += 1
+        raise _FakeHTTPStatusError(429)
+
+    prov = OpenRouterDeltaProvider(api_key="x", post=fake_post, sleep=lambda s: None)
+    try:
+        prov.propose_delta(system="", conversation=[{"role": "user", "content": "x"}], ledger_json="{}")
+        raise AssertionError("expected the persistent 429 to propagate once retries are exhausted")
+    except _FakeHTTPStatusError:
+        pass
+    assert calls["n"] == 3  # exactly the bounded attempt budget, not unlimited
+
+
+def test_propose_delta_does_not_retry_a_non_retryable_error():
+    # a 400 (bad request) is a caller-side error retrying can never fix — must propagate immediately,
+    # with no backoff sleep and no wasted extra attempt.
+    calls = {"n": 0}
+
+    def fake_post(*, url, headers, **kw):
+        calls["n"] += 1
+        raise _FakeHTTPStatusError(400)
+
+    prov = OpenRouterDeltaProvider(api_key="x", post=fake_post, sleep=lambda s: (_ for _ in ()).throw(
+        AssertionError("should not sleep/retry on a non-retryable error")))
+    try:
+        prov.propose_delta(system="", conversation=[{"role": "user", "content": "x"}], ledger_json="{}")
+        raise AssertionError("expected the non-retryable 400 to propagate immediately")
+    except _FakeHTTPStatusError:
+        pass
+    assert calls["n"] == 1
 
 
 def test_stream_chat_yields_tokens_then_proposal():
@@ -454,6 +596,180 @@ def test_stream_chat_unrecognized_finish_reason_with_no_proposal_still_yields_cu
     errors = [msg for k, msg in events if k == "error"]
     assert any("cut off" in e for e in errors)
     assert not any(k == "proposal" for k, _ in events)
+    assert events[-1] == ("done", None)
+
+
+def _fake_research_provider(result):
+    """A minimal stand-in for `get_research_provider()`'s return value — only `.research(query)` is
+    ever called on it."""
+    class _Fake:
+        def research(self, query):
+            return result
+    return _Fake()
+
+
+def test_stream_chat_calls_research_tool_alone_then_continues_with_the_result(monkeypatch):
+    # The model calls research_reference ALONE in round 1 (no propose_parameter_delta yet) -- it
+    # should get the finding fed back as a tool result and a SECOND completion request to finalize.
+    from packages.agents.research_provider import ResearchFinding
+    finding = ResearchFinding(
+        query="adjustable laptop stand",
+        summary="uses a riser/hinge mechanism, not a rigid table",
+        suggested_subsystem_types=["hinge"],
+    )
+    monkeypatch.setattr("packages.agents.openrouter_provider.research_provider_configured", lambda: True)
+    monkeypatch.setattr("packages.agents.openrouter_provider.get_research_provider",
+                         lambda: _fake_research_provider(finding))
+
+    calls = []
+
+    def fake_stream(*, url, headers, json):
+        calls.append(json)
+        if len(calls) == 1:
+            yield {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call_1", "function": {
+                    "name": "research_reference", "arguments": '{"query":"adjustable laptop stand"}'}}]},
+                "finish_reason": "tool_calls"}]}
+        else:
+            yield {"choices": [{"delta": {"content": "Building it now."}}]}
+            yield {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call_2", "function": {
+                    "name": "propose_parameter_delta",
+                    "arguments": '{"deltas":[{"target_node":"' + SKIN + '","requested_value":3.0}]}'}}]},
+                "finish_reason": "tool_calls"}]}
+
+    prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+    events = list(prov.stream_chat(
+        messages=[{"role": "user", "content": "make an adjustable laptop stand"}], ledger_json="{}"))
+
+    assert len(calls) == 2  # the continuation round actually happened
+    assert [p for k, p in events if k == "research"] == [finding]
+    proposals = [p for k, p in events if k == "proposal"]
+    assert proposals and proposals[0].deltas == [ParameterDelta(target_node=SKIN, requested_value=3.0)]
+
+    round2_messages = calls[1]["messages"]
+    assistant_msg = next(m for m in round2_messages if m.get("role") == "assistant" and m.get("tool_calls"))
+    assert assistant_msg["tool_calls"][0] == {
+        "id": "call_1", "type": "function",
+        "function": {"name": "research_reference", "arguments": '{"query":"adjustable laptop stand"}'},
+    }
+    tool_msg = next(m for m in round2_messages if m.get("role") == "tool")
+    assert tool_msg["tool_call_id"] == "call_1"
+    assert "riser/hinge" in tool_msg["content"]
+
+
+def test_stream_chat_mixed_research_and_propose_in_same_round_does_not_continue(monkeypatch):
+    # The model can also call BOTH tools in the SAME round -- propose_parameter_delta is
+    # self-contained (no tool result to feed back), so this must be treated as final: research is
+    # still executed/surfaced for display, but there is no second completion request.
+    from packages.agents.research_provider import ResearchFinding
+    finding = ResearchFinding(query="q", summary="s")
+    monkeypatch.setattr("packages.agents.openrouter_provider.research_provider_configured", lambda: True)
+    monkeypatch.setattr("packages.agents.openrouter_provider.get_research_provider",
+                         lambda: _fake_research_provider(finding))
+
+    calls = []
+
+    def fake_stream(*, url, headers, json):
+        calls.append(json)
+        yield {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "call_1", "function": {"name": "research_reference", "arguments": '{"query":"q"}'}},
+            {"index": 1, "id": "call_2", "function": {
+                "name": "propose_parameter_delta",
+                "arguments": '{"deltas":[{"target_node":"' + SKIN + '","requested_value":3.0}]}'}},
+        ]}, "finish_reason": "tool_calls"}]}
+
+    prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+    events = list(prov.stream_chat(messages=[{"role": "user", "content": "x"}], ledger_json="{}"))
+
+    assert len(calls) == 1  # no continuation round
+    assert [p for k, p in events if k == "research"] == [finding]
+    proposals = [p for k, p in events if k == "proposal"]
+    assert proposals and proposals[0].deltas == [ParameterDelta(target_node=SKIN, requested_value=3.0)]
+
+
+def test_stream_chat_omits_research_tool_when_not_configured(monkeypatch):
+    monkeypatch.setattr("packages.agents.openrouter_provider.research_provider_configured", lambda: False)
+    captured = {}
+
+    def fake_stream(*, url, headers, json):
+        captured["tools"] = json["tools"]
+        yield {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}
+
+    prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+    list(prov.stream_chat(messages=[{"role": "user", "content": "hi"}], ledger_json="{}"))
+
+    assert [t["function"]["name"] for t in captured["tools"]] == ["propose_parameter_delta"]
+
+
+def test_stream_chat_offers_research_tool_when_configured(monkeypatch):
+    monkeypatch.setattr("packages.agents.openrouter_provider.research_provider_configured", lambda: True)
+    captured = {}
+
+    def fake_stream(*, url, headers, json):
+        captured["tools"] = json["tools"]
+        yield {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}
+
+    prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+    list(prov.stream_chat(messages=[{"role": "user", "content": "hi"}], ledger_json="{}"))
+
+    names = {t["function"]["name"] for t in captured["tools"]}
+    assert names == {"propose_parameter_delta", "research_reference"}
+
+
+def test_stream_chat_research_returning_none_still_continues_without_a_research_event(monkeypatch):
+    # A failed/empty lookup must never be silently dropped -- the model still needs an answer to
+    # the tool call it made -- but must also never masquerade as a real finding (no 'research' event).
+    monkeypatch.setattr("packages.agents.openrouter_provider.research_provider_configured", lambda: True)
+    monkeypatch.setattr("packages.agents.openrouter_provider.get_research_provider",
+                         lambda: _fake_research_provider(None))
+
+    calls = []
+
+    def fake_stream(*, url, headers, json):
+        calls.append(json)
+        if len(calls) == 1:
+            yield {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call_1",
+                 "function": {"name": "research_reference", "arguments": '{"query":"q"}'}}]},
+                "finish_reason": "tool_calls"}]}
+        else:
+            yield {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call_2", "function": {
+                    "name": "propose_parameter_delta",
+                    "arguments": '{"deltas":[{"target_node":"' + SKIN + '","requested_value":3.0}]}'}}]},
+                "finish_reason": "tool_calls"}]}
+
+    prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+    events = list(prov.stream_chat(messages=[{"role": "user", "content": "x"}], ledger_json="{}"))
+
+    assert len(calls) == 2
+    assert not any(k == "research" for k, _ in events)
+    tool_msg = next(m for m in calls[1]["messages"] if m.get("role") == "tool")
+    assert "no reference results" in tool_msg["content"]
+    assert any(k == "proposal" for k, _ in events)
+
+
+def test_stream_chat_caps_at_one_continuation_round(monkeypatch):
+    # If round 2 ALSO comes back as research-only (no propose_parameter_delta), a round 3 must
+    # never happen -- _MAX_RESEARCH_ROUNDS is a hard cap, not a "keep going until satisfied" loop.
+    monkeypatch.setattr("packages.agents.openrouter_provider.research_provider_configured", lambda: True)
+    monkeypatch.setattr("packages.agents.openrouter_provider.get_research_provider",
+                         lambda: _fake_research_provider(None))
+
+    calls = []
+
+    def fake_stream(*, url, headers, json):
+        calls.append(json)
+        yield {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": f"call_{len(calls)}",
+             "function": {"name": "research_reference", "arguments": '{"query":"q"}'}}]},
+            "finish_reason": "tool_calls"}]}
+
+    prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+    events = list(prov.stream_chat(messages=[{"role": "user", "content": "x"}], ledger_json="{}"))
+
+    assert len(calls) == 2  # exactly one continuation, never a third round
     assert events[-1] == ("done", None)
 
 

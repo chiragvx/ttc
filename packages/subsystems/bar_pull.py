@@ -11,7 +11,7 @@ here from shape alone.
 
 from __future__ import annotations
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import ParamSpec, Subsystem, bar_end_interfaces, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -58,4 +58,5 @@ BAR_PULL = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    interfaces=bar_end_interfaces("length_mm"),  # bd.Box(length_mm, width_mm, height_mm), centered — same shape family as flat_bar/longeron
 ))

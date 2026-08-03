@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -52,6 +52,23 @@ def _check(p) -> list[str]:
     return out
 
 
+def _base_face(p):
+    """Local mate frame at section1's (the base's) bottom face -- z=0 by construction (`_build` places
+    section1 from z=0 to z=len1_mm, NOT centered at the origin, unlike the generic cylinder helper).
+    This is the face that seats against whatever hole/socket the pin locates into, so its outward
+    normal points -Z (away from the part)."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, 0.0), normal=(0.0, 0.0, -1.0))
+
+
+def _tip_face(p):
+    """Local mate frame at section2's (the taper tip's) far end -- z = len1_mm + len2_mm by
+    construction (section2 sits stacked directly on top of section1). Outward normal is +Z."""
+    from packages.subsystems.base import Frame
+    z = p.len1_mm + p.len2_mm
+    return Frame(origin=(0.0, 0.0, z), normal=(0.0, 0.0, 1.0))
+
+
 TAPER_PIN = register_subsystem(Subsystem(
     name="taper_pin",
     description="Tapered alignment pin -- structural/mounting geometry (FDM/FFF or CNC)",
@@ -67,4 +84,15 @@ TAPER_PIN = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    # 2026-07-28 (interface-coverage sweep, final wave): a stepped two-diameter shape -- section1 (the
+    # base, z=0..len1_mm) with a narrower section2 (the taper tip) stacked on top (z=len1_mm..
+    # +len2_mm), NOT centered at the origin, so `cylinder_end_interfaces` (assumes a single-diameter
+    # cylinder centered at the origin) doesn't fit -- bespoke frames computed from the part's own real
+    # z-offsets instead, same pattern as `locating_pin` (identical underlying geometry, already patched
+    # this sweep) and `T_nut`'s flange/shaft. `base_face` is the seating face; `tip_face` is the
+    # taper's free end.
+    interfaces=[
+        InterfaceSpec(name="base_face", kind="mount", frame=_base_face),
+        InterfaceSpec(name="tip_face", kind="mount", frame=_tip_face),
+    ],
 ))

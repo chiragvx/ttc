@@ -11,6 +11,7 @@ structural envelope/mounting geometry, not its full cosmetic profile.
 from __future__ import annotations
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import cylinder_end_interfaces
 
 _FRAGMENT = """\
 ## Subsystem: Gear Blank
@@ -52,4 +53,10 @@ GEAR_BLANK = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     fea_eligible=True,  # plain solid cylinder, span along X-equivalent axis -- same shape class longeron.py opts into; left True here since it IS the simple validated-methodology shape, not inferred for a compound one
+    # 2026-07-28 -- identical construction to round_post: bd.Cylinder(radius=dia_mm/2, height=height_mm),
+    # centered at the origin along local Z by default (no rotation), so its two flat end faces are
+    # exactly what cylinder_end_interfaces expects. No hub/tooth distinction is actually modeled (per
+    # this file's own docstring -- a plain cylindrical envelope), so the two faces are interchangeable;
+    # default "bottom"/"top" names are used, same as round_post.
+    interfaces=cylinder_end_interfaces("height_mm"),
 ))

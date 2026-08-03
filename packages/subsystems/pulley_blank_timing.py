@@ -11,6 +11,7 @@ structural envelope/mounting geometry, not its full cosmetic profile.
 from __future__ import annotations
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import cylinder_end_interfaces
 
 _FRAGMENT = """\
 ## Subsystem: Pulley Blank Timing
@@ -52,4 +53,9 @@ PULLEY_BLANK_TIMING = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     fea_eligible=True,  # plain solid cylinder, span along X-equivalent axis -- same shape class longeron.py opts into; left True here since it IS the simple validated-methodology shape, not inferred for a compound one
+    # 2026-07-28 -- a plain bd.Cylinder(radius, height), centered at the origin along local Z by
+    # construction (identical shape/param convention to round_post.py, which this mirrors), so its two
+    # flat end faces are exactly what cylinder_end_interfaces expects (e.g. mounting this blank onto a
+    # shaft/hub end-to-end).
+    interfaces=cylinder_end_interfaces("height_mm"),
 ))

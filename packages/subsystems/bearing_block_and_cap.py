@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -67,6 +67,27 @@ def _check(p) -> list[str]:
     return out
 
 
+def _flange_face_frame(p):
+    """The flange's OUTER (bottom) face, z=0 — confirmed against `_build` directly: `flange` is
+    `Pos(0,0,flange_thickness_mm/2) * Cylinder(...)`, so it spans z in [0, flange_thickness_mm], NOT
+    centered at the origin the way `cylinder_end_interfaces` assumes (that helper is for a lone
+    cylinder centered on Z; this part is a two-diameter stack sitting ON TOP of z=0). This is the real
+    mounting face -- bolted flat against a base/chassis via the `bolt[i].bore` pattern -- so its normal
+    points OUTWARD/DOWNWARD (-Z)."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, 0.0), normal=(0.0, 0.0, -1.0))
+
+
+def _shaft_top_frame(p):
+    """The shaft/boss's OUTER (top) face -- the far end of the stack, at
+    z = flange_thickness_mm + shaft_len_mm (confirmed against `_build`: `shaft` is
+    `Pos(0,0,flange_thickness_mm + shaft_len_mm/2) * Cylinder(...)`, spanning z in
+    [flange_thickness_mm, flange_thickness_mm+shaft_len_mm]). This is where the bolted cap (a separate
+    plate instance per the module docstring) would mate, so its normal points OUTWARD/UPWARD (+Z)."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, p.flange_thickness_mm + p.shaft_len_mm), normal=(0.0, 0.0, 1.0))
+
+
 BEARING_BLOCK_AND_CAP = register_subsystem(Subsystem(
     name="bearing_block_and_cap",
     description="Bearing housing + a bolted cap -- structural/mounting geometry (FDM/FFF or CNC)",
@@ -84,4 +105,13 @@ BEARING_BLOCK_AND_CAP = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    # 2026-07-28 (interface-coverage sweep) -- bespoke, not a shared helper: this part is a
+    # two-diameter stack (flange then shaft) sitting on top of z=0, not a single cylinder centered at
+    # the origin (`cylinder_end_interfaces`'s assumption) nor a box/plate. Both ends are real mount
+    # points: `flange_face` bolts to a base via the flange's own bolt-hole pattern; `shaft_top` is
+    # where the separate bolted cap mates.
+    interfaces=[
+        InterfaceSpec(name="flange_face", kind="mount", frame=_flange_face_frame),
+        InterfaceSpec(name="shaft_top", kind="mount", frame=_shaft_top_frame),
+    ],
 ))

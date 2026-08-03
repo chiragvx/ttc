@@ -11,6 +11,7 @@ structural envelope/mounting geometry, not its full cosmetic profile.
 from __future__ import annotations
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import cylinder_end_interfaces
 
 _FRAGMENT = """\
 ## Subsystem: Sprocket Blank
@@ -52,4 +53,8 @@ SPROCKET_BLANK = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     fea_eligible=True,  # plain solid cylinder, span along X-equivalent axis -- same shape class longeron.py opts into; left True here since it IS the simple validated-methodology shape, not inferred for a compound one
+    # 2026-07-28 -- plain bd.Cylinder(radius=dia_mm/2, height=height_mm), centered at the origin along
+    # local Z by default (no rotation) -- the exact shape/convention cylinder_end_interfaces expects
+    # (same as round_post). The hub's two flat faces are the part's real mount points.
+    interfaces=cylinder_end_interfaces("height_mm"),
 ))

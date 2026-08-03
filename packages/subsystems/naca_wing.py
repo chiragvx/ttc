@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 from packages.subsystems._naca_airfoil import (
     naca4_half_thickness,
     naca4_profile_points,
@@ -278,6 +278,22 @@ def _check(p) -> list[str]:
     return out
 
 
+def _tip_frame(p, side: float):
+    """Local mate frame at a wingtip (Phase 1) -- mirrors `bwb_fuselage._tip_frame` exactly: that file
+    shares this file's own centered-at-origin/span-as-local-X/sweep-dihedral convention letter for
+    letter (both call the same `_naca_airfoil.sweep_dihedral_offset`), and its own interfaces comment
+    says a `wing_panel` mates its `root` to one of ITS declared tips. The identical real mount point
+    exists here: this full-span wing's own tip is exactly where a further `wing_panel`/wingtip device
+    (or a `wingtip_stand`) would attach outboard. The tip sits at `x = side*span_mm/2`, shifted aft/up
+    by this wing's own sweep/dihedral (`_sweep_dihedral_offset`, the same helper `_section_points`
+    uses); the face points outward (+-X) so an inward-pointing `wing_panel.root` mates anti-parallel
+    with zero rotation, same as at a `bwb_fuselage` tip."""
+    from packages.subsystems.base import Frame
+    half = p.span_mm / 2.0
+    y_off, z_off = _sweep_dihedral_offset(half, p)
+    return Frame(origin=(side * half, y_off, z_off), normal=(side, 0.0, 0.0))
+
+
 NACA_WING = register_subsystem(Subsystem(
     name="naca_wing",
     description="Full-span lofted wing panel — real NACA 4-digit symmetric airfoil cross-section "
@@ -303,4 +319,12 @@ NACA_WING = register_subsystem(Subsystem(
     # 2026-07-19 (airframe-first pacing) — a wing panel sets the vehicle's own outer mold line. See
     # packages/agents/prompt_builder.py's "airframe-first pacing" section.
     is_airframe_defining=True,
+    # 2026-07-28 (interface-coverage sweep, final wave): mirrors `bwb_fuselage`'s own tip_right/
+    # tip_left interfaces exactly (see `_tip_frame`'s docstring) -- a `wing_panel` (or a wingtip
+    # device / `wingtip_stand`) mates its root to one of THIS wing's own two tips, the same real mount
+    # point `bwb_fuselage` declares on its structurally identical centered/two-tip loft.
+    interfaces=[
+        InterfaceSpec(name="tip_right", kind="mount", frame=lambda p: _tip_frame(p, +1.0)),
+        InterfaceSpec(name="tip_left",  kind="mount", frame=lambda p: _tip_frame(p, -1.0)),
+    ],
 ))

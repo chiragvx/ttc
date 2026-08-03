@@ -27,5 +27,13 @@ export function shouldAutoCorrect(report: ValidationResult): boolean {
   // a much-smaller part fully inside a bigger one is genuinely ambiguous), two comparable-sized
   // unrelated parts occupying the same space is not ambiguous the same way -- it's the coincident-
   // bracket failure this check exists to catch, so it belongs in the confident/actionable group.
-  return issues.some((i) => i.check === "connectivity" || i.check === "connections" || i.check === "interference");
+  //
+  // "fit" (2026-07-27, validate.py::fit_drift_findings) -- a connector's stored dimensions no
+  // longer match what its host's CURRENT cross-section implies (the host was resized after the fit
+  // was wired). A confident, actionable, quantified mismatch -- the same class as "interference"
+  // above, not an ambiguous judgment call -- and the fix is a single well-defined op (resync_fit),
+  // so this must drive the self-correct loop the same way; a mechanism the copilot never learns to
+  // invoke is dead plumbing (keepout_mm's own fate -- fully built, zero adopters, precisely because
+  // nothing ever taught the model to call it or wired it into this trigger set).
+  return issues.some((i) => i.check === "connectivity" || i.check === "connections" || i.check === "interference" || i.check === "fit");
 }

@@ -11,6 +11,7 @@ structural envelope/mounting geometry, not its full cosmetic profile.
 from __future__ import annotations
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import cylinder_end_interfaces
 
 _FRAGMENT = """\
 ## Subsystem: Wire Labeler
@@ -52,4 +53,8 @@ WIRE_LABELER = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     fea_eligible=True,  # plain solid cylinder, span along X-equivalent axis -- same shape class longeron.py opts into; left True here since it IS the simple validated-methodology shape, not inferred for a compound one
+    # 2026-07-28 -- plain bd.Cylinder(radius, height=p.height_mm), centered at the origin along local
+    # Z by construction (identical shape/build to round_post.py, which already adopts this same
+    # helper) -- its two flat end faces are exactly what cylinder_end_interfaces expects.
+    interfaces=cylinder_end_interfaces("height_mm"),
 ))

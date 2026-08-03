@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 
 _FRAGMENT = """\
 ## Subsystem: Z-bracket
@@ -46,6 +46,27 @@ def _check(p):
     return []
 
 
+def _top_face(p):
+    """Local mate frame at the top flange's outer top face -- by construction (`_build`) the top
+    flange is `bd.Pos(-top_length_mm/2, 0, connector_height_mm + t/2) * Box(top_length_mm,
+    top_width_mm, t)`, i.e. NOT centered at the origin: its x-span is [-top_length_mm, 0] (center
+    -top_length_mm/2) and its z-span is [connector_height_mm, connector_height_mm + t]. The face at
+    z = connector_height_mm + t is the flange's free outer face -- typically the mounting face
+    (per the fragment) -- with nothing else in the union above it. Outward normal is +Z."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(-p.top_length_mm / 2.0, 0.0, p.connector_height_mm + p.thickness_mm),
+                 normal=(0.0, 0.0, 1.0))
+
+
+def _bottom_face(p):
+    """Local mate frame at the bottom flange's outer bottom face -- by construction the bottom
+    flange is `bd.Pos(bottom_length_mm/2, 0, t/2) * Box(bottom_length_mm, bottom_width_mm, t)`, i.e.
+    its x-span is [0, bottom_length_mm] (center bottom_length_mm/2) and its z-span is [0, t] -- z=0
+    is the flange's free outer face, nothing else in the union below it. Outward normal is -Z."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(p.bottom_length_mm / 2.0, 0.0, 0.0), normal=(0.0, 0.0, -1.0))
+
+
 Z_BRACKET = register_subsystem(Subsystem(
     name="z_bracket",
     description="Three-flange Z bracket — offset shelf mount",
@@ -60,4 +81,14 @@ Z_BRACKET = register_subsystem(Subsystem(
         ParamSpec("thickness_mm",        value=3.0,  min=0.8,  max=15.0,  unit="mm"),
     ],
     build=_build, volume=_volume, invariants=_check,
+    # 2026-07-28 (interface-coverage sweep, final wave): three fused boxes forming a Z -- neither
+    # `plate_face_interfaces` nor `box_face_interfaces` fits (two DIFFERENT-sized flanges, each offset
+    # off-center, not one box centered at the origin) -- bespoke frames computed from the two flanges'
+    # real, un-centered z/x offsets instead, same pattern as `stepped_spacer`'s bottom_face/top_face.
+    # `top_face` is the top flange's outer face (typically the mounting face per the fragment);
+    # `bottom_face` is the lower flange's outer face -- the bracket's two real mount points.
+    interfaces=[
+        InterfaceSpec(name="top_face", kind="mount", frame=_top_face),
+        InterfaceSpec(name="bottom_face", kind="mount", frame=_bottom_face),
+    ],
 ))

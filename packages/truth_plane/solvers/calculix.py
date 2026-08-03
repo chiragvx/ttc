@@ -123,7 +123,18 @@ def solve(mesh: Mesh, *, youngs_mod_mpa: float, poisson: float, tip_load_n: floa
     try:
         with open(job + ".inp", "w", encoding="utf-8") as fh:
             fh.write(deck)
-        proc = subprocess.run([ccx, "job"], cwd=workdir, capture_output=True, text=True, timeout=600)
+        # Scaffolding, not a determinism claim: pin the BLAS-related thread-count env vars for this
+        # ccx child process only (never mutate os.environ / the parent process) so run-to-run
+        # nondeterminism from multi-threaded BLAS reduction ordering (OpenMP/OpenBLAS/MKL summing
+        # partial sums in a thread-count- and scheduling-dependent order) is removed as a contributing
+        # factor. This does NOT mean ccx's numerics are now fully deterministic end to end, and it is
+        # NOT validated by a numerical or FEA domain expert -- per packages/truth_plane/CLAUDE.md and
+        # the root CLAUDE.md ("Numerical-determinism debugging" is a human-wall item), that validation
+        # is a separate, human-only step and must not be self-certified here.
+        ccx_env = {**os.environ, "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
+        proc = subprocess.run(
+            [ccx, "job"], cwd=workdir, capture_output=True, text=True, timeout=600, env=ccx_env,
+        )
         # A ccx run that fails (singular stiffness matrix, negative Jacobian, a solver warning) can
         # still leave a syntactically valid, parseable-but-degenerate .frd behind -- "did a .frd get
         # written" alone can't tell that apart from a real converged solve. Gate on the process exit

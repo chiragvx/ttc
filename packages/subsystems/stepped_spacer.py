@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -52,6 +52,22 @@ def _check(p) -> list[str]:
     return out
 
 
+def _bottom_face(p):
+    """Local mate frame at section1's free bottom face -- z=0 by construction (`_build` places
+    section1 from z=0 to z=len1_mm, NOT centered at the origin, unlike the generic cylinder helper).
+    Outward normal points -Z (away from the part)."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, 0.0), normal=(0.0, 0.0, -1.0))
+
+
+def _top_face(p):
+    """Local mate frame at section2's far top face -- z = len1_mm + len2_mm by construction (section2
+    sits stacked directly on top of section1). Outward normal is +Z."""
+    from packages.subsystems.base import Frame
+    z = p.len1_mm + p.len2_mm
+    return Frame(origin=(0.0, 0.0, z), normal=(0.0, 0.0, 1.0))
+
+
 STEPPED_SPACER = register_subsystem(Subsystem(
     name="stepped_spacer",
     description="Two-diameter cylindrical spacer -- structural/mounting geometry (FDM/FFF or CNC)",
@@ -67,4 +83,14 @@ STEPPED_SPACER = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    # 2026-07-28 (interface-coverage sweep, final wave): a stepped two-diameter shape -- section1
+    # (z=0..len1_mm) with section2 (z=len1_mm..+len2_mm) stacked on top, NOT centered at the origin,
+    # so `cylinder_end_interfaces` (assumes a single-diameter cylinder centered at the origin) doesn't
+    # fit -- bespoke frames computed from the part's own real z-offsets instead, same pattern as
+    # `socket_cap_bolt_blank`/`hex_bolt_blank`'s head/tip faces. `bottom_face` is section1's free end;
+    # `top_face` is section2's free end -- the spacer's two real mount faces.
+    interfaces=[
+        InterfaceSpec(name="bottom_face", kind="mount", frame=_bottom_face),
+        InterfaceSpec(name="top_face", kind="mount", frame=_top_face),
+    ],
 ))

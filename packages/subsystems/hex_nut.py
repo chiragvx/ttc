@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 
 _FRAGMENT = """\
 ## Subsystem: Hex nut
@@ -47,6 +47,23 @@ def _check(p):
     return out
 
 
+def _bottom_face(p):
+    """Local mate frame at the nut's bottom face -- z=0 by construction (`_build` extrudes the hex
+    sketch from z=0 to z=thickness_mm, NOT centered at the origin, unlike `cylinder_end_interfaces`'s
+    +/-height/2 assumption -- confirmed live: `bd.extrude(sketch, amount=p.thickness_mm)` on a sketch
+    on the default XY plane runs 0 -> amount, not centered). Outward normal points -Z (away from the
+    part), matching `Frame`'s anti-parallel-touching-normals mating convention."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, 0.0), normal=(0.0, 0.0, -1.0))
+
+
+def _top_face(p):
+    """Local mate frame at the nut's top face -- z=thickness_mm by construction (the far end of the
+    extrusion). Outward normal is +Z."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, p.thickness_mm), normal=(0.0, 0.0, 1.0))
+
+
 HEX_NUT = register_subsystem(Subsystem(
     name="hex_nut",
     description="Hex nut — hex prism with through-bore",
@@ -58,4 +75,14 @@ HEX_NUT = register_subsystem(Subsystem(
         ParamSpec("bore_dia_mm",     value=6.0,  min=2.0, max=45.0, unit="mm"),
     ],
     build=_build, volume=_volume, invariants=_check,
+    # 2026-07-28 (interface-coverage sweep, final wave): a hex prism extruded from a `RegularPolygon`
+    # sketch on the default XY plane, z=0..thickness_mm -- NOT centered at the origin, so
+    # `cylinder_end_interfaces`/`plate_face_interfaces` (both assume +/-half from center) don't fit;
+    # bespoke frames computed from the part's own real z-offsets instead, same pattern as
+    # `hex_bolt_blank`'s head/tip. `bottom`/`top` are the nut's two real flat bearing faces (e.g. one
+    # seats against a plate, the other against a washer/bolt head).
+    interfaces=[
+        InterfaceSpec(name="bottom", kind="mount", frame=_bottom_face),
+        InterfaceSpec(name="top", kind="mount", frame=_top_face),
+    ],
 ))

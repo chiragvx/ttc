@@ -7,7 +7,7 @@ heights at each end of the length.
 
 from __future__ import annotations
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -39,6 +39,25 @@ def _check(p) -> list[str]:
     return []
 
 
+def _heel_face(p):
+    """Local mate frame at the wedge's THICK end -- `_build` lofts `sec_a` (cross-section
+    height_a_mm x width_mm) at x=-length_mm/2, ruled straight to `sec_b` at x=+length_mm/2, and both
+    `Rectangle`s are centered on the origin by construction -- so this face's center sits exactly at
+    (-length_mm/2, 0, 0) regardless of the (different) height at each end, unlike `bar_end_interfaces`
+    which assumes a UNIFORM cross-section box. Outward normal is -X (this is the door stop's back/
+    heel, the tall end that sits proud of the floor)."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(-p.length_mm / 2.0, 0.0, 0.0), normal=(-1.0, 0.0, 0.0))
+
+
+def _toe_face(p):
+    """Local mate frame at the wedge's THIN end -- same construction as `_heel_face` but at
+    x=+length_mm/2. This is the door stop's toe/tip (the low, thin end that slides under the door),
+    outward normal +X."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(p.length_mm / 2.0, 0.0, 0.0), normal=(1.0, 0.0, 0.0))
+
+
 DOOR_STOP = register_subsystem(Subsystem(
     name="door_stop",
     description="Wedge + fastener boss -- structural/mounting geometry (FDM/FFF or CNC)",
@@ -53,4 +72,14 @@ DOOR_STOP = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    # 2026-07-28 (interface-coverage sweep, final wave): a linearly-tapered wedge (`bd.loft` between
+    # two DIFFERENT-height rectangular sections), not a uniform-cross-section box -- `bar_end_interfaces`
+    # doesn't fit its docstring contract (it assumes a plain `bd.Box`), so bespoke frames instead. Both
+    # `Rectangle`s are centered on the origin in Y/Z, so each end face's center still lands exactly on
+    # the local X axis at +/-length_mm/2 despite the taper -- `heel_face` (thick end) and `toe_face`
+    # (thin end) computed straight from that construction.
+    interfaces=[
+        InterfaceSpec(name="heel_face", kind="mount", frame=_heel_face),
+        InterfaceSpec(name="toe_face", kind="mount", frame=_toe_face),
+    ],
 ))

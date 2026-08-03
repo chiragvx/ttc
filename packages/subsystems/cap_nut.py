@@ -11,6 +11,7 @@ structural envelope/mounting geometry, not its full cosmetic profile.
 from __future__ import annotations
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import cylinder_end_interfaces
 
 _FRAGMENT = """\
 ## Subsystem: Cap Nut
@@ -52,4 +53,8 @@ CAP_NUT = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     fea_eligible=True,  # plain solid cylinder, span along X-equivalent axis -- same shape class longeron.py opts into; left True here since it IS the simple validated-methodology shape, not inferred for a compound one
+    # 2026-07-28 -- body is bd.Cylinder(radius=p.dia_mm/2, height=p.height_mm), identical construction
+    # to round_post.py, centered at the origin along local Z by default. Its two flat ends are real
+    # mount faces (a cap nut caps a threaded post/standoff from one end).
+    interfaces=cylinder_end_interfaces("height_mm"),
 ))

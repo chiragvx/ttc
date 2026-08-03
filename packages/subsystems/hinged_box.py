@@ -9,6 +9,7 @@ catalog's established "one archetype, many named catalog entries" convention.
 from __future__ import annotations
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import box_face_interfaces
 
 _MIN_WALL_MM = 0.8
 
@@ -62,4 +63,5 @@ HINGED_BOX = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     fea_eligible=False,
+    interfaces=box_face_interfaces("width_mm", "depth_mm", "height_mm"),  # 2026-07-27
 ))

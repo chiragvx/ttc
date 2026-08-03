@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import cylinder_end_interfaces
 
 _MIN_WALL_MM = 0.8
 
@@ -85,4 +86,5 @@ FENDER_WASHER = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    interfaces=cylinder_end_interfaces("thickness_mm"),  # 2026-07-27
 ))

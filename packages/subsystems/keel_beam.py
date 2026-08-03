@@ -11,7 +11,7 @@ here from shape alone.
 
 from __future__ import annotations
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import ParamSpec, Subsystem, bar_end_interfaces, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -58,4 +58,5 @@ KEEL_BEAM = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    interfaces=bar_end_interfaces("length_mm"),  # a Box extruded along length (local X), centered at origin
 ))

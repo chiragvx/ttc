@@ -11,6 +11,7 @@ structural envelope/mounting geometry, not its full cosmetic profile.
 from __future__ import annotations
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import cylinder_end_interfaces
 
 _FRAGMENT = """\
 ## Subsystem: Knurled Nut
@@ -52,4 +53,8 @@ KNURLED_NUT = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     fea_eligible=True,  # plain solid cylinder, span along X-equivalent axis -- same shape class longeron.py opts into; left True here since it IS the simple validated-methodology shape, not inferred for a compound one
+    # 2026-07-28 -- bd.Cylinder(radius=dia_mm/2, height=height_mm), centered at the origin along local
+    # Z by build123d default (no rotation) -- exactly the round_post.py / cylinder_end_interfaces shape
+    # family confirmed by reading this file's own _build directly before reuse.
+    interfaces=cylinder_end_interfaces("height_mm"),
 ))

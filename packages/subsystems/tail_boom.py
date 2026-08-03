@@ -9,6 +9,7 @@ archetype, many named catalog entries" convention.
 from __future__ import annotations
 
 from packages.subsystems import ParamSpec, Subsystem, bar_end_interfaces, register_subsystem
+from packages.subsystems.base import FitProfile
 
 _MIN_WALL_MM = 0.8
 
@@ -61,4 +62,7 @@ TAIL_BOOM = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     interfaces=bar_end_interfaces("length_mm"),  # 2026-07-20 — a bar mates end-to-end at its two tips
+    # 2026-07-27 — a square tube's own cross-section (outer_side_mm both ways, no width_mm/height_mm
+    # params here); a rect fit onto it only succeeds since this section is already square.
+    fit_profile=lambda p: FitProfile(kind="rect", dims={"width_mm": p.outer_side_mm, "height_mm": p.outer_side_mm}),
 ))

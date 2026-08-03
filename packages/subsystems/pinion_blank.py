@@ -11,6 +11,7 @@ structural envelope/mounting geometry, not its full cosmetic profile.
 from __future__ import annotations
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import cylinder_end_interfaces
 
 _FRAGMENT = """\
 ## Subsystem: Pinion Blank
@@ -52,4 +53,8 @@ PINION_BLANK = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     fea_eligible=True,  # plain solid cylinder, span along X-equivalent axis -- same shape class longeron.py opts into; left True here since it IS the simple validated-methodology shape, not inferred for a compound one
+    # a plain bd.Cylinder(radius=dia_mm/2, height=height_mm) centered at the origin, standing along
+    # local Z by default (no rotation) -- the exact shape cylinder_end_interfaces documents (see
+    # round_post.py). A gear blank stacks/mounts on its two flat end faces just like a round post.
+    interfaces=cylinder_end_interfaces("height_mm"),
 ))

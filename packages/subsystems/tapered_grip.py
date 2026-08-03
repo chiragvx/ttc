@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -52,6 +52,24 @@ def _check(p) -> list[str]:
     return out
 
 
+def _base_face(p):
+    """Local mate frame at the grip's base (the wider, dia1 section) -- z=0 by construction (`_build`
+    places section1 from z=0 to z=len1_mm, NOT centered at the origin, unlike the generic
+    `cylinder_end_interfaces` helper which assumes a single-diameter cylinder centered on the
+    origin). This is the face that seats against whatever the grip mounts to, so its outward normal
+    points -Z (away from the part)."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, 0.0), normal=(0.0, 0.0, -1.0))
+
+
+def _tip_face(p):
+    """Local mate frame at the grip's tip (the narrower, dia2 section) -- z = len1_mm + len2_mm by
+    construction (section2 sits stacked directly on top of section1). Outward normal is +Z."""
+    from packages.subsystems.base import Frame
+    z = p.len1_mm + p.len2_mm
+    return Frame(origin=(0.0, 0.0, z), normal=(0.0, 0.0, 1.0))
+
+
 TAPERED_GRIP = register_subsystem(Subsystem(
     name="tapered_grip",
     description="Ergonomic tapered grip -- structural/mounting geometry (FDM/FFF or CNC)",
@@ -67,4 +85,15 @@ TAPERED_GRIP = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    # 2026-07-28 (interface-coverage sweep, final wave): a stepped two-diameter shape -- section1
+    # (z=0..len1_mm, dia1) with a narrower section2 stacked on top (z=len1_mm..+len2_mm, dia2), NOT
+    # centered at the origin, so `cylinder_end_interfaces` (assumes a single-diameter cylinder
+    # centered on the origin) doesn't fit -- bespoke frames computed from the part's own real
+    # z-offsets instead (identical shape/construction to `flanged_bushing`'s flange+shaft, same
+    # bespoke-interface treatment). `base_face` is the wide-end mounting face; `tip_face` is the
+    # narrow end's free face.
+    interfaces=[
+        InterfaceSpec(name="base_face", kind="mount", frame=_base_face),
+        InterfaceSpec(name="tip_face", kind="mount", frame=_tip_face),
+    ],
 ))

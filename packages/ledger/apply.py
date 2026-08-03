@@ -26,15 +26,18 @@ from typing import Callable, Optional
 
 from pydantic import ValidationError
 
-from packages.ledger.deltas import ConnectionOp, CouplingOp, FeatureOp, InstanceOp, ParameterDelta, is_forbidden_target
-from packages.ledger.parameter import LockState, ParameterDef
+from packages.ledger.deltas import ConnectionOp, CouplingOp, FeatureOp, FitOp, InstanceOp, JoinAnnotationOp, ParameterDelta, is_forbidden_target
+from packages.ledger.parameter import LockState, ParameterDef, ParamSource
 from packages.ledger.schema import (
     Connection,
     Coupling,
     CouplingInput,
     CutFeature,
+    FitBinding,
+    FitInput,
     Instance,
     InterfaceRef,
+    JoinAnnotation,
     MasterParametricLedger,
     Transform,
 )
@@ -79,6 +82,12 @@ class ApplyOutcome:
     new_value: float | str | None = None
     message: str = ""
     cascades: list[CascadeEffect] = field(default_factory=list)
+    # 2026-08-01 (scoped MVP — a single passthrough tag): the triggering ParameterDelta's own
+    # `source` (packages/ledger/deltas.py), threaded through here so it survives the apply_delta/
+    # _apply_string_delta call rather than being silently dropped — purely descriptive, for later
+    # display; never read by any validation/acceptance logic in this module. Defaults to "unsourced"
+    # exactly like ParameterDelta.source, so every pre-existing outcome/test keeps behaving as today.
+    source: ParamSource = "unsourced"
 
     @property
     def changed(self) -> bool:
@@ -161,17 +170,24 @@ def _apply_string_delta(
     own CascadeRule with a string would break its float-typed arithmetic)."""
     from packages.ledger.bom import MATERIAL_DB  # same-package import — bom.py already lives in packages/ledger
 
+    def _outcome(*args, **kwargs) -> ApplyOutcome:
+        """Local factory so every ApplyOutcome this function returns carries `delta.source` without
+        repeating it at each of the many early-return call sites below (see ApplyOutcome.source's own
+        docstring for why this must never be silently dropped)."""
+        kwargs.setdefault("source", delta.source)
+        return ApplyOutcome(*args, **kwargs)
+
     target = delta.target_node
     requested = delta.requested_value
     if not isinstance(requested, str):
-        return ledger, ApplyOutcome(
+        return ledger, _outcome(
             ApplyStatus.REJECTED, target, old_value=current,
             message=f"{target} is a string-valued node — requested_value must be a string, not {requested!r}")
     if delta.set_lock is not None:
-        return ledger, ApplyOutcome(ApplyStatus.REJECTED, target, old_value=current,
-                                    message="cannot set_lock on a string-valued node")
+        return ledger, _outcome(ApplyStatus.REJECTED, target, old_value=current,
+                                message="cannot set_lock on a string-valued node")
     if requested not in MATERIAL_DB:
-        return ledger, ApplyOutcome(
+        return ledger, _outcome(
             ApplyStatus.REJECTED, target, old_value=current,
             message=f"unknown material {requested!r} (known: {sorted(MATERIAL_DB)})")
 
@@ -181,9 +197,9 @@ def _apply_string_delta(
 
     violations = check_invariants(new_ledger, domain_checks)
     if violations:
-        return ledger, ApplyOutcome(ApplyStatus.CONFLICT, target, old_value=current,
-                                    new_value=requested, message="; ".join(violations))
-    return new_ledger, ApplyOutcome(ApplyStatus.APPLIED, target, old_value=current, new_value=requested)
+        return ledger, _outcome(ApplyStatus.CONFLICT, target, old_value=current,
+                                new_value=requested, message="; ".join(violations))
+    return new_ledger, _outcome(ApplyStatus.APPLIED, target, old_value=current, new_value=requested)
 
 
 def apply_delta(
@@ -192,28 +208,35 @@ def apply_delta(
     domain_checks: Optional[Callable[[MasterParametricLedger], list[str]]] = None,
     cascade_rules: Optional[CascadeRule] = None,
 ) -> tuple[MasterParametricLedger, ApplyOutcome]:
+    def _outcome(*args, **kwargs) -> ApplyOutcome:
+        """Local factory so every ApplyOutcome this function returns carries `delta.source` without
+        repeating it at each of the many early-return call sites below (see ApplyOutcome.source's own
+        docstring for why this must never be silently dropped)."""
+        kwargs.setdefault("source", delta.source)
+        return ApplyOutcome(*args, **kwargs)
+
     target = delta.target_node
     if is_forbidden_target(target):
-        return ledger, ApplyOutcome(ApplyStatus.REJECTED, target, message="LLM may not write derived/review nodes")
+        return ledger, _outcome(ApplyStatus.REJECTED, target, message="LLM may not write derived/review nodes")
 
     parent, attr, current = _resolve(ledger, target)
     if parent is None:
-        return ledger, ApplyOutcome(ApplyStatus.REJECTED, target, message="unknown or non-tunable node")
+        return ledger, _outcome(ApplyStatus.REJECTED, target, message="unknown or non-tunable node")
 
     if isinstance(current, str):
         return _apply_string_delta(ledger, delta, parent, attr, current, domain_checks)
 
     if not isinstance(current, ParameterDef):
-        return ledger, ApplyOutcome(ApplyStatus.REJECTED, target, message="unknown or non-tunable node")
+        return ledger, _outcome(ApplyStatus.REJECTED, target, message="unknown or non-tunable node")
 
     if current.is_locked:
-        return ledger, ApplyOutcome(ApplyStatus.REJECTED, target, old_value=current.value,
-                                    message="HARD_LOCK parameter is frozen")
+        return ledger, _outcome(ApplyStatus.REJECTED, target, old_value=current.value,
+                                message="HARD_LOCK parameter is frozen")
 
     requested = delta.requested_value
     if not isinstance(requested, (int, float)):
-        return ledger, ApplyOutcome(ApplyStatus.REJECTED, target, old_value=current.value,
-                                    message=f"{target} is a numeric node — requested_value must be a number, not {requested!r}")
+        return ledger, _outcome(ApplyStatus.REJECTED, target, old_value=current.value,
+                                message=f"{target} is a numeric node — requested_value must be a number, not {requested!r}")
 
     lo, hi = current.bounds
     outside_recommended = not (lo <= requested <= hi)
@@ -242,17 +265,17 @@ def apply_delta(
 
     violations = check_invariants(new_ledger, domain_checks)
     if violations:
-        return ledger, ApplyOutcome(ApplyStatus.CONFLICT, target, old_value=current.value,
-                                    new_value=requested, message="; ".join(violations))
+        return ledger, _outcome(ApplyStatus.CONFLICT, target, old_value=current.value,
+                                new_value=requested, message="; ".join(violations))
 
     if outside_recommended:
         msg = f"{requested} is outside recommended range [{lo}, {hi}] — applied on copilot judgment"
-        return new_ledger, ApplyOutcome(ApplyStatus.APPLIED_ADVISORY, target,
-                                        old_value=current.value, new_value=requested, message=msg,
-                                        cascades=cascade_effects)
-    return new_ledger, ApplyOutcome(ApplyStatus.APPLIED, target,
-                                    old_value=current.value, new_value=requested, message="",
+        return new_ledger, _outcome(ApplyStatus.APPLIED_ADVISORY, target,
+                                    old_value=current.value, new_value=requested, message=msg,
                                     cascades=cascade_effects)
+    return new_ledger, _outcome(ApplyStatus.APPLIED, target,
+                                old_value=current.value, new_value=requested, message="",
+                                cascades=cascade_effects)
 
 
 # --- FeatureOp: the rules validator for hole/pocket/slot cuts -----------------------------------
@@ -987,3 +1010,261 @@ def apply_coupling_op(
     new_ledger = ledger.model_copy(update={"couplings": [*ledger.couplings, coupling]})
     return new_ledger, CouplingOpOutcome(ApplyStatus.APPLIED, coupling.id, coupling=coupling,
                                          message=f"coupled {op.target_instance} <- {op.relation}(...)")
+
+
+@dataclass
+class FitOpOutcome:
+    """FitOp's analog of CouplingOpOutcome. Carries the resolved FitBinding (wired/unwired) plus the
+    ParameterDeltas actually applied for each dimension the fit wrote — the caller (packages/transport/
+    app.py) logs these via `EventLog.append_fit_bound`/`append_fit_resynced` so replay can re-apply
+    them exactly (mirrors how PARAMETER_MUTATION's own replay re-runs apply_delta)."""
+
+    status: ApplyStatus
+    fit_id: Optional[str]
+    binding: Optional[FitBinding] = None
+    deltas: list[ParameterDelta] = field(default_factory=list)
+    delta_outcomes: list[ApplyOutcome] = field(default_factory=list)
+    message: str = ""
+
+    @property
+    def changed(self) -> bool:
+        return self.status in (ApplyStatus.APPLIED, ApplyStatus.APPLIED_ADVISORY)
+
+
+def _next_fit_id(ledger: MasterParametricLedger) -> str:
+    existing = {f.id for f in ledger.fit_bindings}
+    n = 1
+    while f"fit_{n}" in existing:
+        n += 1
+    return f"fit_{n}"
+
+
+# Rough, honest placeholder clearances by join method (mm) -- NOT a handbook tolerance value, a
+# neutral starting point when the caller didn't state one AND a JoinAnnotation gives SOME signal
+# about intent. Per CLAUDE.md's human-wall list, a REAL manufacturing-tolerance number (material/
+# process-dependent) needs an engineer's sign-off before being treated as authoritative -- this only
+# exists so an omitted clearance isn't silently wrong-signed (a press-fit defaulting to a clearance
+# gap would be backwards), not to fabricate precision this system doesn't have.
+_DEFAULT_CLEARANCE_BY_METHOD_MM: dict[str, float] = {
+    "press_fit": -0.1, "bolted": 0.3, "welded": 0.0, "adhesive": 0.1, "custom": 0.0,
+}
+
+
+def _default_clearance_from_join_annotation(ledger: MasterParametricLedger, connector_id: str, host_id: str) -> float:
+    """When `fit_connector` omits `clearance_mm`, check whether a JoinAnnotation already exists on a
+    Connection between these exact two instances (either direction) and use its `method` to pick a
+    sign-appropriate placeholder default (see `_DEFAULT_CLEARANCE_BY_METHOD_MM` above). Falls back to
+    0.0 (a neutral nominal fit, unchanged from the pre-JoinAnnotation default) when no connection or
+    no annotation exists — this NEVER blocks `fit_connector`, it only tries to pick a better-than-
+    nothing default when real signal is available. `JoinAnnotation.method` is read here, never
+    written — `FitBinding` never stores its own copy of it (see FitBinding's own docstring)."""
+    conn_id = next((c.id for c in ledger.connections
+                    if {c.a.instance_id, c.b.instance_id} == {connector_id, host_id}), None)
+    if conn_id is None:
+        return 0.0
+    annotation = next((j for j in ledger.join_annotations if j.connection_id == conn_id), None)
+    if annotation is None:
+        return 0.0
+    return _DEFAULT_CLEARANCE_BY_METHOD_MM.get(annotation.method, 0.0)
+
+
+def apply_fit_op(
+    ledger: MasterParametricLedger,
+    op: FitOp,
+    compute_fit: Callable[[MasterParametricLedger, str, str, float], "object"],
+    is_managed_child: Callable[[MasterParametricLedger, str], bool],
+    check_invariants: Callable[[MasterParametricLedger, str], list[str]],
+) -> tuple[MasterParametricLedger, FitOpOutcome]:
+    """Apply one FitOp (wire/unwire/resync a typed fit binding). Returns a NEW ledger + outcome;
+    original never mutated (same event-sourcing convention as apply_coupling_op).
+
+    This package stays registry-free (`packages/ledger/CLAUDE.md`) — `compute_fit` (the actual
+    cross-section arithmetic, living in `packages.subsystems.fit`), `is_managed_child` (whether an
+    instance is an assembly_template-generated child whose params get silently overwritten every
+    reconcile pass), and `check_invariants(ledger, instance_id)` (that instance's own subsystem-level
+    invariants — e.g. spar_joiner_sleeve's own "bore >= outer diameter, no wall left" check) are
+    injected, mirroring `apply_coupling_op`'s `known_relations`/`inputs_of` injection exactly — this
+    function never imports `packages.subsystems`. `check_invariants` mirrors the SAME
+    `_s.check_invariants(ledger, _t)` lambda `SessionState.mutate()` (packages/transport/app.py)
+    already builds for an ordinary hand-typed delta — a fit-derived delta must be checked exactly the
+    same way, not exempted from invariants just because it was computed rather than typed.
+
+    `compute_fit(ledger, connector_id, host_id, clearance_mm)` returns an object with `.ok: bool`,
+    `.kind: Optional[str]`, `.values: dict[str, float]` (connector_param -> computed value),
+    `.dim_map: dict[str, str]` (host_param -> connector_param, recorded on the FitBinding for later
+    drift-checking), `.reason: Optional[str]` (set when `.ok` is False).
+
+    Every dimension a fit computes is written through the SAME `apply_delta` path any hand-typed
+    ParameterDelta uses — including its bounds policy: `packages/ledger/CLAUDE.md`'s "bounds are
+    ADVISORY, not a hard construction-time clamp" is a deliberate, system-wide, uniform rule (a user
+    asking for 14 legs on a table gets 14, not silently clamped to 12) and a fit-derived value is not
+    a special case that overrides it — a fit whose computed dimension falls outside the connector's
+    recommended range still applies, as APPLIED_ADVISORY, exactly like a hand-typed one would. Only a
+    HARD_LOCK or a genuine cross-field invariant violation (REJECTED/CONFLICT) backs the WHOLE fit out
+    atomically — none of the dimensions are applied and no FitBinding is recorded, so a connector never
+    ends up half-fitted."""
+    if op.op == "unfit_connector":
+        if not op.id:
+            return ledger, FitOpOutcome(ApplyStatus.REJECTED, None, message="unfit_connector requires id")
+        match = next((f for f in ledger.fit_bindings if f.id == op.id), None)
+        if match is None:
+            return ledger, FitOpOutcome(ApplyStatus.REJECTED, op.id, message=f"unknown fit id {op.id!r}")
+        new = ledger.model_copy(update={"fit_bindings": [f for f in ledger.fit_bindings if f.id != op.id]})
+        return new, FitOpOutcome(
+            ApplyStatus.APPLIED, op.id, binding=match,
+            message=f"unwired fit {op.id} — the connector KEEPS its last-fitted dimensions (unfitting "
+                    f"doesn't revert geometry, same as removing a coupling doesn't un-derive a load)")
+
+    if op.op not in ("fit_connector", "resync_fit"):
+        return ledger, FitOpOutcome(ApplyStatus.REJECTED, op.id, message=f"unknown op {op.op!r}")
+
+    if op.op == "resync_fit":
+        if not op.id:
+            return ledger, FitOpOutcome(ApplyStatus.REJECTED, None, message="resync_fit requires id")
+        existing = next((f for f in ledger.fit_bindings if f.id == op.id), None)
+        if existing is None:
+            return ledger, FitOpOutcome(ApplyStatus.REJECTED, op.id, message=f"unknown fit id {op.id!r}")
+        connector_id = existing.connector_instance
+        host_id = existing.host_instance
+        clearance = existing.clearance_mm
+        fit_id = op.id
+    else:
+        missing = [f for f in ("connector_instance", "host_instance") if getattr(op, f) is None]
+        if missing:
+            return ledger, FitOpOutcome(ApplyStatus.REJECTED, op.id,
+                                        message=f"fit_connector requires {', '.join(missing)}")
+        if op.connector_instance not in ledger.instances:
+            return ledger, FitOpOutcome(ApplyStatus.REJECTED, op.id,
+                                        message=f"unknown instance {op.connector_instance!r}")
+        if op.host_instance not in ledger.instances:
+            return ledger, FitOpOutcome(ApplyStatus.REJECTED, op.id,
+                                        message=f"unknown instance {op.host_instance!r}")
+        if op.connector_instance == op.host_instance:
+            return ledger, FitOpOutcome(ApplyStatus.REJECTED, op.id,
+                                        message="a connector cannot be fitted to itself")
+        if op.id is not None and any(f.id == op.id for f in ledger.fit_bindings):
+            return ledger, FitOpOutcome(ApplyStatus.REJECTED, op.id, message=f"fit id {op.id!r} already exists")
+        if any(f.connector_instance == op.connector_instance for f in ledger.fit_bindings):
+            return ledger, FitOpOutcome(
+                ApplyStatus.REJECTED, op.id,
+                message=f"{op.connector_instance!r} already has a live fit binding — unfit it first, or "
+                        f"use resync_fit if the host's dimensions just changed (v1: one fit per connector)")
+        if is_managed_child(ledger, op.connector_instance):
+            return ledger, FitOpOutcome(
+                ApplyStatus.REJECTED, op.id,
+                message=f"{op.connector_instance!r} is a managed assembly-template child — its params "
+                        f"are overwritten every reconcile pass, so a direct fit would be silently "
+                        f"discarded on the next read. Route the shared dimension through the master's "
+                        f"own params instead (the same way table.py's leg_dia_mm already reaches every leg).")
+        connector_id = op.connector_instance
+        host_id = op.host_instance
+        clearance = (op.clearance_mm if op.clearance_mm is not None
+                    else _default_clearance_from_join_annotation(ledger, connector_id, host_id))
+        fit_id = op.id if op.id is not None else _next_fit_id(ledger)
+
+    result = compute_fit(ledger, connector_id, host_id, clearance)
+    if not result.ok:
+        return ledger, FitOpOutcome(ApplyStatus.REJECTED, fit_id, message=result.reason or "fit could not be computed")
+
+    working = ledger
+    deltas: list[ParameterDelta] = []
+    delta_outcomes: list[ApplyOutcome] = []
+    domain_checks = lambda led: check_invariants(led, connector_id)  # noqa: E731
+    for connector_param, value in result.values.items():
+        d = ParameterDelta(target_node=f"instances.{connector_id}.params.{connector_param}",
+                           requested_value=value, rationale=op.rationale or f"fitted from {host_id}")
+        working, outcome = apply_delta(working, d, domain_checks=domain_checks)
+        deltas.append(d)
+        delta_outcomes.append(outcome)
+        if outcome.status in (ApplyStatus.REJECTED, ApplyStatus.CONFLICT):
+            return ledger, FitOpOutcome(
+                ApplyStatus.REJECTED, fit_id, delta_outcomes=delta_outcomes,
+                message=f"{connector_param}: {outcome.message} — the fit was NOT applied (all-or-"
+                        f"nothing; {connector_id}'s params are unchanged)")
+
+    if op.op == "resync_fit":
+        return working, FitOpOutcome(ApplyStatus.APPLIED, fit_id, binding=existing, deltas=deltas,
+                                     delta_outcomes=delta_outcomes,
+                                     message=f"resynced fit {fit_id} against {host_id}'s current dimensions")
+
+    binding = FitBinding(
+        id=fit_id, connector_instance=connector_id, host_instance=host_id, kind=result.kind,
+        inputs=[FitInput(host_param=hp, connector_param=cp) for hp, cp in result.dim_map.items()],
+        clearance_mm=clearance,
+    )
+    working = working.model_copy(update={"fit_bindings": [*working.fit_bindings, binding]})
+    return working, FitOpOutcome(ApplyStatus.APPLIED, fit_id, binding=binding, deltas=deltas,
+                                 delta_outcomes=delta_outcomes, message=f"fitted {connector_id} <- {host_id}")
+
+
+@dataclass
+class JoinAnnotationOpOutcome:
+    """JoinAnnotationOp's analog of CouplingOpOutcome. Carries the resolved JoinAnnotation (added or
+    removed)."""
+
+    status: ApplyStatus
+    join_id: Optional[str]
+    annotation: Optional[JoinAnnotation] = None
+    message: str = ""
+
+    @property
+    def changed(self) -> bool:
+        return self.status is ApplyStatus.APPLIED
+
+
+def _next_join_id(ledger: MasterParametricLedger) -> str:
+    existing = {j.id for j in ledger.join_annotations}
+    n = 1
+    while f"join_{n}" in existing:
+        n += 1
+    return f"join_{n}"
+
+
+def apply_join_annotation_op(
+    ledger: MasterParametricLedger, op: JoinAnnotationOp,
+) -> tuple[MasterParametricLedger, JoinAnnotationOpOutcome]:
+    """Apply one JoinAnnotationOp (add/remove semantic HOW-joined data on an existing Connection).
+    Returns a NEW ledger + outcome; original never mutated (same event-sourcing convention as
+    apply_coupling_op). No injected callables needed — unlike CouplingOp/FitOp, this never touches the
+    subsystem registry or a part's own params; `connection_id` is checked against `ledger.connections`
+    directly, already in scope in this registry-free package."""
+    if op.op == "remove_join_annotation":
+        if not op.id:
+            return ledger, JoinAnnotationOpOutcome(ApplyStatus.REJECTED, None,
+                                                   message="remove_join_annotation requires id")
+        match = next((j for j in ledger.join_annotations if j.id == op.id), None)
+        if match is None:
+            return ledger, JoinAnnotationOpOutcome(ApplyStatus.REJECTED, op.id,
+                                                   message=f"unknown join annotation id {op.id!r}")
+        new = ledger.model_copy(update={
+            "join_annotations": [j for j in ledger.join_annotations if j.id != op.id]})
+        return new, JoinAnnotationOpOutcome(ApplyStatus.APPLIED, op.id, annotation=match,
+                                            message=f"removed join annotation {op.id}")
+
+    if op.op != "add_join_annotation":
+        return ledger, JoinAnnotationOpOutcome(ApplyStatus.REJECTED, op.id, message=f"unknown op {op.op!r}")
+
+    missing = [f for f in ("connection_id", "method") if getattr(op, f) is None]
+    if missing:
+        return ledger, JoinAnnotationOpOutcome(ApplyStatus.REJECTED, op.id,
+                                               message=f"add_join_annotation requires {', '.join(missing)}")
+    if not any(c.id == op.connection_id for c in ledger.connections):
+        return ledger, JoinAnnotationOpOutcome(
+            ApplyStatus.REJECTED, op.id,
+            message=f"unknown connection {op.connection_id!r} — the two parts must already be "
+                    f"connection_ops-mated before annotating HOW they're joined")
+    if op.id is not None and any(j.id == op.id for j in ledger.join_annotations):
+        return ledger, JoinAnnotationOpOutcome(ApplyStatus.REJECTED, op.id,
+                                               message=f"join annotation id {op.id!r} already exists")
+    if any(j.connection_id == op.connection_id for j in ledger.join_annotations):
+        return ledger, JoinAnnotationOpOutcome(
+            ApplyStatus.REJECTED, op.id,
+            message=f"connection {op.connection_id!r} already has a join annotation — remove it "
+                    f"first if you want to change the method (v1: one annotation per connection)")
+
+    join_id = op.id if op.id is not None else _next_join_id(ledger)
+    annotation = JoinAnnotation(id=join_id, connection_id=op.connection_id, method=op.method,
+                                fastener=op.fastener, note=op.note)
+    new_ledger = ledger.model_copy(update={"join_annotations": [*ledger.join_annotations, annotation]})
+    return new_ledger, JoinAnnotationOpOutcome(ApplyStatus.APPLIED, join_id, annotation=annotation,
+                                               message=f"annotated connection {op.connection_id} as {op.method}")

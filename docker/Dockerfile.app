@@ -18,6 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxft2 libxrandr2 libxi6 libxmu6 libsm6 libice6 \
     && rm -rf /var/lib/apt/lists/*
 
+# --- non-root runtime user (containers must not run as root by default) ---
+RUN groupadd --gid 1000 appuser \
+    && useradd --uid 1000 --gid appuser --create-home --shell /usr/sbin/nologin appuser
+
 ENV OMP_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 
@@ -27,6 +31,10 @@ RUN pip install --upgrade pip && pip install -r constraints/kernel-linux.txt
 COPY . .
 RUN pip install -e ".[serve,worker]"
 COPY --from=frontend /fe/dist /app/packages/frontend/dist
+
+# Hand ownership of the app tree (code + built SPA) to the non-root user, then drop root before CMD.
+RUN chown -R appuser:appuser /app
+USER appuser
 
 EXPOSE 8000
 CMD ["uvicorn", "packages.transport.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

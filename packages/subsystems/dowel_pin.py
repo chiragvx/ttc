@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import cylinder_end_interfaces
 
 _FRAGMENT = """\
 ## Subsystem: Dowel pin
@@ -41,4 +42,10 @@ DOWEL_PIN = register_subsystem(Subsystem(
         ParamSpec("length_mm", value=20.0, min=3.0, max=150.0, unit="mm"),
     ],
     build=_build, volume=_volume, invariants=_check,
+    # 2026-07-28 — a solid cylinder built via bd.Cylinder(radius, height=p.length_mm), centered on the
+    # origin along local Z by build123d's default (same convention confirmed for round_post/etc), so
+    # its two flat end faces are exactly what cylinder_end_interfaces expects. A dowel pin mates
+    # between two parts' bores by its two ends — no bottom/top asymmetry to name around, so the
+    # helper's default names are kept as-is.
+    interfaces=cylinder_end_interfaces("length_mm"),
 ))

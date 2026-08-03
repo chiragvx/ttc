@@ -8,7 +8,7 @@ catalog's established "one archetype, many named catalog entries" convention.
 
 from __future__ import annotations
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import ParamSpec, Subsystem, lbracket_interfaces, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -60,4 +60,5 @@ MIC_CLIP = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    interfaces=lbracket_interfaces("leg_a_mm", "leg_b_mm", "thickness_mm"),  # 2026-07-27
 ))

@@ -1,4 +1,4 @@
-import type { ChatEvent, ConnectionOp, CouplingOp, CutFeature, FeatureOp, InstanceOp, InstanceSnapshot, LedgerGraphData, ManufacturingManifest, MeshData, PickableFeature, TelemetryDelta, ValidationResult } from "./types";
+import type { ChatEvent, ConnectionOp, CouplingOp, CutFeature, FeatureOp, FitOp, InstanceOp, InstanceSnapshot, LedgerGraphData, ManufacturingManifest, MeshData, PickableFeature, TelemetryDelta, ValidationResult } from "./types";
 import { loadSettings, type LlmSettings } from "./settings";
 
 // REST + SSE calls to the FastAPI backend (proxied by Vite in dev).
@@ -162,6 +162,60 @@ export async function applyCouplingOp(op: CouplingOp): Promise<CouplingOpApplyRe
   // a backend without this route (older build) returns 404/HTML — surface a clear message instead of
   // a cryptic JSON-parse error (mirrors applyConnectionOp's 2026-07-19 review fix)
   if (!res.ok) throw new Error(`coupling endpoint unavailable (HTTP ${res.status})`);
+  return res.json();
+}
+
+// --- FitOp (2026-07-27): wire/unwire/resync a typed fitted-dimension binding (connector <- host).
+// Posted VERBATIM as received in a "proposal" SSE event; mirrors applyCouplingOp above.
+export interface FitOpApplyResponse {
+  ok: boolean;
+  status: "APPLIED" | "REJECTED" | "CONFLICT";
+  fit_id: string | null;
+  binding: unknown | null;
+  message: string;
+}
+export async function applyFitOp(op: FitOp): Promise<FitOpApplyResponse> {
+  const res = await apiFetch("/fit_ops", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(op),
+  });
+  // a backend without this route (older build) returns 404/HTML — surface a clear message instead of
+  // a cryptic JSON-parse error (mirrors applyConnectionOp/applyCouplingOp's same-day fix)
+  if (!res.ok) throw new Error(`fit endpoint unavailable (HTTP ${res.status})`);
+  return res.json();
+}
+
+// --- JoinAnnotationOp (2026-07-27): record HOW two already-connected parts are physically joined
+// (bolted/press_fit/welded/adhesive/custom) — purely semantic BOM data, never touches geometry
+// (contrast FitOp above). Posted VERBATIM as received in a "proposal" SSE event; mirrors applyFitOp.
+//
+// NOTE: JoinAnnotationOp is defined locally here (not imported from ./types) because it lands in
+// this same batch from a parallel agent and wasn't present in types.ts as of this writing — the
+// shape below mirrors packages/ledger/deltas.py::JoinAnnotationOp's real field names exactly.
+// Reconcile with (i.e. replace this local definition + the import above with) types.ts's version
+// once that lands.
+export interface JoinAnnotationOp {
+  op: "add_join_annotation" | "remove_join_annotation";
+  id?: string | null;
+  connection_id?: string | null;
+  method?: "bolted" | "press_fit" | "welded" | "adhesive" | "custom" | null;
+  fastener?: string | null;
+  note?: string | null;
+  rationale?: string | null;
+}
+export interface JoinAnnotationOpApplyResponse {
+  ok: boolean;
+  status: "APPLIED" | "REJECTED" | "CONFLICT";
+  join_id: string | null;
+  annotation: unknown | null;
+  message: string;
+}
+export async function applyJoinAnnotationOp(op: JoinAnnotationOp): Promise<JoinAnnotationOpApplyResponse> {
+  const res = await apiFetch("/join_annotation_ops", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(op),
+  });
+  // a backend without this route (older build) returns 404/HTML — surface a clear message instead of
+  // a cryptic JSON-parse error (mirrors applyConnectionOp/applyCouplingOp/applyFitOp's same-day fix)
+  if (!res.ok) throw new Error(`join annotation endpoint unavailable (HTTP ${res.status})`);
   return res.json();
 }
 

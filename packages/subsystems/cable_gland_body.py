@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import Frame, InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -52,6 +52,21 @@ def _check(p) -> list[str]:
     return out
 
 
+def _base_face(p) -> Frame:
+    """The z=0 end of section1 (the first, typically-larger-diameter section, per `_build`'s
+    `c1 = Pos(0, 0, len1/2) * Cylinder(dia1/2, len1)`) -- the part is NOT centered at the origin like
+    `cylinder_end_interfaces` assumes (it stacks upward from z=0), so that generic helper doesn't fit;
+    this bespoke pair computes the real end z's instead. `normal` points OUTWARD (-Z), away from the
+    stack, matching `Frame`'s anti-parallel-touching-normals mating convention."""
+    return Frame(origin=(0.0, 0.0, 0.0), normal=(0.0, 0.0, -1.0))
+
+
+def _tip_face(p) -> Frame:
+    """The far end of section2 (the second, typically-smaller-diameter/cable-exit section), at
+    z = len1_mm + len2_mm per `_build`'s stacking. `normal` points OUTWARD (+Z)."""
+    return Frame(origin=(0.0, 0.0, p.len1_mm + p.len2_mm), normal=(0.0, 0.0, 1.0))
+
+
 CABLE_GLAND_BODY = register_subsystem(Subsystem(
     name="cable_gland_body",
     description="Cylindrical gland with strain relief -- structural/mounting geometry (FDM/FFF or CNC)",
@@ -67,4 +82,11 @@ CABLE_GLAND_BODY = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    # 2026-07-28 -- bespoke, not `cylinder_end_interfaces`: the stacked-cylinder solid spans z in
+    # [0, len1_mm+len2_mm], NOT centered at the origin the generic helper assumes. Two real end faces:
+    # the section1 (larger) base and the section2 (smaller) tip.
+    interfaces=[
+        InterfaceSpec(name="base_face", kind="mount", frame=_base_face),
+        InterfaceSpec(name="tip_face", kind="mount", frame=_tip_face),
+    ],
 ))

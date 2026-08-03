@@ -59,6 +59,31 @@ def test_bar_shaped_subsystems_declare_end_interfaces(name):
     assert [i.name for i in get_subsystem_model(name).interfaces] == ["end_a", "end_b"]
 
 
+@pytest.mark.parametrize("name", ["round_post", "round_bar"])
+def test_cylinder_shaped_subsystems_declare_end_interfaces(name):
+    # 2026-07-27 -- the generic cylinder_end_interfaces() helper (the missing complement to
+    # bar_end_interfaces for the round-cross-section family), applied to the shape family confirmed
+    # by direct code reading to be a plain bd.Cylinder(radius=dia_mm/2, height=height_mm) centered at
+    # the origin, standing along local Z BY DEFAULT (no rotation needed, unlike the box-bar family).
+    assert [i.name for i in get_subsystem_model(name).interfaces] == ["bottom", "top"]
+
+
+def test_two_round_posts_stack_end_to_end_via_the_generic_cylinder_helper():
+    # round_post "a" (height_mm=60 default) stacked on round_post "b" (height_mm=60 default) via
+    # a.bottom <-> b.top. "a" < "b" alphabetically, so "a" is the datum at the origin.
+    led = make_demo_ledger()
+    led = add_instance(led, "round_post", "a")
+    led = add_instance(led, "round_post", "b")
+    led.connections = [
+        Connection(id="c1", a=InterfaceRef(instance_id="a", interface="bottom"),
+                   b=InterfaceRef(instance_id="b", interface="top")),
+    ]
+    pl = resolve_placements(led)
+    assert pl["a"] == Transform()  # datum at origin
+    assert pl["b"].z_mm == pytest.approx(-60.0)  # a's bottom (-30) meets b's top, b's own center 60 below
+    assert connection_issues(led) == []
+
+
 @pytest.mark.parametrize("name", [
     "motor_mount_firewall", "avionics_tray", "battery_bay_divider", "battery_strap_mount", "servo_mount_tray",
 ])

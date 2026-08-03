@@ -59,3 +59,42 @@ describe("summarizeOutcomes — coupling ops (Phase 2b)", () => {
     expect(summarizeOutcomes({ ...base, couplingOps: [] })).toBeNull();
   });
 });
+
+describe("summarizeOutcomes — fit ops (2026-07-27)", () => {
+  it("feeds a REJECTED fit (with reason) back to the model so it doesn't re-propose the same wrong one", () => {
+    const m: ChatMessage = {
+      ...base,
+      fitOps: [{ op: "fit_connector", connector_instance: "sleeve1", host_instance: "post1" }],
+      fitOpOutcomes: [{ op: {} as any, status: "REJECTED", fitId: null, message: "post1's cross-section is 30x20mm, not square" }],
+    };
+    const s = summarizeOutcomes(m)!;
+    expect(s).toContain("REJECTED");
+    expect(s).toContain("not square");
+  });
+
+  it("feeds an APPLIED fit's minted fit_id back so a later resync/unfit can target it", () => {
+    const m: ChatMessage = {
+      ...base,
+      fitOps: [{ op: "fit_connector", connector_instance: "sleeve1", host_instance: "post1" }],
+      fitOpOutcomes: [{ op: {} as any, status: "APPLIED", fitId: "fit_1" }],
+    };
+    const s = summarizeOutcomes(m)!;
+    expect(s).toContain("fit_id=fit_1");
+    expect(s).toContain("fit sleeve1 <- post1");
+  });
+
+  it("summarizes resync_fit and unfit_connector distinctly from fit_connector", () => {
+    const m: ChatMessage = {
+      ...base,
+      fitOps: [{ op: "resync_fit", id: "fit_1" }, { op: "unfit_connector", id: "fit_1" }],
+      fitOpOutcomes: [{ op: {} as any, status: "APPLIED", fitId: "fit_1" }, { op: {} as any, status: "APPLIED", fitId: "fit_1" }],
+    };
+    const s = summarizeOutcomes(m)!;
+    expect(s).toContain("resync_fit fit_1");
+    expect(s).toContain("unfit_connector fit_1");
+  });
+
+  it("returns null when there are no fit outcomes either", () => {
+    expect(summarizeOutcomes({ ...base, fitOps: [] })).toBeNull();
+  });
+});

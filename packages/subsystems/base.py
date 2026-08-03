@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Optional
 
-from packages.ledger.parameter import ParameterDef
+from packages.ledger.parameter import ParameterDef, ParamSource
 
 if TYPE_CHECKING:
     from packages.ledger.apply import CascadeRule
@@ -36,6 +36,11 @@ class ParamSpec:
     unit: str
     step: Optional[float] = None   # UI slider step (auto-derived from range if None)
     label: Optional[str] = None    # UI label (auto-derived from name if None)
+    # 2026-08-01 (scoped MVP — a single passthrough tag, NOT a confidence-scoring system): where this
+    # default value came from. "unsourced" (default) means every existing subsystem file that never
+    # sets this keeps behaving exactly as today — purely descriptive, never read by `materialize()` or
+    # any validation path.
+    source: ParamSource = "unsourced"
 
     def materialize(self) -> ParameterDef:
         return ParameterDef(value=self.value, unit=self.unit, bounds=(self.min, self.max))
@@ -76,6 +81,64 @@ class InterfaceSpec:
     kind: str  # "mount" | "containment" | "port"
     frame: Callable[["Namespace"], Frame]
     keepout_mm: float = 0.0
+
+
+@dataclass(frozen=True)
+class FitProfile:
+    """The cross-section a HOST subsystem presents to whatever might be fitted around/to it (2026-07-27
+    — the missing dimensional data `Frame`/`InterfaceSpec` never carried, confirmed absent by direct
+    reading before this was added). A pure value, read fresh from the host's own resolved params every
+    time a fit is computed or re-verified — never stored anywhere itself (see `FitBinding` in
+    packages/ledger/schema.py and `packages/subsystems/fit.py::compute_fit`).
+
+    `kind` discriminates what `dims` means, so a connector that only understands one kind refuses the
+    fit outright rather than guessing: `"round"` -> `{"dia_mm": ...}`; `"rect"` -> `{"width_mm": ...,
+    "height_mm": ...}`. Adding a third kind later is additive (a new discriminated branch), never a
+    redesign of this type."""
+
+    kind: str
+    dims: dict[str, float]
+
+
+@dataclass(frozen=True)
+class FitSocketSpec:
+    """A CONNECTOR subsystem's declaration of what it needs fitted, and where the computed result
+    should land (2026-07-27). `kind` must match the HOST `FitProfile.kind` it gets wired to at
+    `fit_connector` time (packages/ledger/apply.py) — a mismatch is refused, never coerced (a round
+    bore fitted onto a rect host is not "close enough", it's a part that doesn't fit).
+
+    `dim_params` maps each dimension role the kind implies to this connector's OWN `ParamSpec` name
+    that receives `host_value + clearance_mm` — e.g. round: `{"dia_mm": "bore_dia_mm"}`; rect:
+    `{"width_mm": "bore_width_mm", "height_mm": "bore_height_mm"}`. The connector keeps these as
+    ordinary, independently-bounded params — `fit_connector` writes them through the SAME
+    `apply_delta` path any hand-typed dimension uses, so a fitted connector's `_build` never needs to
+    know a fit mechanism exists; it just reads its own params like always."""
+
+    kind: str
+    dim_params: dict[str, str]
+
+
+def cylinder_end_interfaces(height_param: str, names: tuple[str, str] = ("bottom", "top")) -> list[InterfaceSpec]:
+    """Two mount interfaces at the +/- ends of a subsystem's own local Z axis (2026-07-27) — the
+    missing complement to `bar_end_interfaces` above, for the CYLINDER shape family instead of the
+    box-bar family: `round_post`/`round_bar`/`standoff`/`spar_joiner_sleeve`/etc, all built as
+    `bd.Cylinder(radius=..., height=p.<height_param>)`, which build123d centers on the origin along
+    local Z BY DEFAULT (unlike a Box-family bar, which needs an explicit rotation to stand upright —
+    confirmed live this session: round_post/round_bar are used vertically with NO rotation, in
+    contrast to the box-bar family's own general-rule rotation requirement). `normal` points OUTWARD
+    from each end, matching `Frame`'s own anti-parallel-touching-normals mating convention (a post
+    stacked on another post: one's `top` normal is +Z, the other's `bottom` normal is -Z).
+
+    NOT for a part whose cylinder axis runs along a different local axis, or a non-cylindrical part —
+    confirm the actual `_build` orientation before reusing this on a new file."""
+    def _end(sign: float) -> Callable[["Namespace"], Frame]:
+        def _frame(p: "Namespace") -> Frame:
+            half = getattr(p, height_param) / 2.0
+            return Frame(origin=(0.0, 0.0, sign * half), normal=(0.0, 0.0, sign))
+        return _frame
+    name_bottom, name_top = names
+    return [InterfaceSpec(name=name_bottom, kind="mount", frame=_end(-1.0)),
+            InterfaceSpec(name=name_top, kind="mount", frame=_end(1.0))]
 
 
 def bar_end_interfaces(length_param: str, names: tuple[str, str] = ("end_a", "end_b")) -> list[InterfaceSpec]:
@@ -305,6 +368,13 @@ class Subsystem:
     # computing coordinates. Empty (default) = an ordinary part with no declared mate points; nothing
     # changes for it. See InterfaceSpec / Frame above and ENGINEERING_GRAPH_ARCHITECTURE.md §1.
     interfaces: list["InterfaceSpec"] = field(default_factory=list)
+    # 2026-07-27 (fitted-joint mechanism) — HOST side: a callable deriving this part's own
+    # FitProfile (its cross-section) from its own resolved params, same contract as `frame` above.
+    # None (default) = this part can't be fitted TO by anything.
+    fit_profile: Optional[Callable[[Namespace], "FitProfile"]] = None
+    # 2026-07-27 — CONNECTOR side: this part's declared socket, naming which of ITS OWN params
+    # receive a wired fit's computed dimensions. None (default) = this part has no fittable socket.
+    fit_socket: Optional["FitSocketSpec"] = None
 
     def defaults(self) -> dict[str, ParameterDef]:
         """Materialised ParameterDefs keyed by name — used to seed the ledger's geometry bag."""

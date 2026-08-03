@@ -13,6 +13,7 @@ invariants are enforced at construction so an out-of-bounds or malformed paramet
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -23,6 +24,16 @@ class LockState(str, Enum):
 
     DYNAMIC = "DYNAMIC"
     HARD_LOCK = "HARD_LOCK"
+
+
+# 2026-08-01 (scoped MVP — a single passthrough tag, NOT a confidence-scoring system): where a
+# parameter's value or a proposed change to it came from. Shared by `packages.subsystems.base.ParamSpec`
+# (a subsystem author's declared default) and `packages.ledger.deltas.ParameterDelta` (a single proposed
+# change to one parameter) so both sides use the exact same vocabulary. Purely descriptive — nothing in
+# `packages.ledger.apply` gates on this value; a missing/"unsourced" tag never blocks or changes
+# acceptance. "unsourced" is the default so every pre-existing ParamSpec/ParameterDelta that never sets
+# this keeps behaving exactly as before.
+ParamSource = Literal["verified", "rule_derived", "solver_validated", "unsourced"]
 
 
 class ParameterDef(BaseModel):

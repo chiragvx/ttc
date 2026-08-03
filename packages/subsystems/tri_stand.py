@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -67,6 +67,28 @@ def _check(p) -> list[str]:
     return out
 
 
+def _foot_face(p) -> "Frame":
+    """The flange's OUTER (bottom) face, z=0 -- where this leg's flange bolts flat against the ground
+    or a mounting surface (the `n_bolt_holes` pattern passes through the flange right at this face).
+    Confirmed against `_build`: `flange = bd.Pos(0, 0, flange_thickness_mm/2) * bd.Cylinder(...)`, i.e.
+    the flange spans z in [0, flange_thickness_mm] -- NOT centered at the origin the way
+    `cylinder_end_interfaces` assumes, so that generic helper does not fit (it would compute
+    +/- flange_thickness_mm/2, missing this part's real z=0 base by half the flange thickness).
+    `normal` points OUTWARD (-Z, away from the solid) per `Frame`'s anti-parallel-mating convention."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, 0.0), normal=(0.0, 0.0, -1.0))
+
+
+def _leg_tip(p) -> "Frame":
+    """The shaft/boss's free end -- the top face of the raised leg, at
+    z = flange_thickness_mm + shaft_len_mm (the shaft sits ON TOP of the flange, per `_build`:
+    `shaft = bd.Pos(0, 0, flange_thickness_mm + shaft_len_mm/2) * bd.Cylinder(...)`). This is where
+    the (separately-instanced) top plate attaches, per the module docstring. `normal` points
+    OUTWARD (+Z)."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, p.flange_thickness_mm + p.shaft_len_mm), normal=(0.0, 0.0, 1.0))
+
+
 TRI_STAND = register_subsystem(Subsystem(
     name="tri_stand",
     description="Tripod: top plate + 3 legs -- structural/mounting geometry (FDM/FFF or CNC)",
@@ -84,4 +106,14 @@ TRI_STAND = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    # 2026-07-28 (interface-coverage sweep) -- bespoke (not a shared-helper) shape: two stacked
+    # cylinders (flange + shaft) offset from the origin along local Z, not a single centered
+    # Cylinder/Box any existing helper covers (identical shape family to `flange_collar`, whose
+    # already-verified `_flange_face`/`_shaft_tip` pattern this mirrors). `foot_face` (z=0) is the
+    # real bolt-mounting face against the ground/base; `leg_tip` is the leg's free end where the
+    # separately-instanced top plate attaches. See `_foot_face`/`_leg_tip` above for the geometry math.
+    interfaces=[
+        InterfaceSpec(name="foot_face", kind="mount", frame=_foot_face),
+        InterfaceSpec(name="leg_tip", kind="mount", frame=_leg_tip),
+    ],
 ))

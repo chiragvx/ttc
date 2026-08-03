@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import plate_face_interfaces
 
 _MIN_WALL_MM = 0.8
 _BORDER_MM = 8.0  # min frame each side of the window
@@ -66,4 +67,5 @@ PANEL = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     fea_eligible=True,  # single Box, window + corner holes all inset from the X-extreme faces
+    interfaces=plate_face_interfaces("thickness_mm"),  # 2026-07-27
 ))

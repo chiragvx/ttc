@@ -77,6 +77,60 @@ def test_system_prompt_teaches_instance_ops_assembly_composition(base_ledger):
     assert "orbital" in prompt.lower() or "thermal" in prompt.lower()
 
 
+def test_system_prompt_teaches_purpose_aware_decomposition(base_ledger):
+    # 2026-07-26 live repro: "a stand up on legs to hold my soldering iron" got mapped to a bare
+    # `table` (a clean shape-match) with zero iron-holding feature -- the model treated a single-type
+    # shape-match as automatically "done" even though the request stated a functional purpose the
+    # matched type doesn't address. The prompt must teach that a stated purpose isn't optional context.
+    prompt = build_system_prompt(get_subsystem("bracket"), base_ledger)
+    assert "FUNCTIONAL PURPOSE" in prompt
+    assert "soldering iron" in prompt.lower()
+    assert "table" in prompt.lower()
+    assert "not automatically" in prompt.lower() or "not.. automatically" in prompt.lower() \
+        or 'not automatically "done"' in prompt.lower()
+
+
+def test_system_prompt_teaches_cut_depth_sanity_on_hollow_parts(base_ledger):
+    # 2026-07-26 live repro: proposing a 15mm pocket + three 20mm holes into a 35mm-tall,
+    # 3mm-wall `enclosure` CONFLICTed all four times ("severed the part into 2 disconnected
+    # islands") -- the prompt never taught checking a cut's depth against the target's own real
+    # wall thickness before proposing it. Must now teach that check explicitly.
+    prompt = build_system_prompt(get_subsystem("bracket"), base_ledger)
+    assert "wall_thickness_mm" in prompt
+    assert "disconnected" in prompt.lower() or "sever" in prompt.lower()
+    assert "hollow" in prompt.lower()
+
+
+def test_system_prompt_explains_the_connection_anchor_convention(base_ledger):
+    # 2026-07-26 (inspired by an external CAD-skill reference's explicit "fixed-first, moving-second"
+    # joint convention): resolve_placements' own anchor-selection rule (prefer an already-positioned
+    # instance, else fall back to alphabetically-first instance id) was real and correct but never
+    # explained to the model -- it had no way to know which side of a connection would end up fixed.
+    prompt = build_system_prompt(get_subsystem("bracket"), base_ledger)
+    assert "FIXED" in prompt and "MOVES" in prompt
+    assert "alphabetically" in prompt.lower()
+    assert "explicit position" in prompt.lower()
+
+
+def test_system_prompt_teaches_deltas_is_sibling_not_nested_on_add_instance(base_ledger):
+    # 2026-07-26 live repro: an `add_instance` for a `flat_bar` carried `length_mm`/`width_mm`/
+    # `thickness_mm` directly on the op object instead of as separate top-level `deltas` entries --
+    # Pydantic's extra_forbidden correctly rejected the whole call. The prompt must teach the actual
+    # shape: deltas is a sibling list on the reply, never extra keys on the add_instance op itself.
+    prompt = build_system_prompt(get_subsystem("bracket"), base_ledger)
+    assert "sibling" in prompt.lower()
+    assert "add_instance" in prompt and "deltas" in prompt
+
+
+def test_system_prompt_teaches_there_is_no_top_level_rationale_on_the_reply(base_ledger):
+    # 2026-07-26 live repro: a reply put a summary `rationale` at the top level alongside
+    # `instance_ops` -- DeltaProposal has no such field (only individual ops do) and the whole call
+    # was rejected. The prompt must teach where a turn-level "why" actually belongs.
+    prompt = build_system_prompt(get_subsystem("bracket"), base_ledger)
+    assert "no turn-level" in prompt.lower() or "not a real field" in prompt.lower()
+    assert "prose reply" in prompt.lower()
+
+
 def test_system_prompt_grounds_first_time_subsystem_param_names():
     # Confirmed live bug: the first time EVER a subsystem type is added to a file, the model had zero
     # grounding in its real param names (they only appear in the "Tunable parameters" section once a
@@ -105,6 +159,19 @@ def test_system_prompt_grounds_first_time_subsystem_param_names():
         assert wrong_name not in prompt, f"guessed/wrong param name {wrong_name!r} leaked into prompt"
 
 
+def test_system_prompt_catalog_ranges_are_unambiguous_for_negative_min_params():
+    # 2026-07-26 adversarial-review catch: the compact per-subsystem catalog format renders a param's
+    # range as `name[min,max]unit` -- a plain `min-max` (no brackets/comma) would be genuinely
+    # ambiguous whenever min is negative (e.g. sweep_deg's real range is -30 to 45, and "-30-45"
+    # cannot be unambiguously split back into two numbers). bwb_fuselage's sweep_deg/dihedral_deg are
+    # real live params with a negative min -- assert the actual bracketed, comma-separated form
+    # survives so a negative-min range is always unambiguously recoverable.
+    empty_ledger = make_demo_ledger()
+    prompt = build_system_prompt(None, empty_ledger)
+    assert "`sweep_deg`[-30,45]deg" in prompt
+    assert "`dihedral_deg`[-10,20]deg" in prompt
+
+
 def test_system_prompt_does_not_duplicate_params_for_already_instantiated_subsystem(base_ledger):
     # bracket ALREADY has a real instance ("root") in base_ledger — its catalog param names must NOT
     # be listed a second, bare time in the "Part types" menu; they are already covered, correctly
@@ -116,7 +183,11 @@ def test_system_prompt_does_not_duplicate_params_for_already_instantiated_subsys
     # bracket already has a real "root" instance here, so the BARE catalog form must be absent
     # (proving no duplication) while the qualified form must be present (proving it's still covered).
     assert "- `instances.root.params.skin_thickness_mm` (mm, recommended [1.0, 5.0])" in prompt
-    assert "- `skin_thickness_mm` (mm, recommended" not in prompt
+    # the catalog-menu bullet for bracket (already instantiated as "root") must carry no compact
+    # `params:` suffix at all -- the format is "- **name**[ -- ACTIVE]: description[ -- params: ...][ --
+    # interfaces: ...]", so isolate bracket's own bullet line and assert it has no "params:" segment.
+    bracket_line = next(l for l in prompt.splitlines() if l.startswith("- **bracket**"))
+    assert "params:" not in bracket_line
 
 
 def test_system_prompt_paces_a_vague_whole_vehicle_request_on_an_empty_file():
@@ -216,10 +287,10 @@ def test_system_prompt_lists_the_new_box_and_bracket_face_interfaces():
     led = add_instance(make_demo_ledger(), "enclosure", "box")
     led = add_instance(led, "lbracket", "brk")
     prompt = build_system_prompt(get_subsystem("enclosure"), led)
-    box_line = next(l for l in prompt.splitlines() if "interfaces (mate points" in l and "`left`" in l)
+    box_line = next(l for l in prompt.splitlines() if "interfaces:" in l and "`left`" in l)
     for name in ("left", "right", "front", "back", "bottom", "top"):
         assert f"`{name}`" in box_line
-    bracket_line = next(l for l in prompt.splitlines() if "interfaces (mate points" in l and "`wall_mount`" in l)
+    bracket_line = next(l for l in prompt.splitlines() if "interfaces:" in l and "`wall_mount`" in l)
     assert "`top`" in bracket_line
 
 

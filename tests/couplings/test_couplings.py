@@ -42,6 +42,32 @@ def test_bending_from_distributed_load():
     assert get_relation("bending_from_distributed_load").evaluate({"total_load_n": 200.0, "span_mm": 500.0}) == pytest.approx(12500.0)
 
 
+def test_stress_from_force_area():
+    # sigma = F/A = 2000 N / 100 mm^2 = 20 MPa (N/mm^2)
+    assert get_relation("stress_from_force_area").evaluate({"force_n": 2000.0, "area_mm2": 100.0}) == pytest.approx(20.0)
+
+
+def test_deflection_of_cantilever_beam():
+    # delta = P*L^3/(3*E*I) = 100 * 200^3 / (3 * 200000 * 8000) = 8e8 / 4.8e9 = 1/6 mm
+    assert get_relation("deflection_of_cantilever_beam").evaluate(
+        {"force_n": 100.0, "length_mm": 200.0, "modulus_mpa": 200_000.0, "moment_of_inertia_mm4": 8000.0}
+    ) == pytest.approx(1.0 / 6.0, abs=1e-6)
+
+
+def test_spring_force_from_rate_deflection():
+    # F = k*x = 5 N/mm * 10 mm = 50 N
+    assert get_relation("spring_force_from_rate_deflection").evaluate(
+        {"spring_rate_n_per_mm": 5.0, "deflection_mm": 10.0}
+    ) == pytest.approx(50.0)
+
+
+def test_shear_stress_from_torque_radius():
+    # tau = T*r/J = 50000 N*mm * 10 mm / 5000 mm^4 = 100 MPa (N/mm^2)
+    assert get_relation("shear_stress_from_torque_radius").evaluate(
+        {"torque_nmm": 50_000.0, "radius_mm": 10.0, "polar_moment_mm4": 5000.0}
+    ) == pytest.approx(100.0)
+
+
 def test_unknown_relation_raises_on_lookup():
     with pytest.raises(KeyError):
         get_relation("fatigue_life")  # deliberately NOT in the catalog — a human wall
@@ -184,4 +210,10 @@ def test_equivalent_unit_labels_do_not_false_flag():
 def test_registry_has_the_v1_catalog():
     for name in ("force_from_mass_accel", "force_from_pressure_area",
                  "torque_from_force_radius", "bending_from_distributed_load"):
+        assert name in RELATION_REGISTRY
+
+
+def test_registry_has_the_2026_07_31_additions():
+    for name in ("stress_from_force_area", "deflection_of_cantilever_beam",
+                 "spring_force_from_rate_deflection", "shear_stress_from_torque_radius"):
         assert name in RELATION_REGISTRY

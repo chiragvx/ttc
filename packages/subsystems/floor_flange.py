@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -67,6 +67,27 @@ def _check(p) -> list[str]:
     return out
 
 
+def _flange_face(p) -> "Frame":
+    """The flange's OUTER (bottom) face, z=0 -- where this fitting bolts flat against the floor (the
+    `n_bolt_holes` pattern passes through the flange right at this face). Confirmed against `_build`:
+    `flange = bd.Pos(0, 0, flange_thickness_mm/2) * bd.Cylinder(...)`, i.e. the flange spans z in
+    [0, flange_thickness_mm] -- NOT centered at the origin the way `cylinder_end_interfaces` assumes,
+    so that generic helper does not fit (it would compute +/- flange_thickness_mm/2, missing this
+    part's real z=0 base by half the flange thickness). `normal` points OUTWARD (-Z, away from the
+    solid) per `Frame`'s anti-parallel-mating convention."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, 0.0), normal=(0.0, 0.0, -1.0))
+
+
+def _shaft_tip(p) -> "Frame":
+    """The shaft/boss's free end -- the top face of the raised collar, at
+    z = flange_thickness_mm + shaft_len_mm (the shaft sits ON TOP of the flange, per `_build`:
+    `shaft = bd.Pos(0, 0, flange_thickness_mm + shaft_len_mm/2) * bd.Cylinder(...)`). `normal`
+    points OUTWARD (+Z) -- e.g. the free end of the rod this flange carries."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, p.flange_thickness_mm + p.shaft_len_mm), normal=(0.0, 0.0, 1.0))
+
+
 FLOOR_FLANGE = register_subsystem(Subsystem(
     name="floor_flange",
     description="Round disc + upright collar (e.g. rod-to-floor) -- structural/mounting geometry (FDM/FFF or CNC)",
@@ -84,4 +105,13 @@ FLOOR_FLANGE = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    # 2026-07-28 (interface-coverage sweep) -- bespoke (not a shared-helper) shape: two stacked
+    # cylinders (flange + shaft) offset from the origin along local Z, not a single centered
+    # Cylinder/Box any existing helper covers. `flange_face` (z=0) is the real bolt-mounting face
+    # (bolts through the floor); `shaft_tip` is the boss's free end. See `_flange_face`/`_shaft_tip`
+    # above for the geometry math.
+    interfaces=[
+        InterfaceSpec(name="flange_face", kind="mount", frame=_flange_face),
+        InterfaceSpec(name="shaft_tip", kind="mount", frame=_shaft_tip),
+    ],
 ))

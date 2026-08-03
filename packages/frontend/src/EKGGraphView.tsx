@@ -22,8 +22,11 @@ import "@xyflow/react/dist/style.css";
 import type { LedgerGraphData } from "./types";
 
 // A read-only topology view of the design's INSTANCE graph — nodes are `ledger.instances`, edges are
-// `ledger.connections` (typed interface<->interface mates) and `ledger.couplings` (derived-load
-// edges). Distinct from Viewport.tsx's 3D geometry viewport: this is a 2D diagram of the ENGINEERING
+// `ledger.connections` (typed interface<->interface mates, optionally decorated by a
+// `ledger.join_annotations` entry attached via `connection_id` — see edgeStyleFor), `ledger.couplings`
+// (derived-load edges), and `ledger.fit_bindings` (2026-07-27, derived-dimension edges: connector <-
+// host). Distinct from
+// Viewport.tsx's 3D geometry viewport: this is a 2D diagram of the ENGINEERING
 // GRAPH itself, not the built solid. PURELY PRESENTATIONAL — ledger data + a click callback in,
 // nothing else; no fetching, no App-level state.
 //
@@ -59,6 +62,12 @@ export interface EKGComputedNode {
   id: string;
   subsystemType: string;
   disconnected: boolean;
+  // True whenever this instance is the target of at least one Coupling, REGARDLESS of whether an
+  // edge got drawn to it. 2026-07-27: a coupling with only literal-value inputs (e.g. a stated
+  // mass_g/accel_g load with no from_instance) legitimately has no source to draw a line FROM, so it
+  // was previously invisible in the graph -- the ledger had the load, the viewer showed nothing. This
+  // is a small on-node marker for that case, independent of the edge-drawing logic above.
+  hasCoupling: boolean;
   params: EKGParamEntry[];
 }
 export interface EKGComputedEdge {
@@ -66,12 +75,20 @@ export interface EKGComputedEdge {
   source: string;
   target: string;
   label: string;
-  kind: "connection" | "coupling";
+  kind: "connection" | "coupling" | "fit";
   // The underlying Connection.kind ("mate" | "bolted" | "slip_fit" | "containment") -- only set for
-  // kind === "connection" edges. 2026-07-22: previously kind was only ever shown as plain text in
-  // the edge label, with zero visual distinction -- this is what lets the graph itself communicate
-  // the relationship type (a rigid bolted join vs. an intentional containment) at a glance.
+  // kind === "connection" edges (of this three-member union). 2026-07-22: previously kind was only
+  // ever shown as plain text in the edge label, with zero visual distinction -- this is what lets
+  // the graph itself communicate the relationship type (a rigid bolted join vs. an intentional
+  // containment) at a glance.
   connectionKind?: string;
+  // True when a `JoinAnnotation` (packages/ledger/schema.py) targets this edge's underlying Connection
+  // via `connection_id` -- only ever set for kind === "connection" edges, the same restriction as
+  // connectionKind above (a JoinAnnotation is BOM/documentation-grade "how joined" data attached to an
+  // EXISTING Connection; it has no analog on a Coupling or FitBinding). 2026-08-01: lets edgeStyleFor
+  // show, at a glance, which joins have a recorded real-world fastening method (bolted/press_fit/
+  // welded/adhesive/custom) vs. which are still just a bare geometric mate.
+  hasJoinAnnotation?: boolean;
 }
 
 export function computeGraphData(ledger: LedgerGraphData): { nodes: EKGComputedNode[]; edges: EKGComputedEdge[] } {
@@ -82,7 +99,16 @@ export function computeGraphData(ledger: LedgerGraphData): { nodes: EKGComputedN
   // purposes — an edge that gets skipped for a dangling endpoint doesn't count as touching the end
   // that DID resolve, since nothing is actually drawn to it.
   const touched = new Set<string>();
+  const coupledTargets = new Set<string>(); // resolvable Coupling.target_instance ids -- see EKGComputedNode.hasCoupling
   const edges: EKGComputedEdge[] = [];
+
+  // 2026-08-01 -- Connection ids carrying a JoinAnnotation, for the connection loop below. A
+  // JoinAnnotation references its Connection by id (never a standalone instance-to-instance record —
+  // see JoinAnnotation's own docstring), so this is a simple id-membership check, not another
+  // instance-existence lookup. An annotation whose `connection_id` matches no real Connection (e.g.
+  // the connection was later removed) simply never matches here -- silently inert, same
+  // dangling-reference posture as every other edge kind in this file, not a crash.
+  const annotatedConnectionIds = new Set((ledger.join_annotations ?? []).map((ja) => ja.connection_id));
 
   for (const c of ledger.connections ?? []) {
     if (!instances[c.a.instance_id] || !instances[c.b.instance_id]) continue; // dangling endpoint(s) — skip, don't crash (placement.py::connection_issues' DANGLING case)
@@ -95,6 +121,7 @@ export function computeGraphData(ledger: LedgerGraphData): { nodes: EKGComputedN
       label: `${c.kind}: ${c.a.interface}<->${c.b.interface}`,
       kind: "connection",
       connectionKind: c.kind,
+      hasJoinAnnotation: annotatedConnectionIds.has(c.id),
     });
   }
 
@@ -106,7 +133,10 @@ export function computeGraphData(ledger: LedgerGraphData): { nodes: EKGComputedN
     // targets a real part (2026-07-19 review, HIGH — this used to live inside the input loop below,
     // gated on `input.from_instance` existing, so an all-literal-inputs coupling never marked its own
     // resolvable target as touched).
-    if (targetResolves) touched.add(cpl.target_instance);
+    if (targetResolves) {
+      touched.add(cpl.target_instance);
+      coupledTargets.add(cpl.target_instance);
+    }
 
     let i = 0;
     for (const input of Object.values(cpl.inputs ?? {})) {
@@ -129,6 +159,24 @@ export function computeGraphData(ledger: LedgerGraphData): { nodes: EKGComputedN
     }
   }
 
+  // 2026-07-27 — fit bindings: unlike a Coupling, a FitBinding has no literal-only-input form (both
+  // connector_instance and host_instance are always real instances at wire time), so this mirrors
+  // the CONNECTION loop's symmetric "both resolve or skip entirely" handling, not the coupling loop's
+  // asymmetric one. Directional like a coupling edge (value flows FROM the host's cross-section INTO
+  // the connector's derived dimension), so source = host, target = connector.
+  for (const fb of ledger.fit_bindings ?? []) {
+    if (!instances[fb.host_instance] || !instances[fb.connector_instance]) continue; // dangling endpoint(s) — skip, don't crash
+    touched.add(fb.host_instance);
+    touched.add(fb.connector_instance);
+    edges.push({
+      id: `fit-${fb.id}`,
+      source: fb.host_instance,
+      target: fb.connector_instance,
+      label: "fit",
+      kind: "fit",
+    });
+  }
+
   const nodes: EKGComputedNode[] = ids.map((id) => {
     const paramsRecord = instances[id].params ?? {};
     const params: EKGParamEntry[] = Object.keys(paramsRecord)
@@ -138,6 +186,7 @@ export function computeGraphData(ledger: LedgerGraphData): { nodes: EKGComputedN
       id,
       subsystemType: instances[id].subsystem_type,
       disconnected: !touched.has(id),
+      hasCoupling: coupledTargets.has(id),
       params,
     };
   });
@@ -172,6 +221,7 @@ export interface EKGNodeData extends Record<string, unknown> {
   subsystemType: string;
   disconnected: boolean;
   selected: boolean;
+  hasCoupling: boolean;
   params: EKGParamEntry[];
 }
 export type EKGFlowNode = Node<EKGNodeData, "ekgCard">;
@@ -200,6 +250,7 @@ export function mergeNodePositions(
       subsystemType: cn.subsystemType,
       disconnected: cn.disconnected,
       selected: selectedInstanceId != null && cn.id === selectedInstanceId,
+      hasCoupling: cn.hasCoupling,
       params: cn.params,
     };
     // Spread `...prev` (2026-07-19 review, LOW) — a bare `{id, type, position, data}` literal here
@@ -247,13 +298,31 @@ const _CONNECTION_KIND_STYLE: Record<string, React.CSSProperties> = {
   mate: { stroke: "#58a6ff", strokeWidth: 1.5 },
 };
 
+// Fit bindings get their own solid pink/magenta — distinct from every Connection.kind color above
+// AND from the coupling's dashed green, since a fit edge is neither a load-derivation nor a mate
+// (it's a derived-DIMENSION edge).
+const _FIT_STYLE: React.CSSProperties = { stroke: "#f778ba", strokeWidth: 2 };
+
+// Join annotations (2026-07-27, packages/ledger/schema.py::JoinAnnotation; wired into the graph
+// 2026-08-01) attach BOM/documentation-grade "how actually joined" data (bolted/press_fit/welded/
+// adhesive/custom) onto an EXISTING Connection. Distinct from every color above: the
+// _CONNECTION_KIND_STYLE colors encode the GEOMETRIC join type (Connection.kind), the coupling color
+// encodes a derived load, and _FIT_STYLE encodes a derived dimension -- this one encodes "a
+// real-world fastening method has been recorded for this joint", which takes over the edge's color
+// entirely once present (edgeStyleFor below checks it ahead of connectionKind) rather than blending
+// with it, so it needs its own unused hue: solid red, distinct from the containment/bolted/slip_fit/
+// mate quartet, the dashed green coupling, and the pink fit style.
+const _JOIN_ANNOTATION_STYLE: React.CSSProperties = { stroke: "#f85149", strokeWidth: 2 };
+
 export function edgeStyleFor(e: EKGComputedEdge): React.CSSProperties {
   if (e.kind === "coupling") return { stroke: "#3fb950", strokeWidth: 1.5, strokeDasharray: "6 3" };
+  if (e.kind === "fit") return _FIT_STYLE;
+  if (e.hasJoinAnnotation) return _JOIN_ANNOTATION_STYLE;
   return _CONNECTION_KIND_STYLE[e.connectionKind ?? "mate"] ?? _CONNECTION_KIND_STYLE.mate;
 }
 
 function EKGCardNode({ id, data }: NodeProps<EKGFlowNode>) {
-  const { subsystemType, disconnected, selected, params } = data;
+  const { subsystemType, disconnected, selected, hasCoupling, params } = data;
   const visibleParams = params.slice(0, _MAX_VISIBLE_PARAMS);
   const hiddenCount = params.length - visibleParams.length;
   return (
@@ -261,6 +330,7 @@ function EKGCardNode({ id, data }: NodeProps<EKGFlowNode>) {
       data-testid={`ekg-node-${id}`}
       data-selected={selected}
       data-disconnected={disconnected}
+      data-has-coupling={hasCoupling}
       style={{
         background: "#161b22",
         border: disconnected ? "1.5px dashed #d29922" : "1px solid #30363d",
@@ -273,7 +343,20 @@ function EKGCardNode({ id, data }: NodeProps<EKGFlowNode>) {
       }}
     >
       <Handle type="target" position={Position.Top} style={handleStyle} />
-      <div style={{ fontWeight: 700, fontSize: 12, color: "#c9d1d9" }}>{id}</div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+        <div style={{ fontWeight: 700, fontSize: 12, color: "#c9d1d9" }}>{id}</div>
+        {hasCoupling && (
+          <span
+            title="A coupling (derived load) targets this part — see packages/couplings. Shown here even when it has no source-instance edge to draw (literal-value inputs)."
+            style={{
+              fontSize: 8, color: "#3fb950", border: "1px solid #3fb950", borderRadius: 4,
+              padding: "1px 4px", lineHeight: 1.4, whiteSpace: "nowrap",
+            }}
+          >
+            load
+          </span>
+        )}
+      </div>
       <div style={{ fontSize: 10, color: "#8b949e", marginTop: 2 }}>{subsystemType}</div>
       {visibleParams.length > 0 && (
         <div style={{ marginTop: 6, paddingTop: 6, borderTop: "1px solid #21262d" }} data-testid={`ekg-node-${id}-params`}>
@@ -347,9 +430,10 @@ function EKGGraphCanvas({ ledger, selectedInstanceId, onSelectInstance }: EKGGra
   }, [computed.nodes, selectedInstanceId, setNodes]);
 
   // Edges — constraint 7: Connections are symmetric, no arrowhead, styled per `connectionKind` (see
-  // edgeStyleFor). Couplings render dashed green WITH a directional arrowhead pointing at the
+  // edgeStyleFor) — or, when a JoinAnnotation is attached, per that instead (2026-08-01). Couplings
+  // render dashed green WITH a directional arrowhead pointing at the
   // target (value flows FROM source INTO target) — this directional distinction is the whole point
-  // of "how they interact".
+  // of "how they interact". Fit bindings (2026-07-27) are directional the same way (host -> connector).
   useEffect(() => {
     setEdges(
       computed.edges.map((e) => ({
@@ -360,7 +444,9 @@ function EKGGraphCanvas({ ledger, selectedInstanceId, onSelectInstance }: EKGGra
         labelStyle: { fill: "#8b949e", fontSize: 9 },
         labelBgStyle: { fill: "#0d1117", fillOpacity: 0.8 },
         style: edgeStyleFor(e),
-        markerEnd: e.kind === "coupling" ? { type: MarkerType.ArrowClosed, color: "#3fb950" } : undefined,
+        markerEnd: e.kind === "coupling" ? { type: MarkerType.ArrowClosed, color: "#3fb950" }
+          : e.kind === "fit" ? { type: MarkerType.ArrowClosed, color: "#f778ba" }
+          : undefined,
       })),
     );
   }, [computed.edges, setEdges]);

@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import cylinder_end_interfaces
 
 _FRAGMENT = """\
 ## Subsystem: Threaded boss
@@ -67,4 +68,12 @@ THREADED_BOSS = register_subsystem(Subsystem(
         ParamSpec("pilot_dia_mm",    value=3.4,  min=1.0, max=20.0, unit="mm"),
     ],
     build=_build, volume=_volume, invariants=_check,
+    # 2026-07-28 (interface-coverage sweep) — the boss body is `bd.Cylinder(outer_dia_mm/2, height_mm)`,
+    # centered at the origin along local Z by construction (confirmed by reading `_build` above); the
+    # insert/pilot bores are subtracted material, they don't change the outer envelope or move the two
+    # flat end faces. `bottom` is the real seating face against whatever panel/wall the boss is printed
+    # into/onto; `top` is the face the insert bore opens through, where a fastener is driven in — both
+    # are genuine, useful mount points, so this matches `cylinder_end_interfaces`'s exact convention
+    # (see `round_post`/`standoff` for the same reasoning applied to the cylinder-family shape).
+    interfaces=cylinder_end_interfaces("height_mm"),
 ))

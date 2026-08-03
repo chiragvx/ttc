@@ -11,6 +11,11 @@ export function ValidationCard({ result }: { result: ValidationResult }) {
     ...(result.visual ? result.visual.issues : []),
   ];
   const passed = result.ok && issues.length === 0;
+  // Structural (2026-07-27) is deliberately kept OUT of the pass/fail banner above and out of
+  // shouldAutoCorrect/buildCorrectionMessage's retry loop -- it's a coarse, informational FS readout
+  // (a real number the moment a load is wired), not a defect to auto-fix. A part with a perfectly
+  // fine estimated FS must not flip "Self-check passed" to "found issues" just for existing.
+  const structuralIssues = result.structural.issues;
 
   return (
     <div style={box}>
@@ -18,8 +23,16 @@ export function ValidationCard({ result }: { result: ValidationResult }) {
         <span style={{ color: passed ? "#3fb950" : "#d29922", fontWeight: 600, fontSize: 12 }}>
           {passed ? "✓ Self-check passed" : "⚠ Self-check found issues"}
         </span>
-        <span style={{ color: "#6e7681", fontSize: 10 }}>
-          geometric{result.vision_ran ? " + visual" : result.vision_enabled ? " (visual skipped)" : ""}
+        <span
+          style={{ color: "#6e7681", fontSize: 10 }}
+          title={
+            !result.vision_ran && result.vision_enabled
+              ? "A vision check was attempted but came back inconclusive (the model may not support " +
+                "image input, or the reply couldn't be parsed) — the geometric check above is unaffected."
+              : undefined
+          }
+        >
+          geometric{result.vision_ran ? " + visual" : result.vision_enabled ? " (visual inconclusive)" : ""}
         </span>
       </div>
       {issues.length > 0 && (
@@ -34,10 +47,28 @@ export function ValidationCard({ result }: { result: ValidationResult }) {
           ))}
         </ul>
       )}
+      {structuralIssues.length > 0 && (
+        <div style={{ marginTop: 6, paddingTop: 6, borderTop: "1px solid #21262d" }}>
+          <div style={{ fontSize: 10, color: "#6e7681", marginBottom: 2 }}>
+            Structural (coarse estimate — not a grounded verdict; run analysis for the real FS)
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 16 }}>
+            {structuralIssues.map((i, k) => (
+              <li key={k} style={{ fontSize: 11, color: "#c9d1d9", marginBottom: 2 }}>
+                <span style={{ color: SEV_COLOR[i.severity] ?? "#8b949e", fontWeight: 600 }}>
+                  {i.instances[0] ?? i.check}
+                </span>{" "}
+                {i.message}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {!result.vision_enabled && (
         <div style={{ fontSize: 10, color: "#6e7681", marginTop: 6, fontStyle: "italic" }}>
-          Visual (blueprint) check is off — set a vision-capable model in Settings to enable the
-          "does it look right" judgment.
+          Visual (blueprint) check is off — set a model in Settings (the main Model field works if
+          it's vision-capable, e.g. Qwen/Gemini/GPT-4o variants) to enable the "does it look right"
+          judgment.
         </div>
       )}
     </div>

@@ -10,6 +10,7 @@ per this catalog's established "one archetype, many named catalog entries" conve
 from __future__ import annotations
 
 from packages.subsystems import ParamSpec, Subsystem, plate_face_interfaces, register_subsystem
+from packages.subsystems.base import FitProfile
 
 _MIN_WALL_MM = 0.8
 
@@ -67,4 +68,5 @@ BATTERY_STRAP_MOUNT = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     interfaces=plate_face_interfaces("thickness_mm"),  # 2026-07-20 — mounts via a flat face
+    fit_profile=lambda p: FitProfile(kind="rect", dims={"width_mm": p.width_mm, "height_mm": p.depth_mm}),
 ))

@@ -58,7 +58,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 from packages.subsystems._loft_profiles import ease_at, taper_stations, zone_samples
 
 _FRAGMENT = """\
@@ -340,6 +340,28 @@ def _check(p) -> list[str]:
     return out
 
 
+def _start_face(p):
+    """Local mate frame at the x=0 tip (`_stations`/`taper_stations`/`zone_samples` place every loft
+    station at x in [0, length_mm], NOT centered at the origin — same convention as
+    `lofted_spindle._start_face`, confirmed directly against `_stations` above, so neither
+    `bar_end_interfaces` (centered, wrong) nor `cylinder_end_interfaces` (centered, wrong axis) fits).
+    Outward normal points -X, away from the part. This is a hollow shell (see module docstring), so
+    at typical (non-zero-wall) params this end is an ANNULAR open ring around the ASYMMETRIC
+    biconvex profile, not a solid disc or a circle — still the right center point for a mate. The
+    default (start_width_mm=15) tip is blunt, so the declared face is real for the default config; a
+    caller that tapers a tip to a true point (start_width_mm=0) is choosing a degenerate mate point,
+    same honest tradeoff `lofted_spindle`/`hex_bolt_blank`/`T_nut` accept for their own tips."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, 0.0), normal=(-1.0, 0.0, 0.0))
+
+
+def _end_face(p):
+    """Local mate frame at the x=length_mm tip — the far end of the loft, stacked directly after the
+    x=0 end (see `_start_face`). Outward normal points +X."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(p.length_mm, 0.0, 0.0), normal=(1.0, 0.0, 0.0))
+
+
 LOFTED_HULL = register_subsystem(Subsystem(
     name="lofted_hull",
     description="Asymmetric top/bottom body of revolution + optional localized canopy bump — a "
@@ -372,4 +394,16 @@ LOFTED_HULL = register_subsystem(Subsystem(
     # lofted_spindle.py's own comment: a cross-industry hull/body shape that can act as a fuselage.
     # See prompt_builder.py's "airframe-first pacing" section.
     is_airframe_defining=True,
+    # 2026-07-28 (interface-coverage sweep, final wave): a lofted body running x in [0, length_mm]
+    # along local X, NOT centered — same convention as `lofted_spindle.py` (confirmed directly against
+    # `_stations`/`taper_stations`/`zone_samples` above), so neither `bar_end_interfaces` (right axis,
+    # wrong centering) nor `cylinder_end_interfaces` (centered, but the wrong axis) fits; these are
+    # bespoke frames mirroring `lofted_spindle._start_face`/`_end_face` exactly, adapted only in
+    # docstring for this file's ASYMMETRIC (top != bottom) biconvex profile. Named `start_face`/
+    # `end_face` to match this file's own start_*/end_* param vocabulary rather than a generic
+    # bottom/top.
+    interfaces=[
+        InterfaceSpec(name="start_face", kind="mount", frame=_start_face),
+        InterfaceSpec(name="end_face", kind="mount", frame=_end_face),
+    ],
 ))

@@ -519,3 +519,7 @@ from packages.subsystems import wing_panel as _wing_panel  # noqa: E402, F401
 # it, the real pattern an electronics enclosure uses instead of an empty box. assembly_template
 # composite (flat_bar rail + mounting_plate_grid plates), same live mechanism as `table.py`.
 from packages.subsystems import rail_mount_assembly as _rail_mount_assembly  # noqa: E402, F401
+
+# Fitted-joint mechanism, Stage 1 rect-family proof (2026-07-27) -- box_sleeve, the rect analog of
+# spar_joiner_sleeve's round-family Stage 0 proof (packages/subsystems/fit.py / base.py::FitSocketSpec).
+from packages.subsystems import box_sleeve as _box_sleeve  # noqa: E402, F401

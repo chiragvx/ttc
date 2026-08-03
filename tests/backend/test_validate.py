@@ -80,6 +80,152 @@ def test_validate_endpoint_runs_geometric_without_a_vision_model():
     assert any(i["check"] == "connectivity" for i in r["geometric"]["issues"])
 
 
+def test_validate_endpoint_includes_an_empty_structural_report_with_no_coupled_parts():
+    # 2026-07-27: /validate always carries a "structural" field (unlike "visual", which is genuinely
+    # absent when no vision model is configured) -- with nothing coupled yet it's just empty, not null.
+    c = TestClient(create_app())
+    c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "bracket"})
+    r = c.post("/validate", json={"intent": "a bracket"}).json()
+    assert r["structural"]["issues"] == []
+    assert r["structural"]["ok"] is True
+
+
+@pytest.mark.skipif(not HAS_B123D, reason="needs build123d")
+def test_validate_endpoint_surfaces_a_coarse_fs_the_moment_a_load_is_wired():
+    # 2026-07-27 live repro: a tool-cart build correctly wired coupling_ops onto every leg the moment
+    # the user asked "will this hold X kg without buckling", but the self-check that ran immediately
+    # after never surfaced any actual number back -- the only place a coarse FS was ever computed was
+    # export gating (_gross_error_findings), which only speaks up on catastrophic failure and never
+    # runs during ordinary chat at all. /validate must now report a real (if crude) FS for every
+    # coupled+buildable part, unconditionally -- comfortably safe here, so severity is "info".
+    c = TestClient(create_app())
+    leg = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_bar"}).json()["instance_id"]
+    c.post("/coupling_ops", json={"op": "add_coupling", "target_instance": leg,
+                                  "relation": "force_from_pressure_area",
+                                  "inputs": [{"name": "pressure_pa", "value": 2e6},
+                                             {"name": "area_mm2", "value": 0.5}]})  # 1 N -- comfortably safe
+    r = c.post("/validate", json={"intent": "a leg"}).json()
+    findings = [i for i in r["structural"]["issues"] if leg in i["instances"]]
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "info"
+    assert "FS" in findings[0]["message"]
+    assert "run /analyze" in findings[0]["message"].lower() or "run analysis" in findings[0]["message"].lower()
+
+
+@pytest.mark.skipif(not HAS_B123D, reason="needs build123d")
+def test_validate_endpoint_flags_a_grossly_undersized_coupled_part_as_a_structural_warning():
+    # same fixture as test_app.py::test_export_check_blocks_on_a_grossly_undersized_coupled_part
+    # (round_bar defaults + 50N derived load -> analytical FS~=0.56) -- but this time seen from
+    # /validate, DURING chat, not only at export time.
+    c = TestClient(create_app())
+    leg = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_bar"}).json()["instance_id"]
+    c.post("/coupling_ops", json={"op": "add_coupling", "target_instance": leg,
+                                  "relation": "force_from_pressure_area",
+                                  "inputs": [{"name": "pressure_pa", "value": 1e8},
+                                             {"name": "area_mm2", "value": 0.5}]})  # 50 N
+    r = c.post("/validate", json={"intent": "a leg"}).json()
+    findings = [i for i in r["structural"]["issues"] if leg in i["instances"]]
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "warning"
+    # informational only -- a structural warning must never flip the top-level ok/pass verdict, that's
+    # reserved for geometric/visual defects the auto-correct loop actually acts on.
+    assert r["structural"]["ok"] is True
+    assert r["ok"] is True
+
+
+def test_validate_endpoint_does_not_structural_flag_an_uncoupled_part():
+    c = TestClient(create_app())
+    c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_bar", "instance_id": "leg"})
+    r = c.post("/validate", json={"intent": "a leg"}).json()
+    assert r["structural"]["issues"] == []
+
+
+@pytest.mark.skipif(not HAS_B123D, reason="needs build123d")
+def test_validate_endpoint_surfaces_a_coarse_fs_for_a_bending_moment_coupling_too():
+    # 2026-07-27 DEEP-DIVE live repro: a tool-cart build wired `bending_from_distributed_load` (output
+    # moment_nmm) onto its legs -- derived_load_n only ever consumes force_n-output couplings, so this
+    # got NOTHING back from the structural check above, reproducing "we asked and got no answer" via a
+    # DIFFERENT path than the original fix covered. sigma=6M/(w*h^2) is universal rectangular-section
+    # beam theory (the same formula Cantilever's own stress property already uses internally, just fed
+    # an already-derived moment instead of re-deriving one from a force) -- not a new physics call.
+    c = TestClient(create_app())
+    leg = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_bar"}).json()["instance_id"]
+    c.post("/coupling_ops", json={"op": "add_coupling", "target_instance": leg,
+                                  "relation": "bending_from_distributed_load",
+                                  "inputs": [{"name": "total_load_n", "value": 8},
+                                             {"name": "span_mm", "value": 8}]})  # 8 N*mm -- tiny, safe
+    r = c.post("/validate", json={"intent": "a leg"}).json()
+    findings = [i for i in r["structural"]["issues"] if leg in i["instances"]]
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "info"
+    assert "bending moment" in findings[0]["message"].lower()
+    assert "bending_from_distributed_load" in findings[0]["message"]
+
+
+@pytest.mark.skipif(not HAS_B123D, reason="needs build123d")
+def test_validate_and_export_gate_both_flag_a_grossly_undersized_bending_moment_coupling():
+    # round_bar defaults (dia_mm=10 -> sorted bbox gives w=h=10mm) + an 8750 N*mm derived moment ->
+    # sigma = 6*8750/(10*10^2) = 52.5 MPa > PLA's 50 MPa yield -> FS < 1.0. Mirrors
+    # test_app.py::test_export_check_blocks_on_a_grossly_undersized_coupled_part but for the
+    # moment-output path, confirming the export gate ALSO catches this now (not just informational).
+    c = TestClient(create_app())
+    leg = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_bar"}).json()["instance_id"]
+    c.post("/coupling_ops", json={"op": "add_coupling", "target_instance": leg,
+                                  "relation": "bending_from_distributed_load",
+                                  "inputs": [{"name": "total_load_n", "value": 1000},
+                                             {"name": "span_mm", "value": 70}]})  # 8750 N*mm
+    r = c.post("/validate", json={"intent": "a leg"}).json()
+    findings = [i for i in r["structural"]["issues"] if leg in i["instances"]]
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "warning"
+
+    res = c.post("/export/check").json()
+    assert any("gross-error" in reason and leg in reason and "bending moment" in reason
+              for reason in res["reasons"])
+
+
+@pytest.mark.skipif(not HAS_B123D, reason="needs build123d")
+def test_validate_endpoint_discloses_a_coupling_this_coarse_check_cannot_estimate_from():
+    # 2026-07-27 DEEP-DIVE: a torque_nm-output coupling (e.g. torque_from_force_radius -- a twisting
+    # moment about the beam's own axis) has NO bending-stress consumption path here at all -- shear
+    # from torsion is a genuinely different physics case, not a one-line reuse of sigma=6M/(w*h^2).
+    # Silently omitting it would reproduce the exact "coupling wired, nothing comes back" bug for a
+    # third distinct reason -- must say so explicitly instead.
+    c = TestClient(create_app())
+    leg = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_bar"}).json()["instance_id"]
+    c.post("/coupling_ops", json={"op": "add_coupling", "target_instance": leg,
+                                  "relation": "torque_from_force_radius",
+                                  "inputs": [{"name": "force_n", "value": 50},
+                                             {"name": "radius_mm", "value": 20}]})
+    r = c.post("/validate", json={"intent": "a leg"}).json()
+    findings = [i for i in r["structural"]["issues"] if leg in i["instances"]]
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "info"
+    assert "torque_from_force_radius" in findings[0]["message"]
+    assert "not being silently ignored" in findings[0]["message"].lower()
+
+
+def test_validate_endpoint_prefers_a_force_coupling_over_a_moment_one_when_both_exist():
+    # matches the tool-cart's actual live pattern: force_from_mass_accel AND bending_from_distributed_load
+    # both wired on the same leg. The force-based tip-load cantilever oracle is preferred (it's the
+    # original, longer-standing estimate) -- confirms the two paths don't double-count or conflict.
+    c = TestClient(create_app())
+    if not HAS_B123D:
+        pytest.skip("needs build123d")
+    leg = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_bar"}).json()["instance_id"]
+    c.post("/coupling_ops", json={"op": "add_coupling", "target_instance": leg,
+                                  "relation": "force_from_mass_accel",
+                                  "inputs": [{"name": "mass_g", "value": 100}, {"name": "accel_g", "value": 1}]})
+    c.post("/coupling_ops", json={"op": "add_coupling", "target_instance": leg,
+                                  "relation": "bending_from_distributed_load",
+                                  "inputs": [{"name": "total_load_n", "value": 8}, {"name": "span_mm", "value": 8}]})
+    r = c.post("/validate", json={"intent": "a leg"}).json()
+    findings = [i for i in r["structural"]["issues"] if leg in i["instances"]]
+    assert len(findings) == 1  # not two separate/duplicate findings for the same instance
+    assert "derived force" in findings[0]["message"]
+    assert "bending moment" not in findings[0]["message"]
+
+
 def test_judge_image_parses_a_vision_verdict_through_the_seam():
     # the vision path itself, exercised via the injectable _post seam (no live model / no network)
     from packages.agents.openrouter_provider import OpenRouterDeltaProvider

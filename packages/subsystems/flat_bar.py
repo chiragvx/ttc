@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from packages.subsystems import ParamSpec, Subsystem, bar_end_interfaces, register_subsystem
+from packages.subsystems.base import FitProfile
 
 _FRAGMENT = """\
 ## Subsystem: Flat bar
@@ -44,4 +45,5 @@ FLAT_BAR = register_subsystem(Subsystem(
     build=_build, volume=_volume, invariants=_check,
     fea_eligible=True,  # single Box, span along X — the validated cantilever methodology applies as-is
     interfaces=bar_end_interfaces("length_mm"),  # 2026-07-20 — a bar mates end-to-end at its two tips
+    fit_profile=lambda p: FitProfile(kind="rect", dims={"width_mm": p.width_mm, "height_mm": p.thickness_mm}),
 ))

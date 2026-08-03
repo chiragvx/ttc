@@ -11,6 +11,7 @@ structural envelope/mounting geometry, not its full cosmetic profile.
 from __future__ import annotations
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import cylinder_end_interfaces
 
 _FRAGMENT = """\
 ## Subsystem: Pulley Blank V
@@ -52,4 +53,10 @@ PULLEY_BLANK_V = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     fea_eligible=True,  # plain solid cylinder, span along X-equivalent axis -- same shape class longeron.py opts into; left True here since it IS the simple validated-methodology shape, not inferred for a compound one
+    # 2026-07-28 (interface-coverage sweep, final wave) -- _build is `bd.Cylinder(radius=dia_mm/2,
+    # height=height_mm)`, identical construction to round_post.py, which build123d centers on the
+    # origin along local Z by default -- the exact shape cylinder_end_interfaces documents itself
+    # as fitting. A pulley blank's two flat end faces are real, useful mount/stack points (e.g.
+    # against a bearing shoulder or an adjacent pulley on the same shaft).
+    interfaces=cylinder_end_interfaces("height_mm"),
 ))

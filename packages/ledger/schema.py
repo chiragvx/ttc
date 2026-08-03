@@ -189,6 +189,33 @@ class Connection(_Strict):
     gap_mm: float = 0.0
 
 
+class JoinAnnotation(_Strict):
+    """Semantic-only (2026-07-27, ENGINEERING_GRAPH_ARCHITECTURE.md follow-on): records HOW two
+    already-connected parts are actually joined in the real world — bolted, press-fit, welded,
+    adhesive, or a custom method prose can't be reduced to one of those. Attached to an EXISTING
+    `Connection` by `connection_id` (never a standalone record of "these two parts touch" — that fact
+    already lives on `Connection` itself; duplicating it here would create two records of one
+    physical joint that can silently diverge).
+
+    Deliberately NOT geometry-touching — this is BOM/documentation-grade data (what a technician
+    reads to actually assemble the part), never a source of any dimension. Contrast with `FitBinding`
+    (construction-grade: derives an actual manufactured dimension). The two are related but distinct:
+    `fit_connector` (packages/ledger/apply.py) may READ a JoinAnnotation on the same pair to pick a
+    sensible default `clearance_mm` (press_fit -> tight/negative, bolted -> a small positive
+    clearance, welded -> zero) — but `FitBinding` never stores its own copy of `method`; there is
+    exactly one place a join's semantic classification lives.
+
+    `fastener`/`note` are free-text display data (mirrors `CouplingInput.rationale`'s own "nothing
+    downstream parses this, it's for a human reading the BOM" precedent) — never parsed, never
+    safety-relevant, so a typo or an unusual value can never break anything downstream."""
+
+    id: str
+    connection_id: str
+    method: Literal["bolted", "press_fit", "welded", "adhesive", "custom"]
+    fastener: Optional[str] = None   # e.g. "M5x16 socket cap" -- display only
+    note: Optional[str] = None       # free text, required in spirit for method="custom"
+
+
 class CouplingInput(_Strict):
     """One input to a coupling's relation (Phase 2, 2026-07-19): EITHER a literal stated value (a duty
     condition — g-load, operating pressure), OR sourced from a part's own param (`from_instance` +
@@ -226,6 +253,43 @@ class Coupling(_Strict):
     inputs: dict[str, CouplingInput] = Field(default_factory=dict)
 
 
+class FitInput(_Strict):
+    """One dimension role in a fit: which of the HOST's own params supplies the value, and which of
+    the CONNECTOR's own params receives the computed (host value + clearance) result. Round hosts
+    have one FitInput (dia); rect hosts have two (width, height)."""
+
+    host_param: str
+    connector_param: str
+
+
+class FitBinding(_Strict):
+    """A typed edge (2026-07-27, ENGINEERING_GRAPH_ARCHITECTURE.md follow-on): CONNECTOR's fitted
+    geometry params are DERIVED from HOST's own resolved cross-section, computed ONCE at wire time
+    and written through the ordinary ParameterDelta path (packages/ledger/apply.py::apply_delta) --
+    never a live-recomputed, never-logged value (see packages/couplings/resolve.py's Coupling, which
+    IS live-recomputed but deliberately never touches `params`; a connector's bore is geometry, not a
+    safety scalar, so it stays on the ParameterDef-set-by-delta side of that line).
+
+    This is the wiring FACT, event-sourced like Coupling itself -- the resolved dimension lives in
+    the connector's own `params` (an ordinary, auditable ParameterDef), not here. `fit_gate_findings`
+    (packages/transport/app.py) re-derives what compute_fit WOULD produce today and compares it
+    against what's actually stored, to catch drift after the host resizes -- this record is what that
+    check re-verifies against, not a cache of the number itself.
+
+    `kind` mirrors FitProfile/FitSocketSpec's own kind ("round" | "rect") -- both sides must agree,
+    checked at wire time (packages/ledger/apply.py::apply_fit_op), never inferred here.
+    `clearance_mm` is signed: positive = clearance/slip fit, negative = interference/press fit. No
+    `join_kind` field on purpose -- a JoinAnnotation (when built) is read ONCE at wire time to pick a
+    clearance default; FitBinding never keeps a second, potentially-diverging copy of that label."""
+
+    id: str
+    connector_instance: str
+    host_instance: str
+    kind: Literal["round", "rect"]
+    inputs: list[FitInput]
+    clearance_mm: float = 0.0
+
+
 class MasterParametricLedger(_Strict):
     project_metadata: ProjectMetadata
     global_constraints: GlobalConstraints = Field(default_factory=GlobalConstraints)
@@ -239,8 +303,14 @@ class MasterParametricLedger(_Strict):
     # the mate solver, not by a hand-set transform (which still works as a fallback/override). Empty
     # for every design that predates this — fully backward-compatible.
     connections: list[Connection] = Field(default_factory=list)
+    # 2026-07-27 -- semantic HOW-joined data attached to a Connection (bolted/press_fit/welded/...).
+    # BOM/documentation-grade only, never geometry-touching. See JoinAnnotation's own docstring.
+    join_annotations: list[JoinAnnotation] = Field(default_factory=list)
     # Phase 2 (2026-07-19) — typed load couplings: a target's load DERIVED from a registered relation
     # over source parts/duty, instead of a stated scalar. Empty for every pre-Phase-2 design.
     couplings: list[Coupling] = Field(default_factory=list)
+    # 2026-07-27 -- typed fit edges: a connector's own params derived ONCE from a host's cross-section
+    # and written as ordinary deltas (see FitBinding's own docstring). Empty for every pre-existing design.
+    fit_bindings: list[FitBinding] = Field(default_factory=list)
     derived: DerivedSafety = Field(default_factory=DerivedSafety)
     review: Review = Field(default_factory=Review)

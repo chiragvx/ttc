@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import FitSocketSpec, cylinder_end_interfaces
 
 _MIN_WALL_MM = 0.8
 
@@ -61,4 +62,12 @@ SPAR_JOINER_SLEEVE = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    # 2026-07-27 (fitted-joint mechanism, Stage 0 round-family proof) — this sleeve's inner_dia_mm is
+    # exactly the "sleeve wrapping a shaft" case a fit_connector derives, instead of being independently
+    # guessed/typed. See packages/subsystems/base.py::FitSocketSpec / fit_connector.
+    fit_socket=FitSocketSpec(kind="round", dim_params={"dia_mm": "inner_dia_mm"}),
+    # 2026-07-27 — a sleeve that JOINS two spar sections needs its own end interfaces to actually mate
+    # to what it's joining (previously zero interfaces despite the part's whole purpose being a joint).
+    # Built via render_standoff -> bd.Cylinder, standing along local Z by default (same as round_post).
+    interfaces=cylinder_end_interfaces("height_mm"),
 ))

@@ -60,4 +60,28 @@ describe("ProposalCard", () => {
     );
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
+
+  // 2026-08-01 — scoped `source` provenance tag: purely additive, must stay invisible until a delta
+  // actually sets a more-specific value than the default.
+  it("renders no source tag when source is absent or 'unsourced'", () => {
+    render(<ProposalCard outcomes={[outcome()]} onUndo={() => {}} undone={false} onHover={undefined} />);
+    expect(screen.queryByText(/verified|rule.derived|solver.validated|unsourced/i)).not.toBeInTheDocument();
+
+    render(
+      <ProposalCard outcomes={[outcome({ source: "unsourced" })]} onUndo={() => {}} undone={false} onHover={undefined} />,
+    );
+    expect(screen.queryByText(/unsourced/i)).not.toBeInTheDocument();
+  });
+
+  it("renders the source tag next to the value when a delta declares one", () => {
+    render(
+      <ProposalCard
+        outcomes={[outcome({ source: "solver_validated" })]}
+        onUndo={() => {}}
+        undone={false}
+        onHover={undefined}
+      />,
+    );
+    expect(screen.getByText("solver validated")).toBeInTheDocument();
+  });
 });

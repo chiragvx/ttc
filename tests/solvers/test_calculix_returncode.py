@@ -55,7 +55,7 @@ def test_solve_raises_on_nonzero_ccx_returncode_even_with_a_parseable_frd(monkey
     real SolveResult. It must now surface as a solver failure instead."""
     import packages.truth_plane.solvers.calculix as calculix_module
 
-    def _fake_run(cmd, cwd, capture_output, text, timeout):
+    def _fake_run(cmd, cwd, capture_output, text, timeout, env=None):
         # Simulate ccx: it failed, but (as CalculiX can) still left a parseable .frd from a
         # partial/degenerate solve -- the exact scenario a bare "did a .frd get written" check
         # cannot catch.
@@ -76,7 +76,7 @@ def test_solve_raises_on_error_in_output_even_with_returncode_zero(monkeypatch):
     a *ERROR in ccx's own output as a solver failure."""
     import packages.truth_plane.solvers.calculix as calculix_module
 
-    def _fake_run(cmd, cwd, capture_output, text, timeout):
+    def _fake_run(cmd, cwd, capture_output, text, timeout, env=None):
         with open(os.path.join(cwd, "job.frd"), "w", encoding="utf-8") as fh:
             fh.write(_degenerate_but_parseable_frd())
         return _FakeCompletedProcess(returncode=0, stdout="*ERROR in e_c3d: zero pivot\n")
@@ -105,7 +105,7 @@ def test_solve_still_succeeds_on_a_clean_zero_returncode_run(monkeypatch):
         " -3\n"
     )
 
-    def _fake_run(cmd, cwd, capture_output, text, timeout):
+    def _fake_run(cmd, cwd, capture_output, text, timeout, env=None):
         with open(os.path.join(cwd, "job.frd"), "w", encoding="utf-8") as fh:
             fh.write(clean_frd)
         return _FakeCompletedProcess(returncode=0, stdout="CalculiX finished\n")

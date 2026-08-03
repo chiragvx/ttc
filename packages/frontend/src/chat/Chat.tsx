@@ -6,12 +6,14 @@ import { FeatureOpCard } from "./FeatureOpCard";
 import { InstanceOpCard } from "./InstanceOpCard";
 import { MessageList } from "./MessageList";
 import { ProposalCard } from "./ProposalCard";
+import { ResearchCard } from "./ResearchCard";
 import { ValidationCard } from "./ValidationCard";
+import { buildCorrectionMessage } from "./buildCorrectionMessage";
 import { shouldAutoCorrect } from "./shouldAutoCorrect";
 import { summarizeOutcomes } from "./summarizeOutcomes";
 import { streamChat } from "../api";
 import type { LlmSettings } from "../settings";
-import type { ChatEvent, ChatMessage, ConnectionOp, ConnectionOpOutcome, CouplingOp, CouplingOpOutcome, DeltaOutcome, FeatureOp, FeatureOpOutcome, InstanceOp, InstanceOpOutcome, ParameterDelta, ValidationResult } from "../types";
+import type { ChatEvent, ChatMessage, ConnectionOp, ConnectionOpOutcome, CouplingOp, CouplingOpOutcome, DeltaOutcome, FeatureOp, FeatureOpOutcome, FitOp, FitOpOutcome, InstanceOp, InstanceOpOutcome, JoinAnnotationOp, JoinAnnotationOpOutcome, ParameterDelta, ValidationResult } from "../types";
 
 interface Props {
   settings: LlmSettings;
@@ -21,6 +23,8 @@ interface Props {
   onApplyInstanceOp: (op: InstanceOp) => Promise<InstanceOpOutcome>;
   onApplyConnectionOp: (op: ConnectionOp) => Promise<ConnectionOpOutcome>;  // Phase 1b mate
   onApplyCouplingOp: (op: CouplingOp) => Promise<CouplingOpOutcome>;  // Phase 2b load coupling
+  onApplyFitOp: (op: FitOp) => Promise<FitOpOutcome>;  // 2026-07-27 fitted-dimension binding
+  onApplyJoinAnnotationOp: (op: JoinAnnotationOp) => Promise<JoinAnnotationOpOutcome>;  // 2026-07-27 semantic join annotation (BOM-only, never touches geometry)
   onUndoFeatureOp: (outcome: FeatureOpOutcome) => Promise<FeatureOpOutcome>;
   onUndoInstanceOp: (outcome: InstanceOpOutcome) => Promise<InstanceOpOutcome>;
   // called once after a whole batch of feature_ops/instance_ops finishes applying (a full proposal,
@@ -41,7 +45,7 @@ const uid = () => (crypto?.randomUUID?.() ?? String(Math.random()));
 // cap so a design it can't satisfy never loops forever (or burns tokens indefinitely).
 const MAX_AUTO_ROUNDS = 2;
 
-export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInstanceOp, onApplyConnectionOp, onApplyCouplingOp, onUndoFeatureOp, onUndoInstanceOp, onOpsApplied, onValidate, onOpenSettings, onUserMessage, onHoverInstance }: Props) {
+export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInstanceOp, onApplyConnectionOp, onApplyCouplingOp, onApplyFitOp, onApplyJoinAnnotationOp, onUndoFeatureOp, onUndoInstanceOp, onOpsApplied, onValidate, onOpenSettings, onUserMessage, onHoverInstance }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [undone, setUndone] = useState<Record<string, boolean>>({});
@@ -103,10 +107,23 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
       // changed no geometry, so it must not trigger a /validate call or burn an auto-correct round
       // (2026-07-19 review). Mutated by onEvent below; read after the stream loop.
       let appliedGeometry = false;
+      // instance_ops THIS turn proposed (regardless of outcome) -- if this turn is itself a
+      // correction attempt and the self-check still fails afterward, the NEXT correction round's
+      // message needs to know what was just tried, so it can tell the model "that exact fix didn't
+      // work, don't repeat it" instead of silently reissuing it (2026-07-26 live repro, confirmed
+      // twice: an identical move_instance retried verbatim across both correction rounds on the
+      // cubesat test, and an identical remove_instance retried verbatim on the soldering-stand test
+      // -- both burned the entire auto-correct budget on a pure no-op).
+      const thisTurnInstanceOps: InstanceOp[] = [];
 
       const onEvent = async (e: ChatEvent) => {
         if (e.type === "token") {
           patch(aid, (m) => ({ ...m, text: m.text + e.text }));
+        } else if (e.type === "research") {
+          // Fires BEFORE any token/proposal event, at most once per turn (see the backend's /chat
+          // handler) — pure display data, same as scope_proposal below: no apply loop, no outcomes.
+          const { type: _type, ...finding } = e;
+          patch(aid, (m) => ({ ...m, researchFinding: finding }));
         } else if (e.type === "proposal") {
           // instance_ops FIRST: a delta/feature_op in this SAME proposal may target an instance_id
           // that only exists once its own add_instance has landed (packages/ledger/apply.py resolves
@@ -115,6 +132,7 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
           // turn. deltas next, feature_ops last (a cut may also want to target a part instance_ops
           // just added).
           if (e.instance_ops.length) {
+            thisTurnInstanceOps.push(...e.instance_ops);
             const instanceOpOutcomes: (InstanceOpOutcome | undefined)[] = new Array(e.instance_ops.length).fill(undefined);
             patch(aid, (m) => ({ ...m, instanceOps: e.instance_ops, instanceOpOutcomes: [...instanceOpOutcomes] }));
             for (let i = 0; i < e.instance_ops.length; i++) {
@@ -151,6 +169,34 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
             const outcomes = await onApply(e.deltas);
             patch(aid, (m) => ({ ...m, outcomes }));
             if (outcomes.some((o) => o.status === "APPLIED" || o.status === "APPLIED_ADVISORY")) appliedGeometry = true;
+          }
+          if (e.fit_ops?.length) {
+            // AFTER deltas (2026-07-27): compute_fit derives the connector's dimension from the
+            // host's CURRENT cross-section, computed ONCE at wire time — a fit applied before this
+            // turn's own deltas resize the host would derive against its stale default and be
+            // drifted the instant it's created. Same "propose then auto-apply" boundary otherwise.
+            const fitOutcomes: (FitOpOutcome | undefined)[] = new Array(e.fit_ops.length).fill(undefined);
+            patch(aid, (m) => ({ ...m, fitOps: e.fit_ops, fitOpOutcomes: [...fitOutcomes] }));
+            for (let i = 0; i < e.fit_ops.length; i++) {
+              fitOutcomes[i] = await onApplyFitOp(e.fit_ops[i]);
+              patch(aid, (m) => ({ ...m, fitOpOutcomes: [...fitOutcomes] }));
+            }
+            if (fitOutcomes.some((o) => o?.status === "APPLIED")) appliedGeometry = true;
+            await onOpsApplied();
+          }
+          if (e.join_annotation_ops?.length) {
+            // Purely semantic BOM data (bolted/press_fit/welded/adhesive/custom) — never touches
+            // geometry (contrast fit_ops just above; see packages/ledger/schema.py::JoinAnnotation),
+            // but same "propose then auto-apply" boundary as every other op kind for a consistent UX.
+            const joinAnnotationOutcomes: (JoinAnnotationOpOutcome | undefined)[] = new Array(e.join_annotation_ops.length).fill(undefined);
+            patch(aid, (m) => ({ ...m, joinAnnotationOps: e.join_annotation_ops, joinAnnotationOpOutcomes: [...joinAnnotationOutcomes] }));
+            for (let i = 0; i < e.join_annotation_ops.length; i++) {
+              joinAnnotationOutcomes[i] = await onApplyJoinAnnotationOp(e.join_annotation_ops[i]);
+              patch(aid, (m) => ({ ...m, joinAnnotationOpOutcomes: [...joinAnnotationOutcomes] }));
+            }
+            // No appliedGeometry flag here — a JoinAnnotation never touches geometry or resets an
+            // engineer sign-off, unlike every op kind above.
+            await onOpsApplied();
           }
           if (e.feature_ops.length) {
             // sequential, not Promise.all — each op is validated against the ledger state the
@@ -192,6 +238,8 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
               !m.instanceOps?.length &&
               !m.connectionOps?.length &&
               !m.couplingOps?.length &&
+              !m.fitOps?.length &&
+              !m.joinAnnotationOps?.length &&
               !m.scopeProposal &&
               !m.clarification &&
               !m.suggestions?.length;
@@ -223,14 +271,17 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
           const report = await onValidate(lastIntentRef.current);
           patch(aid, (m) => ({ ...m, validation: report }));
           if (shouldAutoCorrect(report) && autoRoundRef.current < MAX_AUTO_ROUNDS && settings.apiKey) {
+            // capture BEFORE incrementing: was THIS turn itself already a correction attempt? If so,
+            // thisTurnInstanceOps is a fix that just failed (the self-check above still found
+            // problems) -- pass it to buildCorrectionMessage so the NEXT round's message says so
+            // explicitly, instead of the model having no signal that repeating it is pointless (see
+            // thisTurnInstanceOps' own declaration comment for the two confirmed live repros this
+            // fixes). Pass [] when this turn was the ORIGINAL build, not a retry -- its own first-pass
+            // instance_ops are not a "prior fix attempt".
+            const priorAttemptOps = autoRoundRef.current >= 1 ? thisTurnInstanceOps : [];
             autoRoundRef.current += 1;
-            const issues = [...report.geometric.issues, ...(report.visual?.issues ?? [])];
-            const lines = issues.map((i) => `- ${i.message}`).join("\n");
-            setPendingCorrection(   // the effect fires it once streaming settles, never re-entrantly
-              `Self-check of what you just built found problems:\n${lines}\n\n` +
-              `Fix them — adjust the parts/params so the design validates. ` +
-              `(auto-correction round ${autoRoundRef.current} of ${MAX_AUTO_ROUNDS})`,
-            );
+            const correction = buildCorrectionMessage(report, autoRoundRef.current, MAX_AUTO_ROUNDS, priorAttemptOps);
+            setPendingCorrection(correction);   // the effect fires it once streaming settles, never re-entrantly
           }
         } catch {
           /* validation is best-effort; a failure must never break the chat turn */
@@ -390,6 +441,54 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
         ),
       });
     }
+    if (m.fitOps && m.fitOps.length > 0) {
+      sections.push({
+        label: "Fits",
+        content: (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {m.fitOps.map((op, i) => {
+              const o = m.fitOpOutcomes?.[i];
+              const ok = o?.status === "APPLIED";
+              const color = o == null ? "#8b949e" : ok ? "#3fb950" : "#f85149";
+              const label = op.op === "fit_connector"
+                ? `${op.connector_instance} <- ${op.host_instance}`
+                : op.op === "resync_fit"
+                ? `resync ${op.id}`
+                : `unfit ${op.id}`;
+              return (
+                <div key={i} style={{ fontSize: 11, color: "#c9d1d9" }}>
+                  <span style={{ color }}>{o == null ? "…" : ok ? "✓" : "✕"}</span> {label}
+                  {o && !ok && o.message ? <span style={{ color: "#f85149" }}> — {o.message}</span> : null}
+                </div>
+              );
+            })}
+          </div>
+        ),
+      });
+    }
+    if (m.joinAnnotationOps && m.joinAnnotationOps.length > 0) {
+      sections.push({
+        label: "Joins",
+        content: (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {m.joinAnnotationOps.map((op, i) => {
+              const o = m.joinAnnotationOpOutcomes?.[i];
+              const ok = o?.status === "APPLIED";
+              const color = o == null ? "#8b949e" : ok ? "#3fb950" : "#f85149";
+              const label = op.op === "add_join_annotation"
+                ? `${op.connection_id}: ${op.method}`
+                : `remove ${op.id}`;
+              return (
+                <div key={i} style={{ fontSize: 11, color: "#c9d1d9" }}>
+                  <span style={{ color }}>{o == null ? "…" : ok ? "✓" : "✕"}</span> {label}
+                  {o && !ok && o.message ? <span style={{ color: "#f85149" }}> — {o.message}</span> : null}
+                </div>
+              );
+            })}
+          </div>
+        ),
+      });
+    }
     if (m.scopeProposal) {
       const scope = m.scopeProposal;
       sections.push({
@@ -427,6 +526,7 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
     }
     return (
       <>
+        {m.researchFinding && <ResearchCard finding={m.researchFinding} />}
         <ChangesetCard sections={sections} />
         {m.validation && <ValidationCard result={m.validation} />}
         {m.suggestions && m.suggestions.length > 0 && (

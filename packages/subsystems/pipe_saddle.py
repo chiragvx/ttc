@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -71,6 +71,28 @@ def _check(p) -> list[str]:
     return out
 
 
+def _base_frame(p):
+    """Bottom face of the saddle block (z=0, normal -Z). `_build` positions the box with
+    `bd.Pos(0, 0, p.height_mm / 2.0) * bd.Box(...)`, so unlike `plate_face_interfaces`'s assumed
+    ORIGIN-CENTERED box, this block's real faces sit at z=0 and z=height_mm, not +/-height_mm/2 --
+    confirmed by reading `_build` directly. This is the face the two `mount[i].bore` holes pass
+    through -- the real bolt-down mount against whatever structure carries the cradled tube."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, 0.0), normal=(0.0, 0.0, -1.0))
+
+
+def _top_frame(p):
+    """Top face of the saddle block (z=height_mm, normal +Z). The open cradle channel notches into
+    the center of this face (at defaults, z in [height - 1.6*cradle_r, height + 0.4*cradle_r] is void
+    -- confirmed against `cradle_z = height_mm - cradle_r*0.6` and `cradle_r` in `_build`), so the
+    ORIGIN itself sits over open air, not solid material. This is still the real bearing PLANE a
+    strap or a bridging cover plate rests on across the two flat ears on either side of the channel
+    (the only material actually at z=height_mm) -- the same "spans the void, bears on the ears"
+    geometry a hose clamp or zip-tie strap uses in practice, not a flush face-to-face mate."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, p.height_mm), normal=(0.0, 0.0, 1.0))
+
+
 PIPE_SADDLE = register_subsystem(Subsystem(
     name="pipe_saddle",
     description="Round trough with base + hole pattern (for clamping a tube) -- structural/mounting geometry (FDM/FFF or CNC)",
@@ -87,4 +109,14 @@ PIPE_SADDLE = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     fea_eligible=False,
+    # 2026-07-28 (interface-coverage sweep) -- bespoke (not a shared-helper) shape: the block is
+    # offset along Z (bottom at z=0, top at z=height_mm), not origin-centered like
+    # `plate_face_interfaces` assumes, so its two real faces are declared directly here instead
+    # (same pattern as `floor_flange.py`/`clamp_two_halves.py`, the identical-geometry sibling of
+    # this file). `base` is the real bolt-down mount (the two `mount[i].bore` holes pass through it);
+    # `top` is the flat ear surface beside the open cradle channel.
+    interfaces=[
+        InterfaceSpec(name="base", kind="mount", frame=_base_frame),
+        InterfaceSpec(name="top", kind="mount", frame=_top_frame),
+    ],
 ))

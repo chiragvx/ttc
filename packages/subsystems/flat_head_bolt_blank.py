@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -52,6 +52,23 @@ def _check(p) -> list[str]:
     return out
 
 
+def _head_face(p):
+    """Local mate frame at section1's (the head's) bottom face -- z=0 by construction (`_build` places
+    section1 from z=0 to z=len1_mm, NOT centered at the origin, unlike the generic cylinder helper).
+    This is the underside of the (typically larger) head -- the face that seats flush against whatever
+    the bolt bears on -- so its outward normal points -Z (away from the part)."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, 0.0), normal=(0.0, 0.0, -1.0))
+
+
+def _tip_face(p):
+    """Local mate frame at section2's (the shank's) far tip -- z = len1_mm + len2_mm by construction
+    (section2 sits stacked directly on top of section1). Outward normal is +Z."""
+    from packages.subsystems.base import Frame
+    z = p.len1_mm + p.len2_mm
+    return Frame(origin=(0.0, 0.0, z), normal=(0.0, 0.0, 1.0))
+
+
 FLAT_HEAD_BOLT_BLANK = register_subsystem(Subsystem(
     name="flat_head_bolt_blank",
     description="Countersunk head + shank -- structural/mounting geometry (FDM/FFF or CNC)",
@@ -67,4 +84,14 @@ FLAT_HEAD_BOLT_BLANK = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    # 2026-07-28 (interface-coverage sweep, final wave): a stepped two-diameter shape -- section1 (the
+    # head, z=0..len1_mm) with a narrower section2 (the shank) stacked on top (z=len1_mm..+len2_mm),
+    # NOT centered at the origin, so `cylinder_end_interfaces` (assumes a single-diameter cylinder
+    # centered at the origin) doesn't fit -- bespoke frames computed from the part's own real
+    # z-offsets instead, same pattern as `button_head_bolt_blank`/`T_nut`'s flange/shaft. `head_face`
+    # is the head's real bearing face; `tip_face` is the shank's free end.
+    interfaces=[
+        InterfaceSpec(name="head_face", kind="mount", frame=_head_face),
+        InterfaceSpec(name="tip_face", kind="mount", frame=_tip_face),
+    ],
 ))

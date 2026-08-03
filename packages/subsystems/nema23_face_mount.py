@@ -9,6 +9,7 @@ of a rectangular window.
 from __future__ import annotations
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import plate_face_interfaces
 
 _MIN_WALL_MM = 0.8
 
@@ -71,4 +72,6 @@ NEMA23_FACE_MOUNT = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    interfaces=plate_face_interfaces("thickness_mm"),  # 2026-07-28 — flat plate centered at origin,
+    # thickness along local Z (bore + 4 corner holes are inset cuts, same shape family as panel.py)
 ))

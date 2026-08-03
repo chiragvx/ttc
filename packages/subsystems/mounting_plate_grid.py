@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import ParamSpec, Subsystem, plate_face_interfaces, register_subsystem
 
 _FRAGMENT = """\
 ## Subsystem: Mounting-plate grid
@@ -70,4 +70,7 @@ MOUNTING_PLATE_GRID = register_subsystem(Subsystem(
     ],
     build=_build, volume=_volume, invariants=_check,
     fea_eligible=True,  # single Box, hole grid invariant-guaranteed clear of every edge
+    interfaces=plate_face_interfaces("thickness_mm"),  # 2026-07-28 — width_mm x height_mm x
+    # thickness_mm Box centered at the origin (line 24), thickness along local Z — exactly the
+    # plate_face_interfaces convention; the hole grid itself doesn't change the two flat mount faces.
 ))

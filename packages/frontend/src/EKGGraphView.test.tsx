@@ -17,6 +17,8 @@ function makeLedger(overrides: Partial<LedgerGraphData> = {}): LedgerGraphData {
     instances: {},
     connections: [],
     couplings: [],
+    fit_bindings: [],
+    join_annotations: [],
     ...overrides,
   };
 }
@@ -40,7 +42,7 @@ describe("computeGraphData", () => {
     });
     const { nodes, edges } = computeGraphData(ledger);
     expect(edges).toEqual([]);
-    expect(nodes).toEqual([{ id: "i1", subsystemType: "bracket", disconnected: true, params: [] }]);
+    expect(nodes).toEqual([{ id: "i1", subsystemType: "bracket", disconnected: true, hasCoupling: false, params: [] }]);
   });
 
   it("skips a coupling input with a dangling from_instance instead of crashing", () => {
@@ -53,7 +55,39 @@ describe("computeGraphData", () => {
     const { nodes, edges } = computeGraphData(ledger);
     expect(edges).toEqual([]);
     // the target itself still resolves, so it's touched even though its only input's source is dangling
-    expect(nodes).toEqual([{ id: "i1", subsystemType: "bracket", disconnected: false, params: [] }]);
+    expect(nodes).toEqual([{ id: "i1", subsystemType: "bracket", disconnected: false, hasCoupling: true, params: [] }]);
+  });
+
+  // 2026-07-27: a FitBinding has no literal-only-input analog to CouplingInput.value — both
+  // connector_instance and host_instance are always real instances at wire time — so this mirrors
+  // the CONNECTION dangling-endpoint test above, not the coupling one.
+  it("skips a fit binding with a dangling connector or host instead of crashing", () => {
+    const ledger = makeLedger({
+      instances: { host: { id: "host", subsystem_type: "round_tube" } },
+      fit_bindings: [
+        { id: "fit_1", connector_instance: "ghost", host_instance: "host", kind: "round", inputs: [], clearance_mm: 0 },
+      ],
+    });
+    const { nodes, edges } = computeGraphData(ledger);
+    expect(edges).toEqual([]);
+    expect(nodes).toEqual([{ id: "host", subsystemType: "round_tube", disconnected: true, hasCoupling: false, params: [] }]);
+  });
+
+  it("produces a directional fit edge (host -> connector) for a resolved fit binding", () => {
+    const ledger = makeLedger({
+      instances: {
+        tube: { id: "tube", subsystem_type: "round_tube" },
+        clamp: { id: "clamp", subsystem_type: "pipe_clamp" },
+      },
+      fit_bindings: [
+        { id: "fit_1", connector_instance: "clamp", host_instance: "tube", kind: "round", inputs: [{ host_param: "outer_dia_mm", connector_param: "bore_dia_mm" }], clearance_mm: 0.2 },
+      ],
+    });
+    const { nodes, edges } = computeGraphData(ledger);
+    expect(edges).toEqual([{ id: "fit-fit_1", source: "tube", target: "clamp", label: "fit", kind: "fit" }]);
+    const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
+    expect(byId.tube.disconnected).toBe(false);
+    expect(byId.clamp.disconnected).toBe(false);
   });
 
   it("does not crash and skips both a dangling connection AND a dangling coupling target on the same ledger", () => {
@@ -83,7 +117,7 @@ describe("computeGraphData", () => {
       ],
     });
     const { nodes } = computeGraphData(ledger);
-    expect(nodes).toEqual([{ id: "duct", subsystemType: "round_tube", disconnected: false, params: [] }]);
+    expect(nodes).toEqual([{ id: "duct", subsystemType: "round_tube", disconnected: false, hasCoupling: true, params: [] }]);
   });
 
   // 2026-07-19 review (MEDIUM), carried forward: when a coupling's target was dangling, the whole
@@ -99,7 +133,33 @@ describe("computeGraphData", () => {
       ],
     });
     const { nodes } = computeGraphData(ledger);
-    expect(nodes).toEqual([{ id: "plenum", subsystemType: "lofted_spindle", disconnected: false, params: [] }]);
+    // "plenum" is a coupling SOURCE here, not a target -- hasCoupling only marks targets (see below)
+    expect(nodes).toEqual([{ id: "plenum", subsystemType: "lofted_spindle", disconnected: false, hasCoupling: false, params: [] }]);
+  });
+
+  // 2026-07-27: the whole point of hasCoupling -- a Coupling whose inputs are ALL literal values (no
+  // from_instance at all) draws zero edges (nothing to draw FROM), so without this flag the node would
+  // look exactly like an unrelated, uncoupled part even though the ledger genuinely has a stated load
+  // targeting it.
+  it("flags a coupling target as hasCoupling even when every input is a literal value and no edge is drawn", () => {
+    const ledger = makeLedger({
+      instances: { leg: { id: "leg", subsystem_type: "square_tube" } },
+      couplings: [
+        {
+          id: "k1", target_instance: "leg", relation: "force_from_mass_accel",
+          inputs: { mass_g: { value: 50000 }, accel_g: { value: 2.0 } },
+        },
+      ],
+    });
+    const { nodes, edges } = computeGraphData(ledger);
+    expect(edges).toEqual([]);
+    expect(nodes[0].hasCoupling).toBe(true);
+  });
+
+  it("does not flag an uncoupled node as hasCoupling", () => {
+    const ledger = makeLedger({ instances: { i1: { id: "i1", subsystem_type: "bracket" } } });
+    const { nodes } = computeGraphData(ledger);
+    expect(nodes[0].hasCoupling).toBe(false);
   });
 
   it("flags a node touched by neither a connection nor a coupling as disconnected", () => {
@@ -136,7 +196,7 @@ describe("computeGraphData", () => {
     });
     const { edges } = computeGraphData(ledger);
     expect(edges).toEqual([
-      { id: "conn-c1", source: "i1", target: "i2", label: "mate: top<->bottom", kind: "connection", connectionKind: "mate" },
+      { id: "conn-c1", source: "i1", target: "i2", label: "mate: top<->bottom", kind: "connection", connectionKind: "mate", hasJoinAnnotation: false },
       { id: "cpl-k1-0", source: "i1", target: "i3", label: "bolt_preload", kind: "coupling" },
     ]);
   });
@@ -167,6 +227,7 @@ describe("computeGraphData", () => {
         id: "i1",
         subsystemType: "solar_panel_backing_plate",
         disconnected: true,
+        hasCoupling: false,
         params: [
           { key: "n_holes", value: 4, unit: "count" },
           { key: "thickness_mm", value: 1.5, unit: "mm" },
@@ -204,6 +265,65 @@ describe("computeGraphData connectionKind threading", () => {
   });
 });
 
+// ---------------------------------------------------------------------------------------------
+// join-annotation threading (2026-08-01) — a JoinAnnotation attaches BOM/documentation-grade "how
+// actually joined" data to an EXISTING Connection via `connection_id` (never a standalone
+// instance-to-instance record — see packages/ledger/schema.py::JoinAnnotation's own docstring), so
+// this mirrors the connectionKind-threading test above, plus a dangling-reference test mirroring the
+// connection/coupling/fit-binding dangling tests further up (constraint: this file's edges must
+// degrade gracefully, never crash, on an unresolved reference).
+// ---------------------------------------------------------------------------------------------
+describe("computeGraphData join annotation threading", () => {
+  it("flags a connection's edge with hasJoinAnnotation when a JoinAnnotation targets its connection_id", () => {
+    const ledger = makeLedger({
+      instances: {
+        i1: { id: "i1", subsystem_type: "bracket" },
+        i2: { id: "i2", subsystem_type: "bracket" },
+      },
+      connections: [
+        { id: "c1", a: { instance_id: "i1", interface: "top" }, b: { instance_id: "i2", interface: "bottom" }, kind: "bolted", gap_mm: 0 },
+      ],
+      join_annotations: [
+        { id: "ja1", connection_id: "c1", method: "bolted", fastener: "M5x16 socket cap" },
+      ],
+    });
+    const { edges } = computeGraphData(ledger);
+    expect(edges[0].hasJoinAnnotation).toBe(true);
+  });
+
+  it("does not flag a connection's edge when no JoinAnnotation targets its connection_id", () => {
+    const ledger = makeLedger({
+      instances: {
+        i1: { id: "i1", subsystem_type: "bracket" },
+        i2: { id: "i2", subsystem_type: "bracket" },
+      },
+      connections: [
+        { id: "c1", a: { instance_id: "i1", interface: "top" }, b: { instance_id: "i2", interface: "bottom" }, kind: "mate", gap_mm: 0 },
+      ],
+    });
+    const { edges } = computeGraphData(ledger);
+    expect(edges[0].hasJoinAnnotation).toBe(false);
+  });
+
+  it("does not crash and does not falsely flag an unrelated edge when a JoinAnnotation's connection_id is dangling", () => {
+    const ledger = makeLedger({
+      instances: {
+        i1: { id: "i1", subsystem_type: "bracket" },
+        i2: { id: "i2", subsystem_type: "bracket" },
+      },
+      connections: [
+        { id: "c1", a: { instance_id: "i1", interface: "top" }, b: { instance_id: "i2", interface: "bottom" }, kind: "mate", gap_mm: 0 },
+      ],
+      join_annotations: [
+        { id: "ja1", connection_id: "ghost-connection", method: "welded" },
+      ],
+    });
+    expect(() => computeGraphData(ledger)).not.toThrow();
+    const { edges } = computeGraphData(ledger);
+    expect(edges[0].hasJoinAnnotation).toBe(false);
+  });
+});
+
 describe("edgeStyleFor", () => {
   const edge = (over: Partial<EKGComputedEdge>): EKGComputedEdge => ({
     id: "e", source: "a", target: "b", label: "", kind: "connection", ...over,
@@ -225,6 +345,31 @@ describe("edgeStyleFor", () => {
     expect(edgeStyleFor(edge({}))).toEqual(mate);
     expect(edgeStyleFor(edge({ connectionKind: "some_future_kind" }))).toEqual(mate);
   });
+
+  it("styles a fit edge distinctly from the coupling style and every connection kind", () => {
+    const fitStroke = edgeStyleFor(edge({ kind: "fit" })).stroke;
+    const otherStrokes = [
+      edgeStyleFor(edge({ kind: "coupling" })).stroke,
+      ...["containment", "bolted", "slip_fit", "mate"].map((k) => edgeStyleFor(edge({ connectionKind: k })).stroke),
+    ];
+    expect(otherStrokes).not.toContain(fitStroke);
+  });
+
+  it("styles a join-annotation-labeled connection distinctly from the coupling style, the fit style, and every connectionKind", () => {
+    const joinStroke = edgeStyleFor(edge({ connectionKind: "mate", hasJoinAnnotation: true })).stroke;
+    const otherStrokes = [
+      edgeStyleFor(edge({ kind: "coupling" })).stroke,
+      edgeStyleFor(edge({ kind: "fit" })).stroke,
+      ...["containment", "bolted", "slip_fit", "mate"].map((k) => edgeStyleFor(edge({ connectionKind: k })).stroke),
+    ];
+    expect(otherStrokes).not.toContain(joinStroke);
+  });
+
+  it("prefers the join-annotation style over the connectionKind style once a JoinAnnotation is attached", () => {
+    const withAnnotation = edgeStyleFor(edge({ connectionKind: "bolted", hasJoinAnnotation: true }));
+    const withoutAnnotation = edgeStyleFor(edge({ connectionKind: "bolted", hasJoinAnnotation: false }));
+    expect(withAnnotation.stroke).not.toBe(withoutAnnotation.stroke);
+  });
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -238,13 +383,13 @@ describe("mergeNodePositions", () => {
       id,
       type: "ekgCard",
       position: { x, y },
-      data: { subsystemType: "bracket", disconnected, selected: false, params: [] },
+      data: { subsystemType: "bracket", disconnected, selected: false, hasCoupling: false, params: [] },
     };
   }
 
   it("keeps the EXISTING (possibly dragged) position for an id already present in prevNodes", () => {
     const prev = [flowNode("i1", 999, -42)];
-    const computed: EKGComputedNode[] = [{ id: "i1", subsystemType: "bracket", disconnected: false, params: [] }];
+    const computed: EKGComputedNode[] = [{ id: "i1", subsystemType: "bracket", disconnected: false, hasCoupling: false, params: [] }];
 
     const merged = mergeNodePositions(prev, computed, null);
 
@@ -253,7 +398,7 @@ describe("mergeNodePositions", () => {
   });
 
   it("assigns a fresh deterministic position to a genuinely new id", () => {
-    const computed: EKGComputedNode[] = [{ id: "brand-new", subsystemType: "spacer", disconnected: true, params: [] }];
+    const computed: EKGComputedNode[] = [{ id: "brand-new", subsystemType: "spacer", disconnected: true, hasCoupling: false, params: [] }];
 
     const merged = mergeNodePositions([], computed, null);
 
@@ -265,7 +410,7 @@ describe("mergeNodePositions", () => {
 
   it("drops an id no longer present in the freshly computed nodes", () => {
     const prev = [flowNode("stays", 1, 1), flowNode("gone", 2, 2)];
-    const computed: EKGComputedNode[] = [{ id: "stays", subsystemType: "bracket", disconnected: false, params: [] }];
+    const computed: EKGComputedNode[] = [{ id: "stays", subsystemType: "bracket", disconnected: false, hasCoupling: false, params: [] }];
 
     const merged = mergeNodePositions(prev, computed, null);
 
@@ -274,7 +419,7 @@ describe("mergeNodePositions", () => {
 
   it("refreshes data (disconnected/selected) on an existing node without touching its position", () => {
     const prev = [flowNode("i1", 5, 7, false)];
-    const computed: EKGComputedNode[] = [{ id: "i1", subsystemType: "bracket", disconnected: true, params: [] }];
+    const computed: EKGComputedNode[] = [{ id: "i1", subsystemType: "bracket", disconnected: true, hasCoupling: false, params: [] }];
 
     const merged = mergeNodePositions(prev, computed, "i1");
 
@@ -284,9 +429,15 @@ describe("mergeNodePositions", () => {
   });
 
   it("does not mark any node selected when selectedInstanceId is null/undefined", () => {
-    const computed: EKGComputedNode[] = [{ id: "i1", subsystemType: "bracket", disconnected: false, params: [] }];
+    const computed: EKGComputedNode[] = [{ id: "i1", subsystemType: "bracket", disconnected: false, hasCoupling: false, params: [] }];
     expect(mergeNodePositions([], computed, null)[0].data.selected).toBe(false);
     expect(mergeNodePositions([], computed, undefined)[0].data.selected).toBe(false);
+  });
+
+  it("carries hasCoupling through into node data", () => {
+    const computed: EKGComputedNode[] = [{ id: "leg", subsystemType: "square_tube", disconnected: false, hasCoupling: true, params: [] }];
+    const merged = mergeNodePositions([], computed, null);
+    expect(merged[0].data.hasCoupling).toBe(true);
   });
 
   // 2026-07-19 review (LOW): a bare {id, type, position, data} literal for an EXISTING node dropped
@@ -299,7 +450,7 @@ describe("mergeNodePositions", () => {
       measured: { width: 140, height: 60 },
       dragging: true,
     } as EKGFlowNode;
-    const computed: EKGComputedNode[] = [{ id: "i1", subsystemType: "bracket", disconnected: false, params: [] }];
+    const computed: EKGComputedNode[] = [{ id: "i1", subsystemType: "bracket", disconnected: false, hasCoupling: false, params: [] }];
 
     const merged = mergeNodePositions([prev], computed, null);
 
@@ -402,6 +553,22 @@ describe("EKGGraphView", () => {
     expect(screen.getByTestId("ekg-node-lonely")).toHaveAttribute("data-disconnected", "true");
     expect(screen.getByTestId("ekg-node-i1")).toHaveAttribute("data-disconnected", "false");
     expect(screen.getByTestId("ekg-node-i2")).toHaveAttribute("data-disconnected", "false");
+  });
+
+  it("marks a coupling target's rendered node with data-has-coupling, even with an all-literal-input coupling", () => {
+    const ledger = makeLedger({
+      instances: {
+        leg: { id: "leg", subsystem_type: "square_tube" },
+        other: { id: "other", subsystem_type: "bracket" },
+      },
+      couplings: [
+        { id: "k1", target_instance: "leg", relation: "force_from_mass_accel", inputs: { mass_g: { value: 50000 } } },
+      ],
+    });
+    render(<EKGGraphView ledger={ledger} onSelectInstance={vi.fn()} />);
+
+    expect(screen.getByTestId("ekg-node-leg")).toHaveAttribute("data-has-coupling", "true");
+    expect(screen.getByTestId("ekg-node-other")).toHaveAttribute("data-has-coupling", "false");
   });
 
   it("marks the selected node distinctly, independent of its disconnected state", () => {

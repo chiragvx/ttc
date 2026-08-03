@@ -10,11 +10,14 @@ from __future__ import annotations
 import concurrent.futures
 import contextvars
 import dataclasses
+import functools
+import inspect
 import json
 import logging
 import os
 import secrets
 import tempfile
+import threading
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
@@ -35,9 +38,9 @@ from packages.subsystems import (
 from packages.subsystems.assembly_template import reconcile_all, reconcile_children
 from packages.subsystems.base import seed_instance
 from packages.couplings import RELATION_REGISTRY
-from packages.ledger.apply import apply_connection_op, apply_coupling_op, apply_delta, apply_feature_op, apply_instance_op
+from packages.ledger.apply import apply_connection_op, apply_coupling_op, apply_delta, apply_feature_op, apply_fit_op, apply_instance_op, apply_join_annotation_op
 from packages.ledger.bom import BOM, Component, ComponentKind, material
-from packages.ledger.deltas import ConnectionOp, CouplingOp, FeatureOp, InstanceOp, ParameterDelta
+from packages.ledger.deltas import ConnectionOp, CouplingOp, FeatureOp, FitOp, InstanceOp, JoinAnnotationOp, ParameterDelta
 from packages.ledger.events import EventLog
 from packages.ledger.derived_resolver import latest_verdict, ledger_with_derived
 from packages.ledger.fingerprint import fingerprint
@@ -320,29 +323,77 @@ def _gross_error_findings(ledger: MasterParametricLedger, instance_id: str | Non
     `instance_id` (default None -> every instance, the pre-existing behavior) restricts the check to
     just that one instance — an unrelated, grossly-undersized part elsewhere in the file must not block
     a different, fully-grounded part's export (foundations-audit H3, 2026-07-21)."""
+    findings: list[str] = []
+    for iid, fs, mat_name, basis in _iter_coarse_cantilever_fs(ledger, instance_id):
+        if fs < 1.0:
+            findings.append(
+                f"{iid}: coarse gross-error pre-check (worst-case cantilever over its own bounding "
+                f"box, {basis}, {mat_name}) gives FS={fs:.2f} < 1.0 — looks drastically undersized "
+                f"for its derived load. This is a CRUDE approximation, not a grounded verdict — run "
+                f"/analyze for the real FS before trusting this either way")
+    return findings
+
+
+def _iter_coarse_cantilever_fs(ledger: MasterParametricLedger, instance_id: str | None = None):
+    """Shared per-instance crude-FS computation behind `_gross_error_findings` (export-gate, only
+    reports fs<1.0) and `_coarse_structural_summary` (chat self-check, reports EVERY coupled instance
+    regardless of pass/fail — see that function's own docstring for why). Yields
+    `(instance_id, fs, material_name, basis)` — `basis` is a human-readable description of what load
+    the estimate rests on (a derived force, or a derived bending moment, always naming the relation(s)
+    involved so a live run is self-evident about which coupling actually fed the number).
+
+    2026-07-27 — extended to ALSO consume a `moment_nmm`-output coupling (e.g.
+    `bending_from_distributed_load`), not just `force_n` ones. `derived_load_n` (the function this
+    used to lean on exclusively) deliberately excludes moment/torque outputs — correct for its OWN
+    job of grounding the REAL solver's force-only `load_n` parameter (packages/couplings/resolve.py's
+    own docstring; converting a moment back to an equivalent force is a boundary-condition judgment
+    call, a human-wall item, NOT done here or there). But `sigma = 6*M/(w*h^2)` — extreme-fibre
+    bending stress for a rectangular section — is UNIVERSAL beam theory valid for a moment from ANY
+    source, not a new physics derivation; it is the exact same formula `Cantilever.
+    analytical_nominal_stress_mpa` already uses internally (there M = tip_load_n * length_mm), just
+    applied directly to an already-derived M instead of re-deriving one from a force. This is why a
+    live tool-cart test wiring `bending_from_distributed_load` onto its legs got NOTHING back from
+    this check before this change: the moment was correctly derived by the coupling engine, but
+    nothing downstream ever consumed it.
+
+    A force-output coupling is preferred when both exist on the same instance (matches the original,
+    longer-standing tip-load cantilever oracle exactly, and a bending moment from a component's own
+    stated `total_load_n`/`span_mm` is a coarser read than an actual tip force). A `torque_nm`-output
+    coupling (a twisting moment about the beam's own axis — e.g. `torque_from_force_radius`) has NO
+    consumption path here at all — shear-from-torsion needs the cross-section's polar moment, a
+    genuinely different physics case, not a one-line reuse of this bending formula — such an instance
+    yields nothing from this generator; `_coarse_structural_summary` below is responsible for
+    disclosing that gap explicitly instead of going silent about it."""
     try:
         from packages.truth_plane.solvers.cases import Cantilever
     except ImportError:
-        return []  # build123d not installed — every geometry build below would fail too
-    from packages.couplings import derived_load_n
+        return  # build123d not installed — every geometry build below would fail too
+    from packages.couplings import derived_load_n, resolve_couplings
     from packages.ledger.bom import material as material_lookup
 
     mat = material_lookup(ledger.domains.structure.material_profile)
-    findings: list[str] = []
     items = ledger.instances.items() if instance_id is None else (
         ((instance_id, ledger.instances[instance_id]),) if instance_id in ledger.instances else ()
     )
+    all_couplings = resolve_couplings(ledger)
     for iid, inst in items:
         load_n, _reason = derived_load_n(ledger, iid)
+        moment_nmm: float | None = None
+        moment_relations: list[str] = []
         if load_n is None:
-            continue  # no coupling-derived load on this part — nothing to gross-error-check
+            moment_results = [r for r in all_couplings if r.target_instance == iid and r.is_known
+                              and r.output_quantity == "moment_nmm"]
+            if not moment_results:
+                continue  # nothing this generator can compute a load-basis from
+            moment_nmm = sum(r.value for r in moment_results)
+            moment_relations = sorted({r.relation for r in moment_results})
         sub = get_subsystem(inst.subsystem_type)
         if sub.geometry_builder is None:
             continue
         try:
-            # bounded (2026-07-21, F1) -- this runs on every /export/check; a wedged build on ONE
-            # instance must not hang the whole gross-error pass. A timeout is just another build
-            # failure here, same as any other Exception -- skip this instance's gross-error check.
+            # bounded (2026-07-21, F1) -- this runs on every /export/check (and now /validate too); a
+            # wedged build on ONE instance must not hang the whole pass. A timeout is just another
+            # build failure here, same as any other Exception -- skip this instance's check.
             part = _bounded_geometry_build(sub.geometry_builder, ledger, iid)
         except Exception:
             continue
@@ -353,17 +404,76 @@ def _gross_error_findings(ledger: MasterParametricLedger, instance_id: str | Non
         height_mm, width_mm, length_mm = dims
         if height_mm <= 0.0 or width_mm <= 0.0 or length_mm <= 0.0:
             continue
-        cant = Cantilever(length_mm=length_mm, width_mm=width_mm, height_mm=height_mm,
-                          youngs_mod_mpa=mat.youngs_mod_mpa, poisson=mat.poisson,
-                          yield_mpa=mat.yield_mpa, tip_load_n=load_n)
-        fs = cant.analytical_fs
-        if fs < 1.0:
-            findings.append(
-                f"{iid}: coarse gross-error pre-check (worst-case cantilever over its own bounding "
-                f"box, {load_n:.1f} N derived load, {mat.name}) gives FS={fs:.2f} < 1.0 — looks "
-                f"drastically undersized for its derived load. This is a CRUDE approximation, not a "
-                f"grounded verdict — run /analyze for the real FS before trusting this either way")
-    return findings
+        if load_n is not None:
+            cant = Cantilever(length_mm=length_mm, width_mm=width_mm, height_mm=height_mm,
+                              youngs_mod_mpa=mat.youngs_mod_mpa, poisson=mat.poisson,
+                              yield_mpa=mat.yield_mpa, tip_load_n=load_n)
+            yield iid, cant.analytical_fs, mat.name, f"{load_n:.1f} N derived force"
+        else:
+            sigma_mpa = 6.0 * moment_nmm / (width_mm * height_mm ** 2)
+            fs = (mat.yield_mpa / sigma_mpa) if sigma_mpa > 0.0 else float("inf")
+            basis = (f"{moment_nmm:.1f} N*mm derived bending moment (relation: "
+                    f"{'+'.join(moment_relations)})")
+            yield iid, fs, mat.name, basis
+
+
+def _coarse_structural_summary(ledger: MasterParametricLedger) -> "ValidationReport":
+    """2026-07-27 — the chat self-check's missing third leg. `/export/check` has ALWAYS had a coarse
+    FS estimate available via `_gross_error_findings` above, but that function only speaks up when a
+    part looks catastrophically undersized (fs<1.0) — it never runs at all during ordinary chat, since
+    only export gating calls it. Live repro: a tool-cart build explicitly asked "make sure it can
+    support real tool weight without buckling" and wired `coupling_ops` correctly (Inversion #1's
+    grounded-load path worked exactly as designed) — but the ENTIRE conversation, through many rounds
+    of geometry fixes, never surfaced a single actual number back to the user. The load was derived;
+    nothing ever answered the question that was asked.
+
+    This reuses the SAME crude cantilever-over-bounding-box estimate (never a new physics derivation,
+    never a substitute for the real solver), but reports EVERY coupled+buildable instance's FS —
+    passing or not — as an "info"/"warning" self-check issue, so a real (if rough) number appears the
+    moment a load is wired, without waiting for an export attempt. Still explicitly NOT a grounded
+    verdict in its own message text — `/analyze` remains the only source of a real FS (Inversion #1
+    is unchanged: this never writes `ledger.derived.*`).
+
+    2026-07-27 deep-dive addendum: `_iter_coarse_cantilever_fs` now also covers bending-moment
+    couplings (see its own docstring), but it STILL can't turn a `torque_nm` coupling, an unresolvable
+    one, or a build failure into an FS. Silently omitting those instances would reproduce the EXACT
+    bug this function exists to fix — a coupling was wired, and the user gets nothing back — just for
+    a different reason. The second pass below finds every instance with at least one KNOWN coupling
+    that `_iter_coarse_cantilever_fs` didn't already cover, and says so explicitly instead."""
+    from packages.couplings import resolve_couplings
+    from packages.truth_plane.validate import ValidationIssue, ValidationReport
+
+    issues: list[ValidationIssue] = []
+    covered: set[str] = set()
+    for iid, fs, mat_name, basis in _iter_coarse_cantilever_fs(ledger):
+        covered.add(iid)
+        severity = "warning" if fs < 1.0 else "info"
+        issues.append(ValidationIssue(
+            check="structural", severity=severity, instances=[iid],
+            message=f"{iid}: coarse pre-check (worst-case cantilever over its own bounding box, "
+                    f"{basis}, {mat_name}) gives FS≈{fs:.2f}. This is a CRUDE estimate, not a grounded "
+                    f"verdict — run /analyze (or click 'Run analysis') for the real factor-of-safety "
+                    f"before trusting this either way.",
+        ))
+
+    uncovered_relations: dict[str, set[str]] = {}
+    for res in resolve_couplings(ledger):
+        if res.is_known and res.target_instance not in covered:
+            uncovered_relations.setdefault(res.target_instance, set()).add(res.relation)
+    for iid, relations in uncovered_relations.items():
+        issues.append(ValidationIssue(
+            check="structural", severity="info", instances=[iid],
+            message=f"{iid}: {len(relations)} coupling(s) derived (relation(s): "
+                    f"{', '.join(sorted(relations))}) but this coarse pre-check has no bending-stress "
+                    f"model for that output yet (e.g. a twisting torque, or the geometry couldn't be "
+                    f"built) — it is NOT being silently ignored, just not estimable here. Run /analyze "
+                    f"for the real solver's read.",
+        ))
+
+    ok = not any(i.severity == "error" for i in issues)  # this check never emits "error" — always ok
+    summary = "no coupled/buildable parts to estimate" if not issues else \
+        f"coarse estimate for {len(issues)} coupled part(s)"
+    return ValidationReport(ok=ok, issues=issues, summary=summary)
 
 
 def _all_gate_findings(ledger, instance_id: str | None = None):
@@ -390,12 +500,14 @@ def _all_gate_findings(ledger, instance_id: str | None = None):
     no narrower scope to apply there yet. `instance_id=None` preserves the exact pre-existing whole-ledger
     behavior for any caller that doesn't have a specific instance in mind."""
     from packages.couplings import coupling_gate_findings
+    from packages.subsystems.fit import fit_gate_findings
     from packages.subsystems.placement import connection_issues
     r1, u1 = all_discipline_findings(ledger)
     r2, u2 = coupling_gate_findings(ledger, instance_id)
     r3 = connection_issues(ledger, instance_id)
     r4 = _gross_error_findings(ledger, instance_id)
-    return r1 + r2 + r3 + r4, u1 + u2
+    r5, u5 = fit_gate_findings(ledger, instance_id)
+    return r1 + r2 + r3 + r4 + r5, u1 + u2 + u5
 
 
 class ProposeRequest(BaseModel):
@@ -434,6 +546,54 @@ class AddInstanceRequest(BaseModel):
 
 def _sse(obj: dict) -> str:
     return f"data: {json.dumps(obj)}\n\n"
+
+
+def _rest_error_guard(fn):
+    """Reusable REST-route safety net (2026-07-31, transport-hardening pass). `/chat` and `/ws`
+    already wrap their own bodies in a broad `except Exception` that logs via `logger.exception`
+    and answers with a well-formed protocol message instead of dying (see their own comments) --
+    every OTHER route in this file had no such guard, so an unanticipated bug (a bad ledger state,
+    a third-party lib raising something unexpected, ...) surfaced as FastAPI's own bare, opaque 500
+    with no server-side log line pointing at where it came from. Wrapping each handler individually
+    would mean repeating the same try/except twenty-odd times (and inevitably missing one on the
+    next new route) -- this decorator is the single mechanism instead.
+
+    Preserves two things a naive wrapper would break:
+      - `fn`'s sync-vs-async-ness. FastAPI decides how to RUN an endpoint (`async def` awaited
+        directly on the event loop; plain `def` offloaded to a worker thread via
+        `run_in_threadpool`) by checking `asyncio.iscoroutinefunction` on whatever got registered.
+        Several of these routes (`/mesh`, `/export/step`, `/mesh/features`, ...) do genuinely heavy
+        synchronous OCCT work and depend on staying in the threadpool -- wrapping them in an
+        `async def` here would silently move that work onto the event loop and block every other
+        in-flight request this process is serving.
+      - `fn`'s own signature, via `functools.wraps` (whose `__wrapped__` FastAPI's own
+        `inspect.signature(..., follow_wrapped=True)` dependency-injection introspection already
+        follows) -- so path/query params and request-body models keep resolving exactly as before.
+
+    Only catches what escapes `fn` uncaught -- a route that already has its own narrower
+    `except KeyError`/`except ValueError`/`except TimeoutError`/... for an expected condition keeps
+    handling that condition exactly as it did before; this only adds a safety net UNDER it for
+    whatever that narrower clause doesn't already cover."""
+    if inspect.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def _async_guarded(*args, **kwargs):
+            try:
+                return await fn(*args, **kwargs)
+            except Exception as e:
+                logger.exception("%s: unhandled exception", fn.__name__)
+                return JSONResponse(status_code=500,
+                                    content={"status": "error", "message": f"internal error: {e}"})
+        return _async_guarded
+
+    @functools.wraps(fn)
+    def _sync_guarded(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            logger.exception("%s: unhandled exception", fn.__name__)
+            return JSONResponse(status_code=500,
+                                content={"status": "error", "message": f"internal error: {e}"})
+    return _sync_guarded
 
 
 def _param_label(path: str) -> str:
@@ -488,6 +648,20 @@ class FileState:
             self.log.append_genesis(make_demo_ledger(), actor="system", ts=_TS)
         self.verdict_store = verdict_store
         self.strategic = strategic
+        # Guards read-modify-write mutation of this file's own `matrix`/`stated_load_n`/
+        # `active_instance_id` below (2026-07-31) -- unlike the event log's own `_store_lock_`
+        # (packages/ledger/events.py, an RLock for the identical reason), these three fields had NO
+        # synchronization at all: several call sites (`active_instance()`'s self-heal, the outliner's
+        # "the just-removed/just-added instance was active -> repoint it" routes, `note_message()`'s
+        # matrix accretion) read one of these fields and then conditionally write it back. Two
+        # concurrent requests against the SAME file (a real shape here -- multiple browser tabs/
+        # sockets can share one file_id) racing on such a check-then-write could silently drop one
+        # update or leave `active_instance_id` pointing at an instance that's already gone. RLock (not
+        # Lock): `active_instance()` calls `self.ledger()` and re-reads its own already-locked field
+        # while holding it, and a route wrapping one of the compound sites below acquires this same
+        # lock around a call into `active_instance()`/`activate_instance()` -- a plain Lock would
+        # self-deadlock on that same-thread re-entry.
+        self.lock = threading.RLock()
         # the user's GOAL as a verification matrix — the strategic layer sets TARGETS (never values);
         # compliance is judged later against real solver / geometry metrics. Empty until a goal is stated.
         self.matrix: VerificationMatrix = VerificationMatrix()
@@ -505,23 +679,29 @@ class FileState:
         whichever instance happens to exist if the pointer went stale (e.g. the active one was
         removed) or was never set — never raises. Returns None on an empty file."""
         led = self.ledger()
-        inst = led.instances.get(self.active_instance_id) if self.active_instance_id else None
-        if inst is None and led.instances:
-            self.active_instance_id = next(iter(led.instances))
-            inst = led.instances[self.active_instance_id]
-        return inst
+        with self.lock:  # the read of active_instance_id and its self-heal write must be one atomic step
+            inst = led.instances.get(self.active_instance_id) if self.active_instance_id else None
+            if inst is None and led.instances:
+                self.active_instance_id = next(iter(led.instances))
+                inst = led.instances[self.active_instance_id]
+            return inst
 
     def activate_instance(self, instance_id: str) -> None:
         led = self.ledger()
         if instance_id not in led.instances:
             raise KeyError(f"unknown instance id {instance_id!r}")
-        self.active_instance_id = instance_id
+        with self.lock:
+            self.active_instance_id = instance_id
 
     def note_message(self, message: str) -> None:
-        # the chat is the single input: fold any stated TARGETS into the goal (no-op if none stated)
-        self.matrix = self.strategic.merge(self.matrix, message)
-        if (n := self.strategic.extract_load_n(message)) is not None:
-            self.stated_load_n = n
+        # the chat is the single input: fold any stated TARGETS into the goal (no-op if none stated).
+        # Both fields update under ONE lock acquisition -- matrix's own read+write is itself a
+        # read-modify-write (accretion via merge()), and grouping stated_load_n's write into the same
+        # critical section keeps the pair from ever being observed half-updated by a concurrent reader.
+        with self.lock:
+            self.matrix = self.strategic.merge(self.matrix, message)
+            if (n := self.strategic.extract_load_n(message)) is not None:
+                self.stated_load_n = n
 
     def metrics(self) -> dict[str, float | None]:
         """The live, GROUNDED metric snapshot a requirement is judged against. factor_of_safety comes
@@ -946,28 +1126,34 @@ def create_app() -> FastAPI:
     # Gated re-implementations of FastAPI's disabled default docs routes (see the docs_url=None note
     # above) — same auth dependency as every other route, since they exist ONLY on `router` too.
     @router.get("/openapi.json", include_in_schema=False)
+    @_rest_error_guard
     def openapi_schema():
         return JSONResponse(app.openapi())
 
     @router.get("/docs", include_in_schema=False)
+    @_rest_error_guard
     def swagger_docs():
         from fastapi.openapi.docs import get_swagger_ui_html
         return get_swagger_ui_html(openapi_url="/openapi.json", title=f"{app.title} - Swagger UI")
 
     @router.get("/redoc", include_in_schema=False)
+    @_rest_error_guard
     def redoc_docs():
         from fastapi.openapi.docs import get_redoc_html
         return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} - ReDoc")
 
     @app.get("/healthz")
+    @_rest_error_guard
     def healthz():
         return {"ok": True}
 
     @router.get("/ledger")
+    @_rest_error_guard
     def get_ledger():
         return state.ledger().model_dump(mode="json")
 
     @router.get("/params")
+    @_rest_error_guard
     def params():
         # the tunable sliders for the ACTIVE INSTANCE's subsystem (its geometry params + cross-cutting
         # params) — so the UI renders the right controls for whichever part is currently selected in
@@ -998,6 +1184,7 @@ def create_app() -> FastAPI:
         return {"subsystem": sub.name, "instance_id": inst.id, "params": rows}
 
     @router.get("/subsystems")
+    @_rest_error_guard
     def list_subsystems():
         # what part types the design engine can build, + which is active now (None on an empty
         # file, or the ACTIVE instance's own type — 2026-07-04: parts are a flat set, no root to
@@ -1015,15 +1202,18 @@ def create_app() -> FastAPI:
     # is now literally "open a new file" rather than silently wiping the one you had.
 
     @router.get("/files")
+    @_rest_error_guard
     def list_files():
         return {"files": state.list_files()}
 
     @router.post("/files")
+    @_rest_error_guard
     def create_file():
         f = state.create_file()
         return {"ok": True, "id": f.file_id, "name": f.name}
 
     @router.post("/files/{file_id}/open")
+    @_rest_error_guard
     def open_file(file_id: str):
         try:
             state.open_file(file_id)
@@ -1039,6 +1229,7 @@ def create_app() -> FastAPI:
     # one project, each with its own params) without that larger lift.
 
     @router.get("/instances")
+    @_rest_error_guard
     def list_instances():
         # cut_feature_count + world_offset are for the outliner's detail panel (feature count) and
         # its hover-highlight marker (an anchor point in the SAME raw backend coordinate space as
@@ -1055,6 +1246,7 @@ def create_app() -> FastAPI:
                               for iid, inst in led.instances.items()]}
 
     @router.post("/instances")
+    @_rest_error_guard
     def create_instance(req: AddInstanceRequest):
         led = state.ledger()
         instance_id = req.instance_id
@@ -1071,10 +1263,12 @@ def create_app() -> FastAPI:
         except (KeyError, ValueError) as e:
             return {"ok": False, "error": str(e)}
         state.log.append_instance_added(new_led.instances[instance_id], actor="user", ts=_TS)
-        state.active_instance_id = instance_id  # the newly-added part becomes the one being edited
+        with state.active_file().lock:  # guards this write against a concurrent request's own RMW
+            state.active_instance_id = instance_id  # the newly-added part becomes the one being edited
         return {"ok": True, "instance_id": instance_id}
 
     @router.delete("/instances/{instance_id}")
+    @_rest_error_guard
     def delete_instance(instance_id: str):
         led = state.ledger()
         try:
@@ -1084,12 +1278,14 @@ def create_app() -> FastAPI:
         except ValueError as e:
             return {"ok": False, "error": str(e)}
         state.log.append_instance_removed(instance_id, actor="user", ts=_TS)
-        if state.active_instance_id == instance_id:  # the active instance just got removed -> fall
-            # back to whatever's left (None if the file is now empty) — no root to fall back to
-            state.active_instance_id = next(iter(state.ledger().instances), None)
+        with state.active_file().lock:  # the check-then-write below is one read-modify-write step
+            if state.active_instance_id == instance_id:  # the active instance just got removed -> fall
+                # back to whatever's left (None if the file is now empty) — no root to fall back to
+                state.active_instance_id = next(iter(state.ledger().instances), None)
         return {"ok": True}
 
     @router.post("/instances/{instance_id}/activate")
+    @_rest_error_guard
     def activate_instance(instance_id: str):
         try:
             state.activate_instance(instance_id)
@@ -1106,6 +1302,7 @@ def create_app() -> FastAPI:
     # SSE event (see packages/ledger/deltas.py::FeatureOp) once the user clicks accept.
 
     @router.post("/feature_ops")
+    @_rest_error_guard
     def create_feature_op(op: FeatureOp):
         led = state.ledger()  # already reconciled — assembly-template children (e.g. "table_1_top")
                               # exist as real instance ids here even though they aren't INSTANCE_ADDED facts
@@ -1142,6 +1339,7 @@ def create_app() -> FastAPI:
     # branch: repositioning/reorienting an ALREADY-PLACED instance, logged via `append_instance_moved`.
 
     @router.post("/instance_ops")
+    @_rest_error_guard
     def create_instance_op(op: InstanceOp):
         led = state.ledger()
 
@@ -1155,7 +1353,8 @@ def create_app() -> FastAPI:
         if outcome.changed:
             if op.op == "add_instance":
                 state.log.append_instance_added(outcome.instance, actor="user", ts=_TS)
-                state.active_instance_id = outcome.instance_id  # mirror POST /instances' behavior
+                with state.active_file().lock:  # guards this write, same as POST /instances above
+                    state.active_instance_id = outcome.instance_id  # mirror POST /instances' behavior
             elif op.op == "move_instance":
                 # Use the RESOLVED new transform from `outcome.instance` (apply_instance_op already
                 # computed it correctly, including "preserve current rotation if omitted") — never
@@ -1176,9 +1375,10 @@ def create_app() -> FastAPI:
                     for coupling_id in outcome.removed_coupling_ids:
                         state.log.append_coupling_removed(coupling_id, actor="user", ts=_TS)
                     state.log.append_instance_removed(outcome.instance_id, actor="user", ts=_TS)
-                if state.active_instance_id == outcome.instance_id:  # it just got removed -> fall
-                    # back to whatever's left (None if the file is now empty) — no root to fall back to
-                    state.active_instance_id = next(iter(state.ledger().instances), None)
+                with state.active_file().lock:  # the check-then-write below is one read-modify-write step
+                    if state.active_instance_id == outcome.instance_id:  # it just got removed -> fall
+                        # back to whatever's left (None if the file is now empty) — no root to fall back to
+                        state.active_instance_id = next(iter(state.ledger().instances), None)
         return {
             "ok": outcome.changed,
             "status": outcome.status.value,
@@ -1190,6 +1390,7 @@ def create_app() -> FastAPI:
         }
 
     @router.post("/connection_ops")
+    @_rest_error_guard
     def create_connection_op(op: ConnectionOp):
         # Phase 1b (2026-07-19): add/remove a typed interface<->interface mate. The placement solver
         # then derives the mated part's position from the parts' declared frames — so the copilot wires
@@ -1215,6 +1416,7 @@ def create_app() -> FastAPI:
         }
 
     @router.post("/coupling_ops")
+    @_rest_error_guard
     def create_coupling_op(op: CouplingOp):
         # Phase 2b (2026-07-19): add/remove a typed load coupling — the LLM WIRES a relation by name
         # instead of stating a load scalar (Inversion #1). Relation validity is checked against the
@@ -1236,7 +1438,71 @@ def create_app() -> FastAPI:
             "message": outcome.message,
         }
 
+    @router.post("/fit_ops")
+    @_rest_error_guard
+    def create_fit_op(op: FitOp):
+        # 2026-07-27: wire/unwire/resync a typed fit binding — the LLM WIRES which connector fits
+        # which host; the actual cross-section arithmetic lives in packages.subsystems.fit (Inversion
+        # #1, same posture as /coupling_ops above).
+        from packages.subsystems.fit import compute_fit
+
+        def is_managed_child(led, instance_id: str) -> bool:
+            inst = led.instances.get(instance_id)
+            if inst is None or inst.parent_id is None:
+                return False
+            parent = led.instances.get(inst.parent_id)
+            if parent is None:
+                return False
+            try:
+                parent_model = get_subsystem_model(parent.subsystem_type)
+            except KeyError:
+                return False
+            return parent_model.assembly_children is not None
+
+        def check_invariants(led, instance_id: str) -> list[str]:
+            inst = led.instances.get(instance_id)
+            if inst is None:
+                return []
+            return get_subsystem(inst.subsystem_type).check_invariants(led, instance_id)
+
+        ledger = state.ledger()
+        _, outcome = apply_fit_op(ledger, op, compute_fit, is_managed_child, check_invariants)
+        if outcome.changed:
+            if op.op == "fit_connector":
+                state.log.append_fit_bound(outcome.binding, outcome.deltas, actor="user", ts=_TS)
+            elif op.op == "resync_fit":
+                state.log.append_fit_resynced(outcome.fit_id, outcome.deltas, actor="user", ts=_TS)
+            else:
+                state.log.append_fit_unbound(outcome.fit_id, actor="user", ts=_TS)
+        return {
+            "ok": outcome.changed,
+            "status": outcome.status.value,
+            "fit_id": outcome.fit_id,
+            "binding": outcome.binding.model_dump(mode="json") if outcome.binding is not None else None,
+            "message": outcome.message,
+        }
+
+    @router.post("/join_annotation_ops")
+    @_rest_error_guard
+    def create_join_annotation_op(op: JoinAnnotationOp):
+        # 2026-07-27: record HOW two already-connected parts are joined (bolted/press_fit/welded/...)
+        # for the BOM -- purely semantic, never touches geometry (contrast /fit_ops above).
+        _, outcome = apply_join_annotation_op(state.ledger(), op)
+        if outcome.changed:
+            if op.op == "add_join_annotation":
+                state.log.append_join_annotation_added(outcome.annotation, actor="user", ts=_TS)
+            else:
+                state.log.append_join_annotation_removed(outcome.join_id, actor="user", ts=_TS)
+        return {
+            "ok": outcome.changed,
+            "status": outcome.status.value,
+            "join_id": outcome.join_id,
+            "annotation": outcome.annotation.model_dump(mode="json") if outcome.annotation is not None else None,
+            "message": outcome.message,
+        }
+
     @router.post("/export/check")
+    @_rest_error_guard
     def export_check():
         # derived is resolved from the latest matching analysis verdict (stale -> unknown -> blocked);
         # discipline gates (thermal, …) are injected so a thermal-limited part also blocks honestly.
@@ -1271,16 +1537,19 @@ def create_app() -> FastAPI:
         }
 
     @router.post("/requirements")
+    @_rest_error_guard
     def set_requirements(req: GoalRequest):
         # fed from the chat: extract any stated TARGETS and fold them into the goal (never a safety value)
         state.note_message(req.goal)
         return _requirements_payload()
 
     @router.get("/requirements")
+    @_rest_error_guard
     def get_requirements():
         return _requirements_payload()
 
     @router.post("/analyze")
+    @_rest_error_guard
     async def analyze(material: str = "PLA", load_n: float | None = None):
         # generalized (2026-07-03): runs against whichever subsystem the ACTIVE instance is. Real FS
         # only comes back for `fea_eligible` parts (analyze_geometry itself gates this) — every other
@@ -1324,15 +1593,24 @@ def create_app() -> FastAPI:
             # (material, load_n) case, not re-derive it (the goal could change mid-poll otherwise).
             return {"status": "queued", "load_n": load_n}
         # inline path: run the real FS (in a child process via the threadpool) — needs solvers
+        # REDIS_URL isn't set, so this request is about to block on a real solver run INSTEAD of
+        # handing off to the durable Dramatiq/worker path above. That's a meaningful operational
+        # fact (no worker/Redis means no retry-on-crash, no durability across a web-process restart)
+        # that used to be entirely silent — neither logged nor visible in the response. `sync_fallback`
+        # below mirrors this into the response itself; absent/False everywhere else (cached/queued/
+        # the empty-workspace error) means "the durable path was in play or nothing was solved".
+        logger.warning("analyze: REDIS_URL not configured — running FS solve synchronously in-request "
+                       "for project_id=%s (no durable async job queued)", state.project_id)
         try:
             verdict = await run_in_threadpool(analyze_in_subprocess, params, material, load_n, subsystem_name,
                                               cut_features=cut_features)
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            return {"status": "error", "message": str(e), "sync_fallback": True}
         state.verdict_store.put_verdict(state.project_id, verdict)
-        return {"status": "done", "verdict": dataclasses.asdict(verdict), "load_n": load_n}
+        return {"status": "done", "verdict": dataclasses.asdict(verdict), "load_n": load_n, "sync_fallback": True}
 
     @router.post("/optimize")
+    @_rest_error_guard
     async def optimize(load_n: float | None = None):
         # the sanctioned 3-variant sweep: find the lightest design that passes FS. Generalized
         # (2026-07-03) past bracket-only: discovers the ACTIVE subsystem's own thickness-like param
@@ -1372,11 +1650,17 @@ def create_app() -> FastAPI:
             jobs.run_optimization.send(state.project_id, candidates, base_params, "PLA", load_n, fs_floor,
                                        inst.subsystem_type, cut_features)
             return {"status": "queued", "load_n": load_n}
+        # same rationale as /analyze's own identical fallback: no REDIS_URL means this request is
+        # about to run the whole 3-variant sweep synchronously in-request rather than handing it to
+        # the durable worker path above — previously silent (no log, no response field). See
+        # `sync_fallback` in the returns below.
+        logger.warning("optimize: REDIS_URL not configured — running sweep synchronously in-request "
+                       "for project_id=%s (no durable async job queued)", state.project_id)
         try:  # inline (dev/tests): run the sweep in a child process
             result = await run_in_threadpool(optimize_in_subprocess, candidates, base_params, "PLA",
                                              load_n, fs_floor, 600.0, inst.subsystem_type, cut_features)
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            return {"status": "error", "message": str(e), "sync_fallback": True}
         best_value = result["best_value"]
         target_node = f"instances.{inst.id}.params.{thickness_name}"
         if best_value is not None:
@@ -1389,9 +1673,11 @@ def create_app() -> FastAPI:
             state.verdict_store.put_verdict(state.project_id, result["best_verdict"])
         return {"status": "done", "variants": result["variants"], "best_value": best_value,
                 "param_name": thickness_name, "target_node": target_node,
-                "best_mass_g": result["best_mass_g"], "fs_floor": fs_floor, "load_n": load_n}
+                "best_mass_g": result["best_mass_g"], "fs_floor": fs_floor, "load_n": load_n,
+                "sync_fallback": True}
 
     @router.get("/optimize/status")
+    @_rest_error_guard
     def optimize_status():
         # job_status/job_message (2026-07-15) surface a FAILED queued job durably — before this, a
         # crashed worker job left `result` None forever, indistinguishable from "still running", so
@@ -1402,6 +1688,7 @@ def create_app() -> FastAPI:
                 "job_message": job_status.message if job_status else None}
 
     @router.get("/analyze/status")
+    @_rest_error_guard
     def analyze_status(material: str = "PLA", load_n: float | None = None):
         # material/load_n default to match POST /analyze's own resolution — a poller must ask about the
         # SAME case it queued, not just "any verdict for this geometry" (see /analyze's own comment).
@@ -1420,6 +1707,7 @@ def create_app() -> FastAPI:
                 "job_message": job_status.message if job_status else None}
 
     @router.post("/signoff")
+    @_rest_error_guard
     def signoff(reviewer: str = "engineer", instance_id: str | None = None):
         # 2026-07-19 — this used to be a blind, unconditional flip: no ledger read, no check that the
         # design being "reviewed" has ever actually been analyzed at its CURRENT geometry. A human (or
@@ -1454,6 +1742,7 @@ def create_app() -> FastAPI:
         return {"ok": True}
 
     @router.get("/export/step")
+    @_rest_error_guard
     def export_step(instance_id: str | None = None):
         # Inversion #1's enforcement point: a missing/failing safety gate BLOCKS export, here — not
         # just in the advisory POST /export/check that a client can choose not to call. Same gate
@@ -1517,6 +1806,7 @@ def create_app() -> FastAPI:
                             background=BackgroundTask(os.remove, path))
 
     @router.get("/telemetry")
+    @_rest_error_guard
     def telemetry():
         # REST-fetchable telemetry (2026-07-04) — the WS `/ws` path already pushes a
         # `telemetry_delta` on every PARAMETER_CASCADE_UPDATE, but adding/removing a part via REST
@@ -1527,6 +1817,7 @@ def create_app() -> FastAPI:
         return _telemetry(state.ledger(), state.active_instance_id).model_dump(mode="json")
 
     @router.post("/propose")
+    @_rest_error_guard
     def propose(req: ProposeRequest):
         # OpenRouter only — no mock. No key -> no LLM (the caller must say so, not fake a result).
         from packages.agents.provider_factory import get_provider
@@ -1554,11 +1845,20 @@ def create_app() -> FastAPI:
                 return
             from packages.agents.openrouter_provider import OpenRouterDeltaProvider
             provider = OpenRouterDeltaProvider(api_key=req.api_key, model=req.model or None)
-            ledger_json = state.ledger().model_dump_json()
+            led = state.ledger()
+            ledger_json = led.model_dump_json()
+            messages = req.messages
+            # Reference research (2026-08-01, tool-call redesign same day) — no longer decided here:
+            # `stream_chat` itself now offers the model a `research_reference` tool (only when
+            # `research_provider_configured()`) and the model decides whether to call it. This
+            # handler just forwards whatever `stream_chat` yields — see its own docstring for the
+            # bounded multi-round tool loop that replaced the old deterministic pre-turn heuristic.
             try:
-                for kind, payload in provider.stream_chat(messages=req.messages, ledger_json=ledger_json):
+                for kind, payload in provider.stream_chat(messages=messages, ledger_json=ledger_json):
                     if kind == "token":
                         yield _sse({"type": "token", "text": payload})
+                    elif kind == "research":
+                        yield _sse({"type": "research", **payload.model_dump(mode="json")})
                     elif kind == "proposal":
                         yield _sse({"type": "proposal",
                                     "deltas": [d.model_dump(mode="json") for d in payload.deltas],
@@ -1566,6 +1866,8 @@ def create_app() -> FastAPI:
                                     "instance_ops": [io.model_dump(mode="json") for io in payload.instance_ops],
                                     "connection_ops": [co.model_dump(mode="json") for co in payload.connection_ops],
                                     "coupling_ops": [co.model_dump(mode="json") for co in payload.coupling_ops],
+                                    "fit_ops": [fo.model_dump(mode="json") for fo in payload.fit_ops],
+                                    "join_annotation_ops": [jo.model_dump(mode="json") for jo in payload.join_annotation_ops],
                                     "scope_proposal": payload.scope_proposal.model_dump(mode="json") if payload.scope_proposal else None,
                                     "clarification": payload.request_clarification,
                                     "suggestions": payload.suggestions})
@@ -1594,6 +1896,7 @@ def create_app() -> FastAPI:
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @router.get("/mesh")
+    @_rest_error_guard
     def mesh():
         # the REAL build123d geometry, tessellated from the current ledger — the whole assembly once
         # a project holds more than one instance, else exactly the active instance (see
@@ -1633,6 +1936,7 @@ def create_app() -> FastAPI:
         return {"positions": positions, "indices": indices}
 
     @router.get("/mesh/features")
+    @_rest_error_guard
     def mesh_features():
         # rough click-to-select groundwork (prd4.md Phase 3's "context-aware floating HUD" —
         # precise version needs OCCT topological identity, specialist-gated; this reuses the
@@ -1655,6 +1959,7 @@ def create_app() -> FastAPI:
         return {"features": features}
 
     @router.get("/manufacturing/manifest")
+    @_rest_error_guard
     def manufacturing_manifest():
         # Always-available planning/informational artifact (no export-gate check — unlike
         # /export/step, this is not the actual export deliverable) computed from the live ledger.
@@ -1665,6 +1970,7 @@ def create_app() -> FastAPI:
                 "assembly_steps": m.assembly_steps}
 
     @router.get("/blueprint")
+    @_rest_error_guard
     async def blueprint():
         # Orthographic 3-view blueprint PNG of the whole assembly (front/top/right, labelled XYZ axes,
         # per-part colours) — for the user AND, later, the vision-validation step of the build loop.
@@ -1679,6 +1985,7 @@ def create_app() -> FastAPI:
                         headers={"Cache-Control": "no-store"})
 
     @router.post("/validate")
+    @_rest_error_guard
     async def validate(req: ValidateRequest):
         # Self-check of the current assembly. GEOMETRIC check always runs (deterministic, no model —
         # catches floating/engulfed/degenerate parts). VISUAL check runs ONLY when a vision model is
@@ -1689,6 +1996,12 @@ def create_app() -> FastAPI:
         from packages.agents.vision_validator import validate_visual, vision_model_configured
         led = state.ledger()
         geo = await run_in_threadpool(validate_geometry, led)
+        # Coarse structural estimate (2026-07-27) -- see _coarse_structural_summary's own docstring:
+        # the only place a coupling-derived load's FS was ever visible used to be export gating, so a
+        # user asking a plain load-bearing question in chat never got any number back at all, even a
+        # rough one. Cheap closed-form math (same tier as the geometric check above, not the real
+        # async solver), so it belongs on the hot path here.
+        structural = await run_in_threadpool(_coarse_structural_summary, led)
         visual = None
         vision_on = bool(req.vision_model) or vision_model_configured()
         if vision_on:
@@ -1697,6 +2010,7 @@ def create_app() -> FastAPI:
         return {
             "ok": geo.ok and (visual.ok if visual is not None else True),
             "geometric": geo.model_dump(),
+            "structural": structural.model_dump(),
             "visual": visual.model_dump() if visual is not None else None,
             "vision_enabled": vision_on,
             "vision_ran": visual is not None,

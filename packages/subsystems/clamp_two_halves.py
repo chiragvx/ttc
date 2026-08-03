@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 
-from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
 
 _MIN_WALL_MM = 0.8
 
@@ -71,6 +71,27 @@ def _check(p) -> list[str]:
     return out
 
 
+def _base_frame(p):
+    """Bottom face of the clamp block (z=0, normal -Z). `_build` positions the box with
+    `bd.Pos(0, 0, p.height_mm / 2.0) * bd.Box(...)`, so unlike `plate_face_interfaces`'s assumed
+    ORIGIN-CENTERED box, this block's real faces sit at z=0 and z=height_mm, not +/-height_mm/2 --
+    confirmed by reading `_build` directly. This is the face that seats flush against a mounting
+    surface (or against the matching half's own `top` face, sandwiching the cradled item between the
+    two halves' aligned bolt-hole ears -- see the module docstring: this part represents ONE half)."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, 0.0), normal=(0.0, 0.0, -1.0))
+
+
+def _top_frame(p):
+    """Top face of the clamp block (z=height_mm, normal +Z) -- the flat ear surface the matching half
+    seats against. The open cradle channel notches into the CENTER of this face (|y| up to
+    ~bore_dia_mm/2, per `cradle_z`'s placement in `_build`), but the mounting ears at y=+/-ear_y --
+    where the through-bolts that clamp the two halves together pass -- stay flat all the way out to
+    this face regardless of bore_dia_mm/height_mm, so the frame itself needs no bore-aware offset."""
+    from packages.subsystems.base import Frame
+    return Frame(origin=(0.0, 0.0, p.height_mm), normal=(0.0, 0.0, 1.0))
+
+
 CLAMP_TWO_HALVES = register_subsystem(Subsystem(
     name="clamp_two_halves",
     description="Generic bolted clamp: matching top + bottom half -- structural/mounting geometry (FDM/FFF or CNC)",
@@ -87,4 +108,13 @@ CLAMP_TWO_HALVES = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     fea_eligible=False,
+    # 2026-07-28 (Phase 1 interface-coverage sweep) -- bespoke (not a shared-builder helper): the block
+    # is offset along Z (bottom at z=0, top at z=height_mm), not origin-centered like
+    # `plate_face_interfaces` assumes, so its two real faces are declared directly here instead.
+    # `base` seats down against a mount surface (or the matching half's own `top`); `top` is where the
+    # matching half seats to close the clamp around the cradled item.
+    interfaces=[
+        InterfaceSpec(name="base", kind="mount", frame=_base_frame),
+        InterfaceSpec(name="top", kind="mount", frame=_top_frame),
+    ],
 ))

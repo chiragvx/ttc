@@ -11,6 +11,7 @@ structural envelope/mounting geometry, not its full cosmetic profile.
 from __future__ import annotations
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import cylinder_end_interfaces
 
 _FRAGMENT = """\
 ## Subsystem: Jaw Coupling
@@ -52,4 +53,11 @@ JAW_COUPLING = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     fea_eligible=True,  # plain solid cylinder, span along X-equivalent axis -- same shape class longeron.py opts into; left True here since it IS the simple validated-methodology shape, not inferred for a compound one
+    # 2026-07-28 -- identical shape family to round_post: bd.Cylinder(radius=dia_mm/2, height=height_mm),
+    # centered at the origin along local Z by build123d's default (no rotation applied in _build above),
+    # so its two flat end faces are exactly what cylinder_end_interfaces expects. Represents one hub
+    # blank's two flat faces (the shaft-bore end and the jaw-tooth end are not separately modeled -- see
+    # module docstring -- but a plain "bottom"/"top" end-face mate is still real and useful, e.g. for
+    # stacking a hub against a motor mount or another shaft-coupled part).
+    interfaces=cylinder_end_interfaces("height_mm"),
 ))

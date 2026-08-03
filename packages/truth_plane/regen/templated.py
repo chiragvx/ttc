@@ -103,6 +103,27 @@ def render_standoff(
     return TaggedPart(solid=part, tags=tags)
 
 
+def render_box_sleeve(
+    *,
+    outer_width_mm: float = 26.0,
+    outer_height_mm: float = 26.0,
+    bore_width_mm: float = 20.4,
+    bore_height_mm: float = 20.4,
+    height_mm: float = 40.0,
+) -> TaggedPart:
+    """A rectangular sleeve/collar with a concentric rectangular through-bore -- the rect-family analog
+    of `render_standoff` (a tube), for a connector that slides over a square/rect bar or tube instead
+    of a round shaft."""
+    body = bd.Box(outer_width_mm, outer_height_mm, height_mm)
+    bore = bd.Box(bore_width_mm, bore_height_mm, height_mm * 2.0)  # over-length cut = through
+    part = body - bore
+    tags: dict[str, dict] = {
+        "body.box": {"kind": "solid", "size": [outer_width_mm, outer_height_mm, height_mm]},
+        "bore.thru": {"kind": "box_bore", "size": [bore_width_mm, bore_height_mm]},
+    }
+    return TaggedPart(solid=part, tags=tags)
+
+
 def render_lbracket(
     *,
     leg_a_mm: float = 40.0,
