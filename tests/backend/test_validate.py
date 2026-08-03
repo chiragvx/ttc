@@ -186,7 +186,7 @@ def test_validate_and_export_gate_both_flag_a_grossly_undersized_bending_moment_
 
 @pytest.mark.skipif(not HAS_B123D, reason="needs build123d")
 def test_validate_endpoint_discloses_a_coupling_this_coarse_check_cannot_estimate_from():
-    # 2026-07-27 DEEP-DIVE: a torque_nm-output coupling (e.g. torque_from_force_radius -- a twisting
+    # 2026-07-27 DEEP-DIVE: a torque_nmm-output coupling (e.g. torque_from_force_radius -- a twisting
     # moment about the beam's own axis) has NO bending-stress consumption path here at all -- shear
     # from torsion is a genuinely different physics case, not a one-line reuse of sigma=6M/(w*h^2).
     # Silently omitting it would reproduce the exact "coupling wired, nothing comes back" bug for a

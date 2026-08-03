@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-from packages.agents.eval import CLARIFY, EvalCase, grade
+import os
+
+import pytest
+
+from packages.agents.eval import GOLDEN_GRAPH, grade_live, grade_offline, run_case_offline
 from packages.agents.prompt_builder import build_system_prompt, build_system_prompt_from_json
 from packages.agents.runtime import CoModelingSession
+from packages.ledger.deltas import DeltaProposal
 from packages.ledger.events import EventLog
 from packages.ledger.nodes import BUILD_ORIENTATION, OPERATING_TEMP, POWER_DISSIPATION, SKIN, SLIP_FIT
 from packages.ledger.parameter import LockState
 from packages.ledger.schema import ReviewState
-from packages.subsystems import add_instance, get_subsystem
+from packages.subsystems import SUBSYSTEM_REGISTRY, add_instance, get_subsystem
 from packages.transport.app import make_demo_ledger
 
 TS = "2026-06-28T00:00:00Z"
@@ -333,12 +338,81 @@ def test_build_system_prompt_from_json_falls_back_cleanly_on_invalid_input():
         assert "Part types" in prompt  # the bare-menu fallback, not an exception
 
 
-def test_eval_harness_computes_metrics(stub_provider):
-    cases = [
-        EvalCase("make the skin 3 mm", [(SKIN, 3.0)]),     # stub correct
-        EvalCase("make it stronger", CLARIFY),             # stub clarifies (correct)
-        EvalCase("make the skin 3 mm", [(SKIN, 99.0)]),    # stub returns 3.0 -> WRONG
-    ]
-    report = grade(stub_provider, cases)
-    assert report.total == 3 and report.passed == 2       # one mismatch detected
-    assert report.clarified == 1 and report.clarification_precision == 1.0
+def test_graph_eval_offline_hard_gate_all_pass():
+    """CI hard gate for the NEW graph-grading harness (packages/agents/eval_graph.py): every
+    deterministic offline fixture in GOLDEN_GRAPH must reproduce its expected resulting graph exactly
+    through the REAL stream_chat -> apply pipeline. Every fixture is hand-authored to represent
+    CORRECT model behavior (see eval_graph.py's own module docstring), so a failure here is a REAL
+    regression in packages.ledger/packages.subsystems/packages.agents — never model non-determinism,
+    and never something to loosen/skip to get green (a drifted result here is signal)."""
+    report = grade_offline(GOLDEN_GRAPH)
+    failures = "\n".join(f"  {r.case.name}: {r.failures}" for r in report.results if not r.passed)
+    assert report.passed == report.total, (
+        f"{report.passed}/{report.total} GOLDEN_GRAPH cases passed offline:\n{failures}")
+
+
+def test_never_invents_a_subsystem_type_is_a_hard_gate():
+    """Task item 1 — the ONE non-negotiable hard invariant this eval harness enforces as a CI gate
+    (everything else in GOLDEN_GRAPH is a reported structural/quality check, not necessarily a gate on
+    its own — this one always is). A model that tries to add subsystem_type='satellite_body'
+    (packages/agents/prompt_builder.py's OWN named counter-example of what must never be invented) is
+    REJECTED by the RULES layer (apply_instance_op's known_subsystem_types check), never silently
+    created — the schema alone can't catch this, since InstanceOp.subsystem_type is a plain str."""
+    assert "satellite_body" not in SUBSYSTEM_REGISTRY, "test premise broken: this type is now real"
+    case = next(c for c in GOLDEN_GRAPH
+                if c.name == "invented_subsystem_type_is_rejected_not_silently_created")
+    ctx = run_case_offline(case)
+    assert ctx.proposal is not None  # the shape is valid JSON — schema alone doesn't block this
+    assert any(o.status.value == "REJECTED" for o in ctx.op_log.instance)
+    assert all(inst.subsystem_type in SUBSYSTEM_REGISTRY for inst in ctx.final_ledger.instances.values())
+    assert "satellite_body" not in {i.subsystem_type for i in ctx.final_ledger.instances.values()}
+
+
+def test_no_top_level_rationale_field_exists_on_deltaproposal():
+    """Task item 5 — schema-shape hard gate. DeltaProposal must never grow a top-level `rationale`
+    field: only individual ops carry their own rationale (packages/ledger/deltas.py). Pinned at BOTH
+    the schema level (this field-absence assertion — the thing that would need to change for the
+    2026-07-26 live failure to become "recoverable" instead of "wholesale rejected") AND the full
+    stream_chat pipeline level (a proposal poisoned by this key must yield NO proposal event and
+    apply NOTHING, never a partial/silent apply of the otherwise-good instance_ops alongside it)."""
+    assert "rationale" not in DeltaProposal.model_fields
+    case = next(c for c in GOLDEN_GRAPH if c.name == "top_level_rationale_poisons_the_whole_call")
+    ctx = run_case_offline(case)
+    assert ctx.proposal is None
+    assert any(kind == "error" for kind, _ in ctx.events)
+    assert not ctx.final_ledger.instances  # the otherwise-good add_instance never silently landed
+
+
+def test_smuggled_add_instance_dims_are_recovered_not_lost():
+    """Task item 4 — schema-shape hard gate. A dimension smuggled directly onto add_instance
+    (2026-07-27 live failure — deltas.py::DeltaProposal._repair_known_wire_quirks) must be recovered
+    into the sibling `deltas` list and actually APPLIED — never silently dropped, never left crashing
+    the whole call, and never left sitting as an illegal extra field on the op itself."""
+    case = next(c for c in GOLDEN_GRAPH if c.name == "smuggled_dims_on_add_instance_are_recovered")
+    ctx = run_case_offline(case)
+    assert ctx.proposal is not None
+    op = ctx.proposal.instance_ops[0]
+    assert not hasattr(op, "length_mm")  # InstanceOp's own schema has no such field at all
+    bar = ctx.final_ledger.instances["bar_1"]
+    assert bar.params["length_mm"].value == 500.0
+    assert bar.params["width_mm"].value == 20.0
+    assert bar.params["thickness_mm"].value == 5.0
+
+
+@pytest.mark.live
+def test_graph_eval_live_accuracy_report():
+    """OPTIONAL live-quality report (same key-gated posture as tests/live/test_openrouter_live.py):
+    grades GOLDEN_GRAPH's prompts against a REAL model. Reports an accuracy NUMBER only — NEVER a
+    hard gate, since model output is non-deterministic and a flaky red build here would just train
+    people to ignore CI (this task's own design constraint)."""
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        pytest.skip("OPENROUTER_API_KEY not set")
+    from packages.agents.openrouter_provider import OpenRouterDeltaProvider
+
+    provider = OpenRouterDeltaProvider()
+    report = grade_live(provider, GOLDEN_GRAPH)
+    print(f"\nlive graph-eval accuracy: {report.passed}/{report.total} ({report.accuracy:.0%})")
+    for r in report.results:
+        if not r.passed:
+            print(f"  MISS {r.case.name}: {r.failures}")
+    # intentionally no assertion on report.accuracy/report.passed — see docstring.

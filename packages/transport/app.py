@@ -44,7 +44,7 @@ from packages.ledger.deltas import ConnectionOp, CouplingOp, FeatureOp, FitOp, I
 from packages.ledger.events import EventLog
 from packages.ledger.derived_resolver import latest_verdict, ledger_with_derived
 from packages.ledger.fingerprint import fingerprint
-from packages.ledger.gates import evaluate_export_gates
+from packages.ledger.gates import ExportStatus, GateResult, evaluate_export_gates
 from packages.ledger.requirements import VerificationMatrix
 from packages.truth_plane.analysis import analyze_in_subprocess, optimize_in_subprocess  # module-level for monkeypatch
 from packages.truth_plane.verdict_store import InMemoryJobStatusStore, InMemoryVerdictStore
@@ -358,7 +358,7 @@ def _iter_coarse_cantilever_fs(ledger: MasterParametricLedger, instance_id: str 
 
     A force-output coupling is preferred when both exist on the same instance (matches the original,
     longer-standing tip-load cantilever oracle exactly, and a bending moment from a component's own
-    stated `total_load_n`/`span_mm` is a coarser read than an actual tip force). A `torque_nm`-output
+    stated `total_load_n`/`span_mm` is a coarser read than an actual tip force). A `torque_nmm`-output
     coupling (a twisting moment about the beam's own axis — e.g. `torque_from_force_radius`) has NO
     consumption path here at all — shear-from-torsion needs the cross-section's polar moment, a
     genuinely different physics case, not a one-line reuse of this bending formula — such an instance
@@ -435,7 +435,7 @@ def _coarse_structural_summary(ledger: MasterParametricLedger) -> "ValidationRep
     is unchanged: this never writes `ledger.derived.*`).
 
     2026-07-27 deep-dive addendum: `_iter_coarse_cantilever_fs` now also covers bending-moment
-    couplings (see its own docstring), but it STILL can't turn a `torque_nm` coupling, an unresolvable
+    couplings (see its own docstring), but it STILL can't turn a `torque_nmm` coupling, an unresolvable
     one, or a build failure into an FS. Silently omitting those instances would reproduce the EXACT
     bug this function exists to fix — a coupling was wired, and the user gets nothing back — just for
     a different reason. The second pass below finds every instance with at least one KNOWN coupling
@@ -508,6 +508,49 @@ def _all_gate_findings(ledger, instance_id: str | None = None):
     r4 = _gross_error_findings(ledger, instance_id)
     r5, u5 = fit_gate_findings(ledger, instance_id)
     return r1 + r2 + r3 + r4 + r5, u1 + u2 + u5
+
+
+def _export_gate(state, instance_id: str | None):
+    """The export gate `/export/check` and `/export/step` both actually enforce for `instance_id` —
+    ONE shared implementation so "checked eligible" and "will actually export" can never diverge (the
+    exact invariant `/export/step`'s own docstring already claims for the two of them).
+
+    * `instance_id` explicit -> exactly that ONE instance's gate. Unchanged from the pre-existing
+      per-instance behavior (foundations-audit H3, 2026-07-21): `resolved_ledger(instance_id)` +
+      `_all_gate_findings(led, instance_id)`.
+    * `instance_id is None` with a ledger holding AT MOST ONE instance -> also unchanged: falls back
+      to `state.active_instance()`, byte-for-byte what every pre-existing caller computed (with only
+      one instance, "that instance's gate" and "the whole file's gate" are the same question).
+    * `instance_id is None` with MORE THAN ONE instance -> a genuine WHOLE-ASSEMBLY export/check:
+      `_render_geometry` (via `render_assembly`) composes EVERY BUILDABLE instance into the exported
+      file in this case — see its own docstring. Before this fix (Defect 2, 2026-08-03) the gate here
+      still only checked the single ACTIVE instance while every OTHER instance's geometry rode along
+      into the export unchecked: sign off one bracket, export thirty parts. Now: evaluate every
+      buildable instance's OWN gate (the identical set `render_assembly` itself includes — an instance
+      whose subsystem has no `geometry_builder` contributes nothing to the file and is excluded here
+      too, exactly like `render_assembly` skips it) and aggregate — EXPORT_BLOCKED if ANY of them
+      fails, reasons/unknowns are the union across all of them, each line prefixed with its own
+      instance id so a human can tell which part is the problem. Deliberately simple over deduplicated:
+      a whole-ledger finding (e.g. "not engineer-reviewed", currently one global `ledger.review.state`)
+      appears once per instance, repeated-but-correct, rather than collapsed by a dedup pass that risks
+      hiding which instances it actually applies to."""
+    led = state.ledger()
+    if instance_id is not None or len(led.instances) <= 1:
+        inst = led.instances.get(instance_id) if instance_id is not None else state.active_instance()
+        iid = inst.id if inst is not None else None
+        return evaluate_export_gates(state.resolved_ledger(instance_id),
+                                     extra_findings=lambda led2: _all_gate_findings(led2, iid))
+    reasons: list[str] = []
+    unknowns: list[str] = []
+    for iid, inst in led.instances.items():
+        if get_subsystem(inst.subsystem_type).geometry_builder is None:
+            continue  # render_assembly itself skips a non-buildable instance -- so does this gate
+        g = evaluate_export_gates(state.resolved_ledger(iid),
+                                  extra_findings=lambda led2, _iid=iid: _all_gate_findings(led2, _iid))
+        reasons.extend(f"{iid}: {r}" for r in g.reasons)
+        unknowns.extend(f"{iid}: {u}" for u in g.unknowns)
+    status = ExportStatus.EXPORT_ELIGIBLE if not reasons else ExportStatus.EXPORT_BLOCKED
+    return GateResult(status=status, reasons=reasons, unknowns=unknowns)
 
 
 class ProposeRequest(BaseModel):
@@ -769,6 +812,23 @@ class FileState:
         # last-resort fallback when neither a stated load nor a coupling grounds the load.
         return max(grounded) if grounded else default
 
+    def coupling_load_block_reason(self, instance_id: str | None = None) -> str | None:
+        """None unless `instance_id` (default: whatever `effective_load_n`/`active_instance` itself
+        resolves to) carries a coupling whose KNOWN, fully-resolved output the structural force-only
+        load path cannot consume — a torque/moment/preload claim, per
+        `packages.couplings.resolve.LOAD_BEARING_OUTPUT_QUANTITIES`. `derived_load_n` (2026-08-03,
+        Defect 1) distinguishes this case (`(None, "<reason>")`) from "this part has no coupling at
+        all" (`(None, None)`); this is a thin accessor for that `reason`, used by /analyze and
+        /optimize to decide whether solving against the FABRICATED default load would present a
+        real-looking FS for a load with no relationship to what the part actually carries — see those
+        routes' own comments for the policy this backs."""
+        from packages.couplings import derived_load_n
+        inst = self.ledger().instances.get(instance_id) if instance_id is not None else self.active_instance()
+        if inst is None:
+            return None
+        _value, reason = derived_load_n(self.ledger(), inst.id)
+        return reason
+
     def resolved_ledger(self, instance_id: str | None = None) -> MasterParametricLedger:
         # the export gate sees `derived` resolved from the latest matching analysis verdict for the
         # ACTIVE instance's OWN params (not a hardcoded bracket list), AND the FS floor RAISED to
@@ -783,9 +843,16 @@ class FileState:
         # never re-analyzed at the new case. That is the exact fabricated-green-light failure Inversion
         # #1 exists to prevent — this was the one caller of ledger_with_derived that still had the hole
         # (caught by an adversarial red-team pass explicitly trying to defeat the export gate, not by
-        # normal testing). "PLA"/40.0 mirror /analyze's OWN literal defaults (material is not yet
-        # threaded from ledger.domains.structure.material_profile into analysis anywhere in this
-        # pipeline — a separate, pre-existing gap, not fixed here to keep this change minimal).
+        # normal testing).
+        #
+        # 2026-08-03 fix (Defect 3): `material` used to be the literal "PLA" here regardless of the
+        # design's OWN declared profile (`ledger.domains.structure.material_profile` — the same field
+        # the COARSE structural pre-check, `_iter_coarse_cantilever_fs`, already reads). That let the
+        # crude gross-error estimate and this "grounded" verdict silently disagree about which material
+        # the part is even made of whenever a project's material was ever changed from the PLA default
+        # (e.g. via the `domains.structure.material_profile` WS mutation) — the REAL solver would keep
+        # matching/producing PLA-case verdicts while the coarse check reasoned about the real one. Now
+        # threaded from the ledger itself, the same source of truth every other structural read uses.
         #
         # 2026-07-19 review (CRITICAL): `instance_id` lets a caller (per-part export) resolve `derived`
         # for a SPECIFIC part instead of whatever happens to be ACTIVE — omitted, this is unchanged
@@ -800,7 +867,8 @@ class FileState:
         led = ledger_with_derived(self.ledger(), self.verdict_store.verdicts(self.file_id),
                                   fingerprint=fingerprint(), geometry_params=gp,
                                   instance_id=inst.id if inst is not None else None,
-                                  material="PLA", load_n=self.effective_load_n(40.0, instance_id=instance_id))
+                                  material=self.ledger().domains.structure.material_profile,
+                                  load_n=self.effective_load_n(40.0, instance_id=instance_id))
         floor = self.effective_fs_floor()
         if floor > led.global_constraints.factor_of_safety_floor:
             gc = led.global_constraints.model_copy(update={"factor_of_safety_floor": floor})
@@ -934,6 +1002,7 @@ class SessionState:
     def current_params(self): return self.active_file().current_params()
     def effective_fs_floor(self): return self.active_file().effective_fs_floor()
     def effective_load_n(self, default, instance_id=None): return self.active_file().effective_load_n(default, instance_id)
+    def coupling_load_block_reason(self, instance_id=None): return self.active_file().coupling_load_block_reason(instance_id)
     def resolved_ledger(self, instance_id=None): return self.active_file().resolved_ledger(instance_id)
     def signoff(self, reviewer): return self.active_file().signoff(reviewer)
     def mutate(self, req): return self.active_file().mutate(req)
@@ -1506,14 +1575,11 @@ def create_app() -> FastAPI:
     def export_check():
         # derived is resolved from the latest matching analysis verdict (stale -> unknown -> blocked);
         # discipline gates (thermal, …) are injected so a thermal-limited part also blocks honestly.
-        # No instance_id param on this endpoint -- resolve the SAME way resolved_ledger() itself falls
-        # back internally (the active instance), so the coupling/connection/gross-error findings below
-        # are scoped consistently with whichever instance `derived` was actually resolved for.
-        inst = state.active_instance()
-        iid = inst.id if inst is not None else None
-        return evaluate_export_gates(
-            state.resolved_ledger(), extra_findings=lambda led: _all_gate_findings(led, iid)
-        ).model_dump(mode="json")
+        # No instance_id param on this endpoint -- `_export_gate` resolves it the SAME way
+        # `/export/step` does (single/explicit instance -> that one; a whole-assembly, multi-instance
+        # file -> aggregated across every buildable instance, Defect 2 2026-08-03) so the two endpoints
+        # can never diverge on what "eligible" means for the SAME export.
+        return _export_gate(state, None).model_dump(mode="json")
 
     def _requirements_payload() -> dict:
         # judge the stated goal against the LIVE grounded metrics — FS from the real verdict (UNKNOWN
@@ -1550,17 +1616,43 @@ def create_app() -> FastAPI:
 
     @router.post("/analyze")
     @_rest_error_guard
-    async def analyze(material: str = "PLA", load_n: float | None = None):
+    async def analyze(material: str | None = None, load_n: float | None = None):
         # generalized (2026-07-03): runs against whichever subsystem the ACTIVE instance is. Real FS
         # only comes back for `fea_eligible` parts (analyze_geometry itself gates this) — every other
         # part gets a well-formed Verdict with factor_of_safety=None, the honest "unknown".
         # load_n (2026-07-15): an explicit caller value always wins; otherwise resolve to whatever the
         # stated goal demands (state.effective_load_n), falling back to the historical 40 N default —
         # see FileState.effective_load_n's docstring for why this must not stay a bare hardcoded value.
+        # material (2026-08-03, Defect 3): same "explicit caller value always wins" shape — otherwise
+        # this used to default to the literal "PLA" no matter what the design's OWN
+        # `domains.structure.material_profile` actually was, so a real solve could silently run for a
+        # different material than the one the coarse structural pre-check (`_iter_coarse_cantilever_fs`,
+        # which already reads `material_profile`) was reasoning about.
+        explicit_load_n = load_n is not None
+        material = material if material is not None else state.ledger().domains.structure.material_profile
         load_n = load_n if load_n is not None else state.effective_load_n(40.0)
         inst = state.active_instance()
         if inst is None:  # empty workspace — nothing to analyze yet
             return {"status": "error", "message": "no active part to analyze — add one first"}
+        # Defect 1 (2026-08-03): nothing REAL grounds this load (no explicit caller value, no stated
+        # goal) — if the coupling engine ALSO found a load-bearing claim on this part it cannot turn
+        # into a force (a torque/moment/preload coupling; packages.couplings.derived_load_n), running
+        # the real solver against the fabricated `default` here would return a real-looking FS for a
+        # load that has NO relationship to what this part actually carries — the exact
+        # fabricated-green-light Inversion #1 exists to prevent, just at /analyze's own response
+        # instead of only the export gate. POLICY CHOICE: refuse to compute rather than compute-and-
+        # label — a provenance flag buried in a JSON field is too easy for a human (or the copilot) to
+        # miss; an explicit error forces grounding the load for real (state a goal, wire a force-output
+        # coupling) or an INFORMED override (pass load_n explicitly, which this still honors — the
+        # export gate's `coupling_gate_findings` blocks regardless, so an explicit override can never
+        # bypass the actual safety enforcement, only this earlier, friendlier refusal).
+        if not explicit_load_n and state.stated_load_n is None:
+            block_reason = state.coupling_load_block_reason(inst.id)
+            if block_reason is not None:
+                return {"status": "error",
+                        "message": f"cannot compute a grounded factor-of-safety for {inst.id!r}: "
+                                   f"{block_reason}",
+                        "coupling_blocked": True}
         subsystem_name = inst.subsystem_type
         params = state.current_params()
         # the active instance's own cut_features MUST ride along with the analysis — otherwise this
@@ -1578,7 +1670,8 @@ def create_app() -> FastAPI:
                                 fingerprint=fp, geometry_params=gp, instance_id=inst.id,
                                 material=material, load_n=load_n)
         if cached:
-            return {"status": "done", "cached": True, "verdict": dataclasses.asdict(cached), "load_n": load_n}
+            return {"status": "done", "cached": True, "verdict": dataclasses.asdict(cached),
+                    "load_n": load_n, "material": material}
         if os.environ.get("REDIS_URL"):  # durable queued path (worker + Postgres) — poll /analyze/status
             # NOTE: no jobs.configure() here — the actor body runs in the SEPARATE worker process,
             # which already configured its own store/status_store once at startup
@@ -1589,9 +1682,11 @@ def create_app() -> FastAPI:
             from packages.truth_plane import jobs
             state.status_store.put_status(state.project_id, "queued")
             jobs.run_fs_analysis.send(state.project_id, params, material, load_n, subsystem_name, cut_features)
-            # echo the RESOLVED load back — the poller must ask /analyze/status about this exact same
-            # (material, load_n) case, not re-derive it (the goal could change mid-poll otherwise).
-            return {"status": "queued", "load_n": load_n}
+            # echo the RESOLVED case back — the poller must ask /analyze/status about this exact same
+            # (material, load_n) case, not re-derive it (the goal, or the design's material, could
+            # change mid-poll otherwise; "material" echoed 2026-08-03, Defect 3, matching /analyze/
+            # status's own comment on this).
+            return {"status": "queued", "load_n": load_n, "material": material}
         # inline path: run the real FS (in a child process via the threadpool) — needs solvers
         # REDIS_URL isn't set, so this request is about to block on a real solver run INSTEAD of
         # handing off to the durable Dramatiq/worker path above. That's a meaningful operational
@@ -1607,7 +1702,8 @@ def create_app() -> FastAPI:
         except Exception as e:
             return {"status": "error", "message": str(e), "sync_fallback": True}
         state.verdict_store.put_verdict(state.project_id, verdict)
-        return {"status": "done", "verdict": dataclasses.asdict(verdict), "load_n": load_n, "sync_fallback": True}
+        return {"status": "done", "verdict": dataclasses.asdict(verdict), "load_n": load_n,
+                "material": material, "sync_fallback": True}
 
     @router.post("/optimize")
     @_rest_error_guard
@@ -1623,10 +1719,23 @@ def create_app() -> FastAPI:
         from packages.truth_plane.analysis import _thickness_param_name
         from packages.subsystems import get_subsystem_model
 
+        explicit_load_n = load_n is not None
         load_n = load_n if load_n is not None else state.effective_load_n(25.0)
         inst = state.active_instance()
         if inst is None:  # empty workspace — nothing to optimize yet
             return {"status": "unsupported", "message": "no active part to optimize — add one first"}
+        # Defect 1 (2026-08-03) — same policy as /analyze's own identical guard (see its comment for
+        # the full rationale): refuse to sweep against the fabricated default load when nothing REAL
+        # grounds it and the coupling engine flags this part's load as one the force-only path can't
+        # consume. An explicit caller-supplied load_n is still honored (informed override); the export
+        # gate blocks regardless either way.
+        if not explicit_load_n and state.stated_load_n is None:
+            block_reason = state.coupling_load_block_reason(inst.id)
+            if block_reason is not None:
+                return {"status": "error",
+                        "message": f"cannot compute a grounded factor-of-safety for {inst.id!r}: "
+                                   f"{block_reason}",
+                        "coupling_blocked": True}
         sub_model = get_subsystem_model(inst.subsystem_type)
         thickness_name = _thickness_param_name(sub_model) if sub_model.fea_eligible else None
         if thickness_name is None:
@@ -1634,6 +1743,11 @@ def create_app() -> FastAPI:
                     "message": f"optimize has no sweep target for {inst.subsystem_type!r} "
                                f"(needs a fea_eligible subsystem with a *_thickness_mm param)"}
         led = state.ledger()
+        # Defect 3 (2026-08-03): this used to be the literal "PLA" in both solve calls below regardless
+        # of the design's OWN declared material — see /analyze's identical comment and resolved_ledger's
+        # own 2026-08-03 note for the full rationale (the coarse structural pre-check already reads
+        # `material_profile`; the real solver silently disagreeing with it was the bug).
+        material = led.domains.structure.material_profile
         lo, hi = inst.params[thickness_name].bounds
         base_params = state.current_params()  # the rest of the geometry, held fixed across the sweep
         fs_floor = state.effective_fs_floor()  # optimize toward the STATED goal, not just the default
@@ -1647,7 +1761,7 @@ def create_app() -> FastAPI:
             # separate worker process; state.status_store.put_status is the meaningful part.
             from packages.truth_plane import jobs
             state.status_store.put_status(state.project_id, "queued")
-            jobs.run_optimization.send(state.project_id, candidates, base_params, "PLA", load_n, fs_floor,
+            jobs.run_optimization.send(state.project_id, candidates, base_params, material, load_n, fs_floor,
                                        inst.subsystem_type, cut_features)
             return {"status": "queued", "load_n": load_n}
         # same rationale as /analyze's own identical fallback: no REDIS_URL means this request is
@@ -1657,7 +1771,7 @@ def create_app() -> FastAPI:
         logger.warning("optimize: REDIS_URL not configured — running sweep synchronously in-request "
                        "for project_id=%s (no durable async job queued)", state.project_id)
         try:  # inline (dev/tests): run the sweep in a child process
-            result = await run_in_threadpool(optimize_in_subprocess, candidates, base_params, "PLA",
+            result = await run_in_threadpool(optimize_in_subprocess, candidates, base_params, material,
                                              load_n, fs_floor, 600.0, inst.subsystem_type, cut_features)
         except Exception as e:
             return {"status": "error", "message": str(e), "sync_fallback": True}
@@ -1689,11 +1803,14 @@ def create_app() -> FastAPI:
 
     @router.get("/analyze/status")
     @_rest_error_guard
-    def analyze_status(material: str = "PLA", load_n: float | None = None):
+    def analyze_status(material: str | None = None, load_n: float | None = None):
         # material/load_n default to match POST /analyze's own resolution — a poller must ask about the
         # SAME case it queued, not just "any verdict for this geometry" (see /analyze's own comment).
-        # Callers should pass back the exact `load_n` POST /analyze's response echoed, rather than rely
-        # on this default recomputing the same value (the stated goal could change mid-poll otherwise).
+        # Callers should pass back the exact `material`/`load_n` POST /analyze's response echoed,
+        # rather than rely on this default recomputing the same value (the stated goal, or the design's
+        # own material, could change mid-poll otherwise). material (2026-08-03, Defect 3): same fix as
+        # /analyze — the design's OWN declared profile, not a hardcoded "PLA" literal.
+        material = material if material is not None else state.ledger().domains.structure.material_profile
         load_n = load_n if load_n is not None else state.effective_load_n(40.0)
         inst = state.active_instance()
         gp = geometry_paths(get_subsystem_model(inst.subsystem_type), inst.id) if inst is not None else None
@@ -1757,10 +1874,16 @@ def create_app() -> FastAPI:
         # connection/gross-error findings, not just `derived` — before this fix those three ran over
         # the WHOLE ledger regardless of instance_id, so an unrelated part's broken coupling/connection
         # elsewhere in the file could block export of this fully-grounded, unrelated instance.
-        inst = state.ledger().instances.get(instance_id) if instance_id is not None else state.active_instance()
-        iid = inst.id if inst is not None else None
-        gate = evaluate_export_gates(state.resolved_ledger(instance_id),
-                                     extra_findings=lambda led: _all_gate_findings(led, iid))
+        #
+        # 2026-08-03 (Defect 2): `instance_id is None` used to ALWAYS gate on just the single ACTIVE
+        # instance (via `_all_gate_findings`'s instance-scoping above) even when this is actually a
+        # WHOLE-ASSEMBLY export — `_render_geometry` below composes EVERY buildable instance into the
+        # file once the project holds more than one (`render_assembly`), so every OTHER part's geometry
+        # rode along into the export completely unchecked: sign off one bracket, export thirty parts.
+        # `_export_gate` now aggregates across every buildable instance for that specific case, while
+        # leaving the explicit-instance_id and single-instance cases byte-for-byte unchanged — see its
+        # own docstring.
+        gate = _export_gate(state, instance_id)
         if not gate.eligible:
             return JSONResponse(
                 status_code=409,

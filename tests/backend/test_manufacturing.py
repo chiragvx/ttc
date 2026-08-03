@@ -1,7 +1,10 @@
 """Phase 6 — manufacturability outputs: packages/manufacturing/manifest.py::build_manifest (pure),
 GET /manufacturing/manifest (always-available, no export-gate check), and GET /export/step's new
-`instance_id` param for per-part export (omitted must stay byte-for-byte the pre-existing behavior —
-the regression risk this file specifically checks)."""
+`instance_id` param for per-part export (omitted must stay byte-for-byte the pre-existing behavior on
+a SINGLE-instance project; on a MULTI-instance project omitting instance_id is now a genuine
+whole-assembly gate that aggregates every buildable instance's own verdict, 2026-08-03 Defect 2 —
+the regression risk this file specifically checks is that an explicit instance_id always gates on
+THAT instance's own verdict, never a different (e.g. active) instance's)."""
 
 from __future__ import annotations
 
@@ -157,8 +160,12 @@ def test_export_step_unknown_instance_id_is_404(monkeypatch):
 
 def test_export_step_without_instance_id_still_gate_blocked_same_as_before():
     """Regression check: on a project with MULTIPLE instances, omitting instance_id must still hit
-    the exact same gate-blocked 409 as test_export_step_enforces_gates_server_side (test_app.py) did
-    before the instance_id param was added -- the new param must not have changed the default path."""
+    a gate-blocked 409 (as test_export_step_enforces_gates_server_side (test_app.py) did before the
+    instance_id param was added). 2026-08-03 (Defect 2): with >1 instance this is now a genuine
+    whole-assembly gate -- every buildable instance's own verdict is aggregated (union of
+    reasons/unknowns, each prefixed with its own instance id) rather than only the single active
+    instance's, so an unreviewed/unanalyzed sibling can no longer ride along unchecked into the
+    exported file (Inversion #1: a missing safety input blocks export, never a fabricated green light)."""
     c = TestClient(create_app())
     c.post("/instances", json={"subsystem_type": "bracket", "instance_id": "root"})
     c.post("/instances", json={"subsystem_type": "standoff", "instance_id": "leg1"})
@@ -166,7 +173,8 @@ def test_export_step_without_instance_id_still_gate_blocked_same_as_before():
     assert res.status_code == 409
     body = res.json()
     assert body["status"] == "error"
-    assert "factor_of_safety" in body["unknowns"]
+    assert "root: factor_of_safety" in body["unknowns"]
+    assert "leg1: factor_of_safety" in body["unknowns"]
     assert any("not engineer-reviewed" in r for r in body["reasons"])
 
 
@@ -187,7 +195,11 @@ def test_export_step_with_instance_id_is_gated_on_that_instances_own_verdict_not
     c.post("/instances", json={"subsystem_type": "bracket", "instance_id": "other"})  # never analyzed; resets review
     c.post("/instances/root/activate", json={})
     c.post("/signoff", params={"reviewer": "pe@example.com"})  # re-flips review using root's still-cached verdict
-    assert c.post("/export/check").json()["status"] == "EXPORT_ELIGIBLE"  # (whole-project gate — root's verdict)
+    # 2026-08-03 (Defect 2): the no-instance_id gate on a >1-instance project is now a genuine
+    # whole-assembly aggregate over every buildable instance's OWN verdict, not just the active one's --
+    # 'other' is still unanalyzed, so the assembly gate correctly blocks even though 'root' itself is
+    # signed off and its own cached verdict is good.
+    assert c.post("/export/check").json()["status"] == "EXPORT_BLOCKED"
 
     res = c.get("/export/step", params={"instance_id": "other"})
     assert res.status_code == 409

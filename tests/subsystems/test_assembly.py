@@ -12,6 +12,7 @@ import pytest
 
 from packages.ledger.schema import Instance, Transform
 from packages.subsystems import add_instance
+from packages.subsystems import assembly
 from packages.subsystems.assembly import instance_world_offsets, render_assembly
 
 HAS_B123D = importlib.util.find_spec("build123d") is not None
@@ -139,6 +140,94 @@ def test_nested_transform_adds_to_parent_offset(base_ledger, seeded):
     offsets = instance_world_offsets(led)
     assert offsets["mid"] == (10.0, 20.0, 0.0)
     assert offsets["leaf"] == (11.0, 22.0, 3.0)
+
+
+def _detach_root_from_toplevel_autolayout_lane(led):
+    """Give `root` an explicit (identity) transform so it takes the explicit-transform branch
+    instead of auto-layout, freeing up the top-level `(None, is_airframe_defining)` lane to be
+    driven EXCLUSIVELY by whatever top-level instances a test adds afterwards -- without this, root
+    (itself `transform is None` by default, per `build_ledger`) would silently occupy that lane
+    first and consume the "first part centers at 0" slot before the test's own instances do."""
+    root_id = led.root_id
+    new_instances = dict(led.instances)
+    new_instances[root_id] = new_instances[root_id].model_copy(
+        update={"transform": Transform(x_mm=0.0, y_mm=0.0, z_mm=0.0)})
+    return led.model_copy(update={"instances": new_instances})
+
+
+def test_auto_layout_gap_stays_exactly_gap_for_strictly_increasing_extents(base_ledger, seeded, monkeypatch):
+    """Regression for a verified defect: the OLD formula centered each auto-placed instance at
+    `cursor + GAP` (no half-extent term), which produced a real edge-to-edge gap of
+    `GAP + (extent_prev - extent_next) / 2` between consecutive siblings -- POSITIVE only when
+    extents were non-increasing, and NEGATIVE (real interpenetration -- every auto-placed instance
+    shares x=0, z=0) the moment a later sibling's Y-extent exceeded the previous one's by more than
+    `2 * GAP`. Reproduces the live-repro numbers verbatim (washer -> mounting_plate_grid ->
+    deck_plate: 20mm -> 80mm -> 120mm), fully decoupled from real subsystem geometry via a
+    monkeypatched `_y_extent_mm` so the test is deterministic and needs no kernel."""
+    led = seeded(base_ledger, "bracket")
+    led = _detach_root_from_toplevel_autolayout_lane(led)
+    led = add_instance(led, "standoff", "p1")
+    led = add_instance(led, "standoff", "p2")
+    led = add_instance(led, "standoff", "p3")
+    extents = {"p1": 20.0, "p2": 80.0, "p3": 120.0}
+
+    def fake_extent(ledger, instance_id, *, allow_kernel_build=True):
+        return extents[instance_id]
+
+    monkeypatch.setattr(assembly, "_y_extent_mm", fake_extent)
+    offsets = instance_world_offsets(led)
+
+    y = {k: offsets[k][1] for k in extents}
+    assert y["p1"] == pytest.approx(0.0)  # first part in its lane always centers at exactly 0
+    for a, b in (("p1", "p2"), ("p2", "p3")):
+        edge_to_edge_gap = (y[b] - extents[b] / 2.0) - (y[a] + extents[a] / 2.0)
+        assert edge_to_edge_gap > 0.0  # must never overlap -- this is what the old formula violated
+        assert edge_to_edge_gap == pytest.approx(assembly._AUTO_LAYOUT_GAP_MM)
+
+
+def test_auto_layout_gap_stays_exactly_gap_for_non_increasing_extents(base_ledger, seeded, monkeypatch):
+    """The previously-working case (non-increasing extents) must keep working -- and, under the new
+    symmetric half-extent formula, the edge-to-edge gap collapses to exactly GAP here too (rather
+    than the old formula's incidental `GAP + (extent_prev - extent_next) / 2` overage)."""
+    led = seeded(base_ledger, "bracket")
+    led = _detach_root_from_toplevel_autolayout_lane(led)
+    led = add_instance(led, "standoff", "p1")
+    led = add_instance(led, "standoff", "p2")
+    led = add_instance(led, "standoff", "p3")
+    extents = {"p1": 120.0, "p2": 80.0, "p3": 20.0}
+
+    def fake_extent(ledger, instance_id, *, allow_kernel_build=True):
+        return extents[instance_id]
+
+    monkeypatch.setattr(assembly, "_y_extent_mm", fake_extent)
+    offsets = instance_world_offsets(led)
+
+    y = {k: offsets[k][1] for k in extents}
+    assert y["p1"] == pytest.approx(0.0)
+    for a, b in (("p1", "p2"), ("p2", "p3")):
+        edge_to_edge_gap = (y[b] - extents[b] / 2.0) - (y[a] + extents[a] / 2.0)
+        assert edge_to_edge_gap > 0.0
+        assert edge_to_edge_gap == pytest.approx(assembly._AUTO_LAYOUT_GAP_MM)
+
+
+def test_auto_layout_real_parent_seed_clears_half_parent_extent_plus_gap(base_ledger, seeded, monkeypatch):
+    """The first auto-placed child of a REAL parent must clear the parent by exactly GAP beyond the
+    parent's HALF Y-extent (a part is built centered on its own local origin, so the parent's own
+    body's far edge sits at `parent_extent / 2`, not the full extent -- seeding the cursor at the
+    full extent, as an earlier version did, silently over-cleared by another half-extent)."""
+    led = seeded(base_ledger, "bracket")
+    led = add_instance(led, "standoff", "child1", parent_id=led.root_id)
+    fake_extents = {"root": 100.0, "child1": 30.0}
+
+    def fake_extent(ledger, instance_id, *, allow_kernel_build=True):
+        return fake_extents[instance_id]
+
+    monkeypatch.setattr(assembly, "_y_extent_mm", fake_extent)
+    offsets = instance_world_offsets(led)
+
+    child_near_edge = offsets["child1"][1] - fake_extents["child1"] / 2.0
+    parent_far_edge = fake_extents["root"] / 2.0
+    assert child_near_edge - parent_far_edge == pytest.approx(assembly._AUTO_LAYOUT_GAP_MM)
 
 
 # ------- render_assembly -------

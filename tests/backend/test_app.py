@@ -8,6 +8,9 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+import packages.transport.app as app_module
+from packages.ledger.derived_resolver import Verdict, signature_from_params
+from packages.ledger.fingerprint import fingerprint
 from packages.transport.app import create_app
 
 SKIN = "instances.root.params.skin_thickness_mm"
@@ -819,3 +822,179 @@ def test_bare_name_that_is_not_a_param_of_the_active_part_still_rejects():
         ws.send_json({"target_node": "not_a_real_param", "requested_value": 5.0})
         msg = ws.receive_json()
     assert msg["event_type"] == "PARAMETER_MUTATION_REJECTED"
+
+
+# --- Defect 2 regression (2026-08-03): a whole-assembly export must gate on EVERY buildable instance ---
+
+def _fake_analyze_ok(params, material_name, load_n, subsystem_name="bracket", cut_features=None):
+    # mirrors tests/backend/test_analysis_api.py's own `_fake_analyze` (solver faked; build123d/export
+    # is real on this host) -- a real-shaped, PASSING verdict with no gmsh/CalculiX dependency.
+    return Verdict(geometry_signature=signature_from_params(params, geometry_params=tuple(params.keys())),
+                   fingerprint=fingerprint(),
+                   factor_of_safety=4.0, mesh_converged=True, watertight=True, min_wall_ok=True,
+                   solver_seconds=1.0)
+
+
+def test_export_step_whole_assembly_gates_on_every_buildable_instance(monkeypatch):
+    """Before this fix, `/export/step` with `instance_id` omitted evaluated the export gate against
+    ONLY `state.active_instance()` — but `_render_geometry` composes EVERY instance in the ledger into
+    the exported file the moment it holds more than one (`render_assembly`). Sign off ONE bracket
+    ('good'), leave a second ('bad') never analyzed (an unknown FS) -- the whole-assembly export must
+    block on 'bad', not silently ship it alongside 'good'."""
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(app_module, "analyze_in_subprocess", _fake_analyze_ok)
+    c = TestClient(create_app())
+    good = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "bracket"}).json()["instance_id"]
+    bad = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "bracket"}).json()["instance_id"]
+    c.post(f"/instances/{good}/activate")  # 'good' becomes the ACTIVE instance /analyze/ /signoff target
+
+    r = c.post("/analyze").json()
+    assert r["status"] == "done" and r["verdict"]["factor_of_safety"] == 4.0
+    c.post("/signoff", params={"reviewer": "pe@example.com"})
+
+    # sanity: 'good' alone really is fully eligible (proves this isn't a false negative from something
+    # else entirely) — a REAL exported STEP file comes back.
+    assert c.get(f"/export/step?instance_id={good}").status_code == 200
+    # sanity: 'bad' alone really is blocked (never analyzed — an honest unknown FS). An EXPLICIT
+    # instance_id is the pre-existing, unprefixed single-instance format (unchanged by this fix).
+    bad_res = c.get(f"/export/step?instance_id={bad}")
+    assert bad_res.status_code == 409
+    assert "factor_of_safety" in bad_res.json()["unknowns"]
+
+    # THE fix under test: a whole-assembly export (no instance_id, 2 instances in the file) must block
+    # on 'bad' even though the ACTIVE instance ('good') is itself fully signed off and eligible.
+    whole_res = c.get("/export/step")
+    assert whole_res.status_code == 409
+    body = whole_res.json()
+    assert any(f"{bad}: factor_of_safety" in u for u in body["unknowns"])
+    assert any(bad in r for r in body["reasons"])
+
+    # /export/check (the advisory twin) must never diverge from what /export/step actually enforces.
+    assert c.post("/export/check").json()["status"] == "EXPORT_BLOCKED"
+
+
+def test_export_step_whole_assembly_single_instance_case_is_unchanged():
+    # the single-instance file (the overwhelming common case) must behave BYTE-FOR-BYTE as before this
+    # fix — no aggregation machinery kicks in when there's nothing to aggregate over.
+    c = _client()  # bootstraps exactly one instance ("root")
+    res = c.get("/export/step")
+    assert res.status_code == 409
+    body = res.json()
+    assert "factor_of_safety" in body["unknowns"]           # NOT prefixed with an instance id
+    assert any("not engineer-reviewed" in r for r in body["reasons"])
+
+
+# --- Defect 3 regression (2026-08-03): the grounded verdict path must use the ledger's REAL material ---
+
+def test_analyze_and_export_use_the_ledgers_real_material_not_a_hardcoded_pla(monkeypatch):
+    """/analyze's material default AND resolved_ledger()'s own `material=` argument to
+    `ledger_with_derived()` both used to be the literal "PLA" regardless of the design's OWN
+    `domains.structure.material_profile` (the same field the coarse structural pre-check,
+    `_iter_coarse_cantilever_fs`, already reads) — change the project's material to ABS and BOTH
+    hardcodes used to keep silently agreeing with EACH OTHER on the wrong "PLA" case (never surfacing
+    as a blocked gate, since the two literals matched each other; the actual bug was a silently
+    wrong-material verdict, not a blocked one). Pin: /analyze must default to (and tag its cached
+    verdict with) the REAL "ABS" profile, and the export gate's own resolved-derived lookup must then
+    find that SAME ABS-keyed verdict — not go looking for a "PLA" one that was never solved."""
+    seen_material: list[str] = []
+
+    def _fake_analyze_records_material(params, material_name, load_n, subsystem_name="bracket", cut_features=None):
+        seen_material.append(material_name)
+        return Verdict(geometry_signature=signature_from_params(params, geometry_params=tuple(params.keys())),
+                       fingerprint=fingerprint(), factor_of_safety=4.0, mesh_converged=True,
+                       watertight=True, min_wall_ok=True, material=material_name, load_n=load_n,
+                       solver_seconds=1.0)
+
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(app_module, "analyze_in_subprocess", _fake_analyze_records_material)
+    c = _client()
+    with c.websocket_connect("/ws") as ws:
+        ws.send_json({"target_node": "domains.structure.material_profile", "requested_value": "ABS"})
+        ws.receive_json()
+
+    r = c.post("/analyze").json()
+    assert r["status"] == "done"
+    assert r["material"] == "ABS"    # THE pin: /analyze's own default, not a hardcoded "PLA"
+    assert seen_material == ["ABS"]  # the fake solver was actually invoked with the real material
+
+    c.post("/signoff", params={"reviewer": "pe@example.com"})
+    # THE other pin: resolved_ledger() must look up the SAME "ABS"-keyed verdict just cached above, not
+    # a hardcoded "PLA" one that was never solved — if it did, `derived` would stay unknown and this
+    # would still read EXPORT_BLOCKED despite a real, passing, signed-off ABS verdict existing.
+    assert c.post("/export/check").json()["status"] == "EXPORT_ELIGIBLE"
+
+
+def test_optimize_also_uses_the_ledgers_real_material_not_a_hardcoded_pla(monkeypatch):
+    # /optimize's sweep used to hardcode "PLA" in both its queued and inline solve calls, the same
+    # class of bug as /analyze's — pin that the design's real material actually reaches the solver.
+    seen_materials: list[str] = []
+
+    def _fake_optimize(candidates, base_params, material_name, load_n, fs_floor, timeout_s,
+                       subsystem_name="bracket", cut_features=None):
+        seen_materials.append(material_name)
+        best = candidates[0]
+        v = Verdict(geometry_signature="x", fingerprint=fingerprint(), factor_of_safety=4.0,
+                    mesh_converged=True, watertight=True, min_wall_ok=True,
+                    material=material_name, load_n=load_n, solver_seconds=1.0)
+        return {"variants": [{"value": c, "factor_of_safety": 4.0} for c in candidates],
+                "best_value": best, "best_mass_g": 1.0, "best_verdict": v}
+
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(app_module, "optimize_in_subprocess", _fake_optimize)
+    c = _client()
+    with c.websocket_connect("/ws") as ws:
+        ws.send_json({"target_node": "domains.structure.material_profile", "requested_value": "ABS"})
+        ws.receive_json()
+
+    r = c.post("/optimize").json()
+    assert r["status"] == "done"
+    assert seen_materials == ["ABS"]  # not the hardcoded "PLA" literal
+
+
+# --- Defect 1 (2026-08-03): /analyze must not compute a real FS against a fabricated default load
+# when the only thing on this part is a load-bearing coupling the force-only path can't consume ---
+
+def test_analyze_refuses_to_compute_against_a_fabricated_load_when_only_a_moment_coupling_exists():
+    # 'crank' carries a KNOWN, fully-resolved moment coupling — but nothing FORCE-shaped, no stated
+    # goal, and no explicit load_n. Solving the real FS here would run against the hardcoded 40N
+    # default, a number with no relationship to what this part actually carries.
+    c = TestClient(create_app())
+    crank = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_bar"}).json()["instance_id"]
+    c.post("/coupling_ops", json={"op": "add_coupling", "target_instance": crank,
+                                  "relation": "bending_from_distributed_load",
+                                  "inputs": [{"name": "total_load_n", "value": 200.0},
+                                             {"name": "span_mm", "value": 500.0}]})
+    r = c.post("/analyze").json()
+    assert r["status"] == "error"
+    assert r.get("coupling_blocked") is True
+
+
+def test_analyze_still_computes_when_the_caller_passes_load_n_explicitly():
+    # an INFORMED override (an explicit load_n) must still be honored — the export gate independently
+    # blocks regardless (packages.couplings.coupling_gate_findings), so this can never bypass real
+    # enforcement, only this earlier, friendlier refusal.
+    c = TestClient(create_app())
+    crank = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_bar"}).json()["instance_id"]
+    c.post("/coupling_ops", json={"op": "add_coupling", "target_instance": crank,
+                                  "relation": "bending_from_distributed_load",
+                                  "inputs": [{"name": "total_load_n", "value": 200.0},
+                                             {"name": "span_mm", "value": 500.0}]})
+    r = c.post("/analyze", params={"load_n": 40.0}).json()
+    assert r.get("coupling_blocked") is not True
+    assert r["status"] in ("done", "queued", "error")  # error here only for an unrelated reason (e.g. no solver)
+
+
+def test_analyze_is_not_blocked_by_a_force_only_coupling():
+    # do-not-over-block: a real, force-only coupling is exactly the case /analyze is SUPPOSED to solve
+    # against — must never be refused.
+    c = TestClient(create_app())
+    crank = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_bar"}).json()["instance_id"]
+    c.post("/coupling_ops", json={"op": "add_coupling", "target_instance": crank,
+                                  "relation": "force_from_pressure_area",
+                                  "inputs": [{"name": "pressure_pa", "value": 2e6},
+                                             {"name": "area_mm2", "value": 500.0}]})
+    r = c.post("/analyze").json()
+    assert r.get("coupling_blocked") is not True

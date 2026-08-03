@@ -101,13 +101,21 @@ def instance_world_offsets(
     chains resolve correctly. An instance with `transform is None` is auto-laid-out along +Y from
     its siblings (same `parent_id` — `None` for top-level parts, so they're all siblings of each
     other by default): a running cursor per parent (keyed by parent id, or `None` for the top-level
-    stack) tracks the far Y-edge of everything already placed, seeded with the PARENT's OWN
-    Y-extent for a real parent (0 for the top-level stack, since there's no parent body to clear).
-    Each auto-placed instance is centered at `cursor + 15mm gap`, and the cursor then advances by
-    `gap + this instance's own Y-extent` — so the 15mm gap is inserted before EVERY auto-placed
-    instance, which is what actually guarantees no overlap regardless of how consecutive siblings'
-    extents compare. (Siblings that carry an explicit transform were positioned by the user and are
-    not folded into this running stack — they don't consume auto-layout "slots".)
+    stack) tracks the far Y-edge of everything ALREADY placed in that lane — not a center. The FIRST
+    instance placed in a lane either clears HALF the PARENT's OWN Y-extent (a part is built centered
+    on its own local origin, so its body's far edge sits at extent/2, not the full extent) for a real
+    parent, or — for the top-level stack, which has no body to clear at all — sits at exactly the
+    origin (Y=0). Each auto-placed instance is centered at `cursor + GAP + this instance's OWN
+    half-extent`, and the cursor then advances to THIS instance's own far edge (`cursor + GAP + this
+    instance's FULL extent`) for whoever is placed next — reserving half of every instance's own
+    extent on both its near and far side, so the edge-to-edge gap between any two consecutive
+    auto-placed siblings is exactly `GAP`, independent of how their extents compare (2026-08 fix: an
+    earlier version centered each instance at `cursor + GAP` with no half-extent term, which only
+    ever reserved clearance on ONE side of each part — the real edge-to-edge gap it produced was
+    `GAP + (extent_prev - extent_next) / 2`, which went NEGATIVE, i.e. actual 3-D interpenetration,
+    the moment a later sibling's extent exceeded the previous one's by more than `2 * GAP`).
+    (Siblings that carry an explicit transform were positioned by the user and are not folded into
+    this running stack — they don't consume auto-layout "slots".)
 
     2026-07-20 fix: the cursor is actually keyed by `(parent_id, is_airframe_defining)`, TWO
     independent lanes per parent group, not one. A single shared queue broke completely the moment
@@ -132,10 +140,11 @@ def instance_world_offsets(
     # parent-chain/auto-layout logic below; everything without a connection is unchanged.
     from packages.subsystems.placement import resolve_placements
     mated = resolve_placements(ledger)  # {instance_id: world Transform}; empty when there are no connections
-    # cumulative Y-extent already claimed in a (parent, is_airframe_defining) lane (seeded with the
-    # parent's OWN extent for a real parent, -GAP for the top-level stack), keyed by
-    # (parent id, is this instance an airframe-defining body) — see the 2026-07-20 note above for why
-    # this needs to be two lanes, not one.
+    # Y-position of the far edge already claimed in a (parent, is_airframe_defining) lane (HALF the
+    # parent's own extent once a real parent's first child is placed; unset until then for the
+    # top-level stack, whose first instance in a lane is special-cased straight to Y=0 — see the
+    # branches below), keyed by (parent id, is this instance an airframe-defining body) — see the
+    # 2026-07-20 note above for why this needs to be two lanes, not one.
     auto_cursor_by_parent: dict[tuple[Optional[str], bool], float] = {}
 
     def resolve(instance_id: str) -> tuple[float, float, float]:
@@ -153,28 +162,42 @@ def instance_world_offsets(
             local = (t.x_mm, t.y_mm, t.z_mm)
         else:
             cursor_key = (parent_id, _is_airframe_defining(ledger, instance_id))
-            if cursor_key not in auto_cursor_by_parent:
-                if parent_id is not None:
-                    # a REAL parent's own body needs clearing — seed at its Y-extent so the first
-                    # child doesn't nest back inside it.
-                    auto_cursor_by_parent[cursor_key] = _y_extent_mm(
-                        ledger, parent_id, allow_kernel_build=allow_kernel_build)
-                else:
-                    # the top-level stack has no body to clear — seed at -GAP so the formula below
-                    # (`cursor + GAP`) places the FIRST top-level part's center at exactly 0, not
-                    # gap-offset from nothing. Only the 2nd+ sibling actually needs the gap.
-                    auto_cursor_by_parent[cursor_key] = -_AUTO_LAYOUT_GAP_MM
-            cursor = auto_cursor_by_parent[cursor_key]
-            # GAP is added before EVERY auto-placed instance (not just the first) — placing this
-            # instance's center at cursor+GAP and then reserving cursor+GAP+this_extent for whatever
-            # comes next guarantees a real gap between EVERY consecutive pair, regardless of how their
-            # extents compare (a bug in an earlier version only gapped the first child from its
-            # parent, then packed subsequent siblings back-to-back with center-to-center spacing equal
-            # to the PREVIOUS sibling's extent alone — safe only when extents were non-increasing,
-            # and capable of overlapping two instances outright otherwise).
             this_extent = _y_extent_mm(ledger, instance_id, allow_kernel_build=allow_kernel_build)
-            local = (0.0, cursor + _AUTO_LAYOUT_GAP_MM, 0.0)
-            auto_cursor_by_parent[cursor_key] = cursor + _AUTO_LAYOUT_GAP_MM + this_extent
+            # `cursor` (once known) is the Y-position of the far edge already claimed in this lane —
+            # NOT a center. Placing THIS instance a full GAP plus its OWN half-extent past that edge
+            # (`cursor + GAP + this_extent / 2`), then advancing the claimed edge to THIS instance's
+            # own far edge (`local_y + this_extent / 2`) for whoever is placed next, reserves
+            # this_extent/2 on the near side AND this_extent/2 on the far side of every instance — so
+            # the edge-to-edge gap between any two consecutive auto-placed siblings is exactly GAP,
+            # regardless of how their extents compare (2026-08 fix: an earlier version placed each
+            # center at `cursor + GAP`, with no `/2` term — that only ever reserved clearance on ONE
+            # side of each part, so the real edge-to-edge gap it produced was
+            # `GAP + (extent_prev - extent_next) / 2`, which went NEGATIVE — actual 3-D
+            # interpenetration, not just a Y-axis artifact, since every auto-placed instance shares
+            # x=0, z=0 — the moment a later sibling's extent exceeded the previous one's by more than
+            # `2 * GAP`).
+            if cursor_key in auto_cursor_by_parent:
+                far_edge_claimed = auto_cursor_by_parent[cursor_key]
+                local_y = far_edge_claimed + _AUTO_LAYOUT_GAP_MM + this_extent / 2.0
+            elif parent_id is not None:
+                # First instance in this lane, under a REAL parent: seed at HALF the parent's own
+                # Y-extent. A part is built centered on its own local origin (spans
+                # -extent/2 .. +extent/2), so the parent's own body's far edge sits at extent/2, not
+                # the full extent (seeding the full extent, as an earlier version did, overshot by
+                # another half-extent of unnecessary clearance before the first child).
+                far_edge_claimed = _y_extent_mm(
+                    ledger, parent_id, allow_kernel_build=allow_kernel_build) / 2.0
+                local_y = far_edge_claimed + _AUTO_LAYOUT_GAP_MM + this_extent / 2.0
+            else:
+                # First instance in this lane, top-level (no parent body to clear at all): its center
+                # sits at EXACTLY the origin. Special-cased directly to 0.0 rather than derived via
+                # the general `cursor + GAP + this_extent / 2` formula (which would need a seed of
+                # `-GAP - this_extent / 2` to land back on 0 algebraically) so this invariant holds
+                # bit-for-bit for every this_extent, not just up to floating-point rounding noise from
+                # adding this_extent/2 and then subtracting it back out.
+                local_y = 0.0
+            local = (0.0, local_y, 0.0)
+            auto_cursor_by_parent[cursor_key] = local_y + this_extent / 2.0
         world = (px + local[0], py + local[1], pz + local[2])
         offsets[instance_id] = world
         return world

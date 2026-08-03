@@ -34,7 +34,28 @@ def test_force_from_mass_accel():
 
 
 def test_torque_from_force_radius():
-    assert get_relation("torque_from_force_radius").evaluate({"force_n": 1000.0, "radius_mm": 25.0}) == pytest.approx(25.0)
+    # 2026-08-03: output standardized to torque_nmm (N*mm), was torque_nm (N*m) — see the unit-mismatch
+    # fix note in relations.py. T = F*r = 1000 N * 25 mm = 25000 N*mm (the same physical torque as the
+    # old 25 N*m value, just expressed in mm — 25 N*m == 25000 N*mm).
+    assert get_relation("torque_from_force_radius").evaluate({"force_n": 1000.0, "radius_mm": 25.0}) == pytest.approx(25000.0)
+
+
+def test_torque_output_unit_matches_shear_stress_input_unit_no_1000x_mismatch():
+    # PINS the defect fix: torque_from_force_radius's declared output quantity name+unit must be
+    # BIT-FOR-BIT the same quantity name+unit shear_stress_from_torque_radius declares for its torque
+    # input, so a future coupling-chaining feature can wire one straight into the other with NO silent
+    # factor-of-1000 error. This is a regression test for a defect that was dormant only because
+    # chaining does not exist yet (a coupling's input today is only a literal or a single part param).
+    torque_rel = get_relation("torque_from_force_radius")
+    shear_rel = get_relation("shear_stress_from_torque_radius")
+    assert torque_rel.output == ("torque_nmm", "N*mm")
+    assert "torque_nmm" in shear_rel.inputs
+    assert shear_rel.inputs["torque_nmm"] == "N*mm"
+    # the general form of the pin: whatever name/unit torque_from_force_radius emits must equal
+    # whatever name/unit shear_stress_from_torque_radius expects for that same quantity.
+    out_name, out_unit = torque_rel.output
+    assert out_name in shear_rel.inputs
+    assert shear_rel.inputs[out_name] == out_unit
 
 
 def test_bending_from_distributed_load():
@@ -217,3 +238,207 @@ def test_registry_has_the_2026_07_31_additions():
     for name in ("stress_from_force_area", "deflection_of_cantilever_beam",
                  "spring_force_from_rate_deflection", "shear_stress_from_torque_radius"):
         assert name in RELATION_REGISTRY
+
+
+# --- 2026-08-03 additions: cantilever bending, section properties, Euler buckling, bolted joint -----
+# Every expected value below was HAND-COMPUTED from the closed-form formula (calculator arithmetic,
+# shown inline) BEFORE running any code — never back-filled from this implementation's own output.
+
+def test_bending_from_cantilever_point_load():
+    # Euler-Bernoulli cantilever, tip point load: M = F*L = 150 N * 400 mm = 60000 N*mm
+    assert get_relation("bending_from_cantilever_point_load").evaluate(
+        {"force_n": 150.0, "length_mm": 400.0}
+    ) == pytest.approx(60000.0)
+
+
+def test_bending_from_cantilever_distributed_load():
+    # Euler-Bernoulli cantilever, uniform distributed load: M = W*L/2 = 300 N * 800 mm / 2 = 120000 N*mm
+    assert get_relation("bending_from_cantilever_distributed_load").evaluate(
+        {"total_load_n": 300.0, "span_mm": 800.0}
+    ) == pytest.approx(120000.0)
+
+
+def test_second_moment_of_area_rectangular():
+    # I = b*h^3/12 = 10 mm * 20^3 mm^3 / 12 = 10*8000/12 = 80000/12 = 6666.6667 mm^4
+    assert get_relation("second_moment_of_area_rectangular").evaluate(
+        {"width_mm": 10.0, "height_mm": 20.0}
+    ) == pytest.approx(6666.66667, abs=1e-3)
+
+
+def test_second_moment_of_area_circular():
+    # I = pi*d^4/64 = pi * 20^4 / 64 = pi * 160000/64 = pi*2500 = 7853.98163 mm^4 (pi=3.14159265)
+    assert get_relation("second_moment_of_area_circular").evaluate(
+        {"dia_mm": 20.0}
+    ) == pytest.approx(7853.98163, abs=1e-3)
+
+
+def test_polar_second_moment_of_area_circular():
+    # J = pi*d^4/32 = pi * 160000/32 = pi*5000 = 15707.96327 mm^4 (pi=3.14159265) — exactly 2x the
+    # second_moment_of_area_circular value above (J=2I for a circular section), a handy cross-check.
+    assert get_relation("polar_second_moment_of_area_circular").evaluate(
+        {"dia_mm": 20.0}
+    ) == pytest.approx(15707.96327, abs=1e-3)
+
+
+def test_euler_buckling_critical_load_pinned_pinned():
+    # P_cr = pi^2*E*I/L^2 (K=1, pinned-pinned) = pi^2 * 70000 MPa * 10000 mm^4 / 500^2 mm^2
+    #      = 9.869604401 * 700,000,000 / 250,000 = 9.869604401 * 2800 = 27634.8923 N
+    assert get_relation("euler_buckling_critical_load_pinned_pinned").evaluate(
+        {"modulus_mpa": 70000.0, "moment_of_inertia_mm4": 10000.0, "length_mm": 500.0}
+    ) == pytest.approx(27634.8923, abs=1e-2)
+
+
+def test_bolt_preload_from_torque():
+    # F = T/(K*d) = 20000 N*mm / (0.20 * 8 mm) = 20000 / 1.6 = 12500 N
+    assert get_relation("bolt_preload_from_torque").evaluate(
+        {"torque_nmm": 20000.0, "dia_mm": 8.0}
+    ) == pytest.approx(12500.0)
+
+
+def test_bolt_shear_stress_from_transverse_force():
+    # tau = F/A, A = pi*d^2/4 = pi*10^2/4 = 25*pi = 78.5398163 mm^2
+    # tau = 5000 N / 78.5398163 mm^2 = 200/pi = 63.6619772 MPa
+    assert get_relation("bolt_shear_stress_from_transverse_force").evaluate(
+        {"force_n": 5000.0, "dia_mm": 10.0}
+    ) == pytest.approx(63.6619772, abs=1e-3)
+
+
+def test_registry_has_the_2026_08_03_additions():
+    for name in ("bending_from_cantilever_point_load", "bending_from_cantilever_distributed_load",
+                 "second_moment_of_area_rectangular", "second_moment_of_area_circular",
+                 "polar_second_moment_of_area_circular", "euler_buckling_critical_load_pinned_pinned",
+                 "bolt_preload_from_torque", "bolt_shear_stress_from_transverse_force"):
+        assert name in RELATION_REGISTRY
+
+
+def test_no_fatigue_or_stress_concentration_relations_registered():
+    # HUMAN WALL, explicitly respected: fatigue/S-N-curve/stress-concentration relations need empirical
+    # data (S-N curves, Kt factors) this catalog has no grounded closed-form source for — assert none
+    # snuck into the registry under any name.
+    banned_substrings = ("fatigue", "s_n_curve", "sncurve", "stress_concentration", "kt_factor", "miner")
+    for name in RELATION_REGISTRY:
+        low = name.lower().replace("-", "_")
+        assert not any(b in low for b in banned_substrings), f"{name!r} looks like a banned human-wall relation"
+
+
+# --- Defect 1 regression (2026-08-03): a KNOWN torque/moment/preload coupling must NOT vanish as if
+# the part had no coupling at all, and must BLOCK export like any other unknown safety input — before
+# this fix, a moment/torque-only coupling fell straight out of the `output_quantity == "force_n"`
+# filter, `derived_load_n` returned `(None, None)` (indistinguishable from "no coupling"), the real
+# solver then solved a case against the hardcoded default load, and the export gate saw a fully-
+# populated, seemingly-grounded FS with nothing to complain about.
+
+def test_torque_only_coupling_is_distinguishable_from_no_coupling_at_all():
+    led = add_instance(make_demo_ledger(), "round_bar", "crank")
+    led.couplings = [Coupling(id="c1", target_instance="crank", relation="torque_from_force_radius",
+        inputs={"force_n": CouplingInput(value=1000.0), "radius_mm": CouplingInput(value=25.0)})]
+    # the coupling itself resolves fine — this is a real, KNOWN torque, not an unresolvable relation.
+    res = resolve_couplings(led)[0]
+    assert res.is_known and res.output_quantity == "torque_nmm"
+    v, reason = derived_load_n(led, "crank")
+    assert v is None
+    # THE pin: must be distinguishable from test_a_part_with_no_coupling_has_no_derived_load's (None, None)
+    assert reason is not None
+    assert "c1" in reason
+
+
+def test_moment_only_coupling_is_distinguishable_from_no_coupling_at_all():
+    led = add_instance(make_demo_ledger(), "round_bar", "crank")
+    led.couplings = [Coupling(id="c1", target_instance="crank", relation="bending_from_distributed_load",
+        inputs={"total_load_n": CouplingInput(value=200.0), "span_mm": CouplingInput(value=500.0)})]
+    v, reason = derived_load_n(led, "crank")
+    assert v is None and reason is not None
+
+
+def test_preload_only_coupling_is_distinguishable_from_no_coupling_at_all():
+    led = add_instance(make_demo_ledger(), "round_bar", "crank")
+    led.couplings = [Coupling(id="c1", target_instance="crank", relation="bolt_preload_from_torque",
+        inputs={"torque_nmm": CouplingInput(value=20000.0), "dia_mm": CouplingInput(value=8.0)})]
+    v, reason = derived_load_n(led, "crank")
+    assert v is None and reason is not None
+
+
+def test_torque_only_coupling_blocks_the_export_gate_as_an_unknown():
+    led = add_instance(make_demo_ledger(), "round_bar", "crank")
+    led.couplings = [Coupling(id="c1", target_instance="crank", relation="torque_from_force_radius",
+        inputs={"force_n": CouplingInput(value=1000.0), "radius_mm": CouplingInput(value=25.0)})]
+    reasons, unknowns = coupling_gate_findings(led)
+    assert "coupling:c1" in unknowns
+    assert any("c1" in r and "torque_nmm" in r for r in reasons)
+
+
+def test_moment_only_coupling_blocks_the_export_gate_as_an_unknown():
+    led = add_instance(make_demo_ledger(), "round_bar", "crank")
+    led.couplings = [Coupling(id="c1", target_instance="crank", relation="bending_from_distributed_load",
+        inputs={"total_load_n": CouplingInput(value=200.0), "span_mm": CouplingInput(value=500.0)})]
+    reasons, unknowns = coupling_gate_findings(led)
+    assert "coupling:c1" in unknowns
+    assert any("c1" in r and "moment_nmm" in r for r in reasons)
+
+
+def test_preload_only_coupling_blocks_the_export_gate_as_an_unknown():
+    led = add_instance(make_demo_ledger(), "round_bar", "crank")
+    led.couplings = [Coupling(id="c1", target_instance="crank", relation="bolt_preload_from_torque",
+        inputs={"torque_nmm": CouplingInput(value=20000.0), "dia_mm": CouplingInput(value=8.0)})]
+    reasons, unknowns = coupling_gate_findings(led)
+    assert "coupling:c1" in unknowns
+    assert any("c1" in r and "preload_n" in r for r in reasons)
+
+
+def test_a_force_coupling_alongside_a_moment_coupling_prefers_the_force_and_does_not_block():
+    # a REAL force is derivable here — it is used (matching `_iter_coarse_cantilever_fs`'s own
+    # longstanding "prefer force, don't double-count/conflict with a bending-moment reading" precedent,
+    # packages/transport/app.py), and does NOT block just because the part also carries a moment the
+    # force-only path can't separately consume. Combining multiple simultaneous load types into one FS
+    # is a real but SEPARATE multi-load-case question (a human-wall item), not a fabricated-load one —
+    # over-blocking a part with a perfectly real, non-fabricated derived force would be its own bug
+    # (see tests/backend/test_validate.py::test_validate_endpoint_prefers_a_force_coupling_over_a_
+    # moment_one_when_both_exist for the same precedent exercised end-to-end).
+    led = add_instance(make_demo_ledger(), "round_bar", "crank")
+    led.couplings = [
+        Coupling(id="c_force", target_instance="crank", relation="force_from_pressure_area",
+                 inputs={"pressure_pa": CouplingInput(value=2e6), "area_mm2": CouplingInput(value=500.0)}),
+        Coupling(id="c_moment", target_instance="crank", relation="bending_from_distributed_load",
+                 inputs={"total_load_n": CouplingInput(value=200.0), "span_mm": CouplingInput(value=500.0)}),
+    ]
+    v, reason = derived_load_n(led, "crank")
+    assert reason is None
+    assert v == pytest.approx(1000.0)  # the force_from_pressure_area value, not blocked by the moment
+    reasons, unknowns = coupling_gate_findings(led)
+    assert "coupling:c_moment" not in unknowns
+    assert unknowns == [] and reasons == []
+
+
+def test_stress_only_coupling_is_not_a_load_bearing_claim_and_does_not_block():
+    # do-not-over-block precedent: a coupling whose ONLY output is stress_mpa is NOT a load-bearing
+    # claim on the part — it must not be treated the same as a torque/moment/preload claim.
+    led = add_instance(make_demo_ledger(), "round_bar", "crank")
+    led.couplings = [Coupling(id="c1", target_instance="crank", relation="stress_from_force_area",
+        inputs={"force_n": CouplingInput(value=2000.0), "area_mm2": CouplingInput(value=100.0)})]
+    v, reason = derived_load_n(led, "crank")
+    assert v is None and reason is None  # absent, not blocked — same as no coupling at all
+    reasons, unknowns = coupling_gate_findings(led)
+    assert unknowns == [] and reasons == []
+
+
+def test_deflection_only_coupling_is_not_a_load_bearing_claim_and_does_not_block():
+    led = add_instance(make_demo_ledger(), "round_bar", "crank")
+    led.couplings = [Coupling(id="c1", target_instance="crank", relation="deflection_of_cantilever_beam",
+        inputs={"force_n": CouplingInput(value=100.0), "length_mm": CouplingInput(value=200.0),
+                "modulus_mpa": CouplingInput(value=200_000.0),
+                "moment_of_inertia_mm4": CouplingInput(value=8000.0)})]
+    v, reason = derived_load_n(led, "crank")
+    assert v is None and reason is None
+    reasons, unknowns = coupling_gate_findings(led)
+    assert unknowns == [] and reasons == []
+
+
+def test_shear_stress_only_coupling_is_not_a_load_bearing_claim_and_does_not_block():
+    led = add_instance(make_demo_ledger(), "round_bar", "crank")
+    led.couplings = [Coupling(id="c1", target_instance="crank", relation="shear_stress_from_torque_radius",
+        inputs={"torque_nmm": CouplingInput(value=50_000.0), "radius_mm": CouplingInput(value=10.0),
+                "polar_moment_mm4": CouplingInput(value=5000.0)})]
+    v, reason = derived_load_n(led, "crank")
+    assert v is None and reason is None
+    reasons, unknowns = coupling_gate_findings(led)
+    assert unknowns == [] and reasons == []

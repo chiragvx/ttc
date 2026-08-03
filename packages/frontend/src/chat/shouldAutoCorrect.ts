@@ -15,7 +15,7 @@ import type { ValidationResult } from "../types";
 // that same restraint at the trigger-gate level, not just the severity level.
 export function shouldAutoCorrect(report: ValidationResult): boolean {
   if (!report.ok) return true;
-  const issues = [...report.geometric.issues, ...(report.visual?.issues ?? [])];
+  const issues = [...report.geometric.issues, ...report.structural.issues, ...(report.visual?.issues ?? [])];
   // "connections" (dangling/self/unsatisfied connection refs, from connection_issues() in
   // packages/subsystems/placement.py) is the same class of confident, actionable signal as
   // "connectivity" above -- validate.py's own comment calls an unresolved connection "a real
@@ -35,5 +35,31 @@ export function shouldAutoCorrect(report: ValidationResult): boolean {
   // so this must drive the self-correct loop the same way; a mechanism the copilot never learns to
   // invoke is dead plumbing (keepout_mm's own fate -- fully built, zero adopters, precisely because
   // nothing ever taught the model to call it or wired it into this trigger set).
-  return issues.some((i) => i.check === "connectivity" || i.check === "connections" || i.check === "interference" || i.check === "fit");
+  //
+  // "structural" (2026-08-03, packages/transport/app.py::_coarse_structural_summary) -- a coarse,
+  // closed-form cantilever-over-bounding-box FS estimate for any instance carrying a coupling-derived
+  // load. This is the ONLY safety-shaped signal the self-check produces (Inversion #1: "a missing
+  // safety input is unknown and BLOCKS export -- never a fabricated green light"), and until now it
+  // was the one signal this trigger set ignored entirely -- an instance reporting FS≈0.3 against its
+  // own derived load sat in the ledger, self-check "ok", nothing in this file ever seeing it.
+  //
+  // The severity check here is load-bearing, not decoration: `_coarse_structural_summary` deliberately
+  // reports EVERY coupled+buildable instance, not just failing ones, and gives "structural" issues a
+  // MIXED severity unlike every check above -- "warning" only when the crude estimate itself reads
+  // FS < 1.0 (drastically undersized for its derived load); "info" both for a passing estimate AND for
+  // the separate "N coupling(s) derived but this coarse check has no bending-stress model for that
+  // output yet" disclosure. Firing on check === "structural" alone -- not gated on severity -- would
+  // trip this file's own top-of-file lesson from the other direction: a trigger so broad it fires on
+  // findings nothing can act on (a passing FS, or a plain "can't estimate this one yet" notice) burns
+  // the auto-correct budget on a no-op round after round, same wasted-loop shape as the connectivity
+  // gap this file was originally built to close, just from being too broad instead of too narrow.
+  // Gating on severity === "warning" keeps this exactly as narrow as the confident/actionable group
+  // above: FS < 1.0, and nothing else.
+  return issues.some((i) =>
+    i.check === "connectivity" ||
+    i.check === "connections" ||
+    i.check === "interference" ||
+    i.check === "fit" ||
+    (i.check === "structural" && i.severity === "warning"),
+  );
 }

@@ -8,7 +8,7 @@ import { MessageList } from "./MessageList";
 import { ProposalCard } from "./ProposalCard";
 import { ResearchCard } from "./ResearchCard";
 import { ValidationCard } from "./ValidationCard";
-import { buildCorrectionMessage } from "./buildCorrectionMessage";
+import { buildCorrectionMessage, NO_PRIOR_ATTEMPT, type PriorAttempt } from "./buildCorrectionMessage";
 import { shouldAutoCorrect } from "./shouldAutoCorrect";
 import { summarizeOutcomes } from "./summarizeOutcomes";
 import { streamChat } from "../api";
@@ -107,14 +107,20 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
       // changed no geometry, so it must not trigger a /validate call or burn an auto-correct round
       // (2026-07-19 review). Mutated by onEvent below; read after the stream loop.
       let appliedGeometry = false;
-      // instance_ops THIS turn proposed (regardless of outcome) -- if this turn is itself a
+      // every op kind THIS turn proposed (regardless of outcome) -- if this turn is itself a
       // correction attempt and the self-check still fails afterward, the NEXT correction round's
       // message needs to know what was just tried, so it can tell the model "that exact fix didn't
       // work, don't repeat it" instead of silently reissuing it (2026-07-26 live repro, confirmed
       // twice: an identical move_instance retried verbatim across both correction rounds on the
       // cubesat test, and an identical remove_instance retried verbatim on the soldering-stand test
-      // -- both burned the entire auto-correct budget on a pure no-op).
+      // -- both burned the entire auto-correct budget on a pure no-op). Originally instance_ops only;
+      // 2026-08-03 extended to deltas/feature_ops/connection_ops/coupling_ops too -- none of those op
+      // kinds are any less retriable-verbatim than an instance_op, so none of them get a pass.
+      const thisTurnDeltas: ParameterDelta[] = [];
+      const thisTurnFeatureOps: FeatureOp[] = [];
       const thisTurnInstanceOps: InstanceOp[] = [];
+      const thisTurnConnectionOps: ConnectionOp[] = [];
+      const thisTurnCouplingOps: CouplingOp[] = [];
 
       const onEvent = async (e: ChatEvent) => {
         if (e.type === "token") {
@@ -144,6 +150,7 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
           }
           if (e.connection_ops?.length) {
             // AFTER instance_ops (both parts must exist), so the mate places the newly-added parts.
+            thisTurnConnectionOps.push(...e.connection_ops);
             const connOutcomes: (ConnectionOpOutcome | undefined)[] = new Array(e.connection_ops.length).fill(undefined);
             patch(aid, (m) => ({ ...m, connectionOps: e.connection_ops, connectionOpOutcomes: [...connOutcomes] }));
             for (let i = 0; i < e.connection_ops.length; i++) {
@@ -156,6 +163,7 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
           if (e.coupling_ops?.length) {
             // AFTER connection_ops/instance_ops (the target instance must exist), same "propose then
             // auto-apply" boundary as every other op kind.
+            thisTurnCouplingOps.push(...e.coupling_ops);
             const couplingOutcomes: (CouplingOpOutcome | undefined)[] = new Array(e.coupling_ops.length).fill(undefined);
             patch(aid, (m) => ({ ...m, couplingOps: e.coupling_ops, couplingOpOutcomes: [...couplingOutcomes] }));
             for (let i = 0; i < e.coupling_ops.length; i++) {
@@ -166,6 +174,7 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
             await onOpsApplied();
           }
           if (e.deltas.length) {
+            thisTurnDeltas.push(...e.deltas);
             const outcomes = await onApply(e.deltas);
             patch(aid, (m) => ({ ...m, outcomes }));
             if (outcomes.some((o) => o.status === "APPLIED" || o.status === "APPLIED_ADVISORY")) appliedGeometry = true;
@@ -205,6 +214,7 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
             // is happening) and each row's outcome fills in as it actually completes — a proposal
             // with 20-30 ops used to render NOTHING until the entire sequential batch finished,
             // which read as a hang (see App.tsx::refreshAfterOps for the other half of this fix).
+            thisTurnFeatureOps.push(...e.feature_ops);
             const featureOpOutcomes: (FeatureOpOutcome | undefined)[] = new Array(e.feature_ops.length).fill(undefined);
             patch(aid, (m) => ({ ...m, featureOps: e.feature_ops, featureOpOutcomes: [...featureOpOutcomes] }));
             for (let i = 0; i < e.feature_ops.length; i++) {
@@ -272,15 +282,23 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
           patch(aid, (m) => ({ ...m, validation: report }));
           if (shouldAutoCorrect(report) && autoRoundRef.current < MAX_AUTO_ROUNDS && settings.apiKey) {
             // capture BEFORE incrementing: was THIS turn itself already a correction attempt? If so,
-            // thisTurnInstanceOps is a fix that just failed (the self-check above still found
-            // problems) -- pass it to buildCorrectionMessage so the NEXT round's message says so
-            // explicitly, instead of the model having no signal that repeating it is pointless (see
-            // thisTurnInstanceOps' own declaration comment for the two confirmed live repros this
-            // fixes). Pass [] when this turn was the ORIGINAL build, not a retry -- its own first-pass
-            // instance_ops are not a "prior fix attempt".
-            const priorAttemptOps = autoRoundRef.current >= 1 ? thisTurnInstanceOps : [];
+            // every op kind captured above is a fix that just failed (the self-check above still
+            // found problems) -- pass them all to buildCorrectionMessage so the NEXT round's message
+            // says so explicitly, instead of the model having no signal that repeating it is pointless
+            // (see the thisTurn*Ops declarations' own comment for the confirmed live repros this
+            // fixes). Pass NO_PRIOR_ATTEMPT when this turn was the ORIGINAL build, not a retry -- its
+            // own first-pass ops are not a "prior fix attempt".
+            const priorAttempt: PriorAttempt = autoRoundRef.current >= 1
+              ? {
+                  deltas: thisTurnDeltas,
+                  featureOps: thisTurnFeatureOps,
+                  instanceOps: thisTurnInstanceOps,
+                  connectionOps: thisTurnConnectionOps,
+                  couplingOps: thisTurnCouplingOps,
+                }
+              : NO_PRIOR_ATTEMPT;
             autoRoundRef.current += 1;
-            const correction = buildCorrectionMessage(report, autoRoundRef.current, MAX_AUTO_ROUNDS, priorAttemptOps);
+            const correction = buildCorrectionMessage(report, autoRoundRef.current, MAX_AUTO_ROUNDS, priorAttempt);
             setPendingCorrection(correction);   // the effect fires it once streaming settles, never re-entrantly
           }
         } catch {

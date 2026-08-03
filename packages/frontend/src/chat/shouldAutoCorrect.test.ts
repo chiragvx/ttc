@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import { shouldAutoCorrect } from "./shouldAutoCorrect";
 import type { ValidationIssue, ValidationResult } from "../types";
 
-function report(overrides: Partial<ValidationResult> & { geometricIssues?: ValidationIssue[] } = {}): ValidationResult {
-  const { geometricIssues, ...rest } = overrides;
+function report(
+  overrides: Partial<ValidationResult> & { geometricIssues?: ValidationIssue[]; structuralIssues?: ValidationIssue[] } = {},
+): ValidationResult {
+  const { geometricIssues, structuralIssues, ...rest } = overrides;
   return {
     ok: true,
     geometric: { ok: true, issues: geometricIssues ?? [], summary: "" },
-    structural: { ok: true, issues: [], summary: "" },
+    structural: { ok: true, issues: structuralIssues ?? [], summary: "" },
     visual: null,
     vision_enabled: false,
     vision_ran: false,
@@ -56,6 +58,22 @@ describe("shouldAutoCorrect", () => {
     // interference/connectivity above, not an ambiguous judgment call.
     const r = report({ ok: true, geometricIssues: [issue("fit", "warning")] });
     expect(shouldAutoCorrect(r)).toBe(true);
+  });
+
+  it("fires on a structural issue with severity warning (FS < 1.0) even when report.ok is true", () => {
+    // 2026-08-03: _coarse_structural_summary marks a coupled instance's crude FS estimate
+    // severity="warning" ONLY when it reads FS < 1.0 -- the one safety-shaped signal the self-check
+    // produces, previously ignored by this trigger set entirely.
+    const r = report({ ok: true, structuralIssues: [issue("structural", "warning")] });
+    expect(shouldAutoCorrect(r)).toBe(true);
+  });
+
+  it("does NOT fire on a structural issue with severity info (a passing FS estimate)", () => {
+    // a part with a perfectly fine estimated FS, or an "N coupling(s) derived but no bending-stress
+    // model for that output yet" disclosure, is not a defect to auto-correct -- firing on it would be
+    // exactly the too-broad trigger this file's history warns against, just in the other direction.
+    const r = report({ ok: true, structuralIssues: [issue("structural", "info")] });
+    expect(shouldAutoCorrect(r)).toBe(false);
   });
 
   it("does not fire when there are no issues at all", () => {
