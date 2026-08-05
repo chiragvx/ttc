@@ -17,6 +17,7 @@ from packages.subsystems.placement import (
     _apply_transform_to_frame,
     _rot_apply,
     connection_issues,
+    resolve_mesh_mate,
     resolve_placements,
     world_frame_for_interface,
 )
@@ -377,3 +378,198 @@ def test_apply_transform_to_frame_translates_and_rotates():
     # rotation rotates both origin and normal
     w2 = _apply_transform_to_frame(Transform(rz_deg=90), f)
     assert w2.origin == pytest.approx((0, 1, 0)) and w2.normal == pytest.approx((0, 1, 0))
+
+
+# ---------------------------------------------------------------------------------------------------
+# Mesh-kind (gear pitch-circle) mating (2026-08-04) -- Frame.radius + cylinder_axis_mesh_interface
+# (base.py) + resolve_mesh_mate (placement.py). No real catalog subsystem declares a "mesh" interface
+# yet (that adoption -- e.g. gear_blank/pinion_blank/sprocket_blank -- is an explicit follow-up, out of
+# this session's owned-file scope), so the mesh-mate tests below use synthetic Subsystem models
+# monkeypatched into get_subsystem_model, the SAME technique tests/subsystems/test_fit.py already uses
+# for compute_fit's own unit coverage.
+# ---------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name,iface", [
+    ("round_post", "bottom"), ("round_post", "top"),
+    ("longeron", "end_a"), ("longeron", "end_b"),
+    ("avionics_tray", "top"), ("avionics_tray", "bottom"),
+    ("enclosure", "right"), ("enclosure", "top"),
+    ("lbracket", "wall_mount"), ("lbracket", "top"),
+])
+def test_frame_radius_defaults_to_none_for_every_existing_interface_helper(name, iface):
+    # 2026-08-04: Frame.radius is a NEW field, added ONLY for kind="mesh" interfaces. Every
+    # pre-existing InterfaceSpec across the catalog (cylinder/bar/plate/box/lbracket shape families --
+    # every existing interface-helper family in base.py) must keep producing radius=None: explicit
+    # proof of ZERO behavior change for the 86 existing InterfaceSpec(...) call sites.
+    from packages.subsystems.placement import _local_frame
+    led = add_instance(make_demo_ledger(), name, "x")
+    frame = _local_frame(led, "x", iface)
+    assert frame is not None
+    assert frame.radius is None
+
+
+def test_cylinder_axis_mesh_interface_declares_a_mesh_kind_pitch_frame_at_the_local_origin():
+    # the new interface helper, unit-tested directly against a synthetic Subsystem.
+    from packages.subsystems.base import Namespace, ParamSpec, Subsystem, cylinder_axis_mesh_interface
+    gear = Subsystem(
+        name="_test_mesh_gear", description="", fragment="", disciplines=(),
+        params=[ParamSpec("dia_mm", value=40.0, min=5.0, max=200.0, unit="mm")],
+        interfaces=[cylinder_axis_mesh_interface("dia_mm")],
+    )
+    spec = gear.interfaces[0]
+    assert spec.name == "mesh"
+    assert spec.kind == "mesh"
+    ns = Namespace({"dia_mm": ParameterDef(value=40.0, unit="mm", bounds=(5.0, 200.0))})
+    frame = spec.frame(ns)
+    assert frame.origin == (0.0, 0.0, 0.0)
+    assert frame.normal == (0.0, 0.0, 1.0)
+    assert frame.radius == pytest.approx(20.0)  # half of dia_mm=40, hand-computed
+
+
+def test_cylinder_axis_mesh_interface_accepts_a_custom_name():
+    from packages.subsystems.base import ParamSpec, Subsystem, cylinder_axis_mesh_interface
+    gear = Subsystem(
+        name="_test_mesh_gear2", description="", fragment="", disciplines=(),
+        params=[ParamSpec("dia_mm", value=10.0, min=1.0, max=100.0, unit="mm")],
+        interfaces=[cylinder_axis_mesh_interface("dia_mm", name="pitch")],
+    )
+    assert gear.interfaces[0].name == "pitch"
+
+
+def _mesh_gear_model():
+    from packages.subsystems.base import ParamSpec, Subsystem, cylinder_axis_mesh_interface
+    return Subsystem(
+        name="_synthetic_mesh_gear", description="", fragment="", disciplines=(),
+        params=[ParamSpec("dia_mm", value=1.0, min=0.1, max=1000.0, unit="mm")],
+        interfaces=[cylinder_axis_mesh_interface("dia_mm")],
+    )
+
+
+def _mount_kind_model():
+    # an ordinary kind="mount" interface (no radius) -- for the kind-mismatch refusal test.
+    from packages.subsystems.base import Frame, InterfaceSpec, Subsystem
+    return Subsystem(
+        name="_synthetic_mount_thing", description="", fragment="", disciplines=(), params=[],
+        interfaces=[InterfaceSpec(name="face", kind="mount", frame=lambda p: Frame(origin=(0.0, 0.0, 0.0)))],
+    )
+
+
+def _synthetic_mesh_registry(monkeypatch, subsystems):
+    def fake_get_subsystem_model(name):
+        if name not in subsystems:
+            raise KeyError(name)
+        return subsystems[name]
+    # placement.py imports get_subsystem_model at MODULE level (`from packages.subsystems import
+    # get_subsystem_model`), unlike fit.py's own lazy per-call import -- so the patch target is
+    # placement's own bound name, not packages.subsystems' original one.
+    monkeypatch.setattr("packages.subsystems.placement.get_subsystem_model", fake_get_subsystem_model)
+
+
+def _mesh_ledger(dia_a: float, dia_b: float, type_a="_synthetic_mesh_gear", type_b="_synthetic_mesh_gear"):
+    from packages.ledger.schema import Instance
+    led = make_demo_ledger()
+    return led.model_copy(update={"instances": {
+        "ga": Instance(id="ga", subsystem_type=type_a,
+                       params={"dia_mm": ParameterDef(value=dia_a, unit="mm", bounds=(0.1, 1000.0))}),
+        "gb": Instance(id="gb", subsystem_type=type_b,
+                       params={"dia_mm": ParameterDef(value=dia_b, unit="mm", bounds=(0.1, 1000.0))}),
+    }})
+
+
+def test_resolve_mesh_mate_places_the_second_gear_at_the_hand_computed_center_distance(monkeypatch):
+    # radius_a = 40/2 = 20mm, radius_b = 60/2 = 30mm -> center_distance = 20 + 30 = 50mm (hand-computed
+    # by hand from the cited formula, BEFORE running the code).
+    _synthetic_mesh_registry(monkeypatch, {"_synthetic_mesh_gear": _mesh_gear_model()})
+    led = _mesh_ledger(40.0, 60.0)
+    result = resolve_mesh_mate(led, InterfaceRef(instance_id="ga", interface="mesh"),
+                                InterfaceRef(instance_id="gb", interface="mesh"))
+    assert result.ok, result.reason
+    assert result.center_distance_mm == pytest.approx(50.0)
+    # v1: second gear placed along world +X, same Z as the first (in the plane perpendicular to Z)
+    assert result.transform.x_mm == pytest.approx(50.0)
+    assert result.transform.y_mm == pytest.approx(0.0)
+    assert result.transform.z_mm == pytest.approx(0.0)
+
+
+def test_resolve_mesh_mate_composes_with_the_first_gears_own_placement(monkeypatch):
+    # the first gear ("ga") carries its own explicit world transform -- the second gear's computed
+    # position must be relative to THAT placement, not the origin. radius_a = radius_b = 10mm ->
+    # center_distance = 20mm (hand-computed).
+    _synthetic_mesh_registry(monkeypatch, {"_synthetic_mesh_gear": _mesh_gear_model()})
+    led = _mesh_ledger(20.0, 20.0)
+    led.instances["ga"].transform = Transform(x_mm=5.0, y_mm=7.0, z_mm=3.0)
+    result = resolve_mesh_mate(led, InterfaceRef(instance_id="ga", interface="mesh"),
+                                InterfaceRef(instance_id="gb", interface="mesh"))
+    assert result.ok, result.reason
+    assert result.center_distance_mm == pytest.approx(20.0)
+    assert result.transform.x_mm == pytest.approx(25.0)  # 5 + 20
+    assert result.transform.y_mm == pytest.approx(7.0)
+    assert result.transform.z_mm == pytest.approx(3.0)
+
+
+def test_resolve_mesh_mate_refuses_a_mount_kind_vs_mesh_kind_connection(monkeypatch):
+    _synthetic_mesh_registry(monkeypatch, {
+        "_synthetic_mesh_gear": _mesh_gear_model(), "_synthetic_mount_thing": _mount_kind_model(),
+    })
+    led = _mesh_ledger(40.0, 40.0, type_b="_synthetic_mount_thing")
+    result = resolve_mesh_mate(led, InterfaceRef(instance_id="ga", interface="mesh"),
+                                InterfaceRef(instance_id="gb", interface="face"))
+    assert not result.ok
+    assert result.transform is None
+    assert "kind='mesh'" in result.reason
+    assert "mount" in result.reason
+
+
+def test_resolve_mesh_mate_refuses_a_missing_radius(monkeypatch):
+    # both sides ARE kind="mesh", but one never had a radius resolved (Frame.radius stayed None) --
+    # the same never-coerce discipline as the kind mismatch above, tested separately.
+    from packages.subsystems.base import Frame, InterfaceSpec, Subsystem
+    no_radius_gear = Subsystem(
+        name="_synthetic_mesh_no_radius", description="", fragment="", disciplines=(), params=[],
+        interfaces=[InterfaceSpec(name="mesh", kind="mesh",
+                                  frame=lambda p: Frame(origin=(0.0, 0.0, 0.0), normal=(0.0, 0.0, 1.0)))],
+    )
+    _synthetic_mesh_registry(monkeypatch, {
+        "_synthetic_mesh_gear": _mesh_gear_model(), "_synthetic_mesh_no_radius": no_radius_gear,
+    })
+    led = _mesh_ledger(40.0, 40.0, type_b="_synthetic_mesh_no_radius")
+    result = resolve_mesh_mate(led, InterfaceRef(instance_id="ga", interface="mesh"),
+                                InterfaceRef(instance_id="gb", interface="mesh"))
+    assert not result.ok
+    assert result.transform is None
+    assert "pitch radius" in result.reason
+
+
+def test_resolve_mesh_mate_reports_a_missing_instance_or_interface(monkeypatch):
+    _synthetic_mesh_registry(monkeypatch, {"_synthetic_mesh_gear": _mesh_gear_model()})
+    led = _mesh_ledger(40.0, 40.0)
+    missing_instance = resolve_mesh_mate(led, InterfaceRef(instance_id="ghost", interface="mesh"),
+                                          InterfaceRef(instance_id="gb", interface="mesh"))
+    assert not missing_instance.ok
+    assert "does not exist" in missing_instance.reason
+    missing_iface = resolve_mesh_mate(led, InterfaceRef(instance_id="ga", interface="nope"),
+                                       InterfaceRef(instance_id="gb", interface="mesh"))
+    assert not missing_iface.ok
+    assert "does not exist" in missing_iface.reason
+
+
+def test_resolve_placements_dispatches_a_mesh_connection_to_the_center_distance_math(monkeypatch):
+    # 2026-08-04 regression: `resolve_mesh_mate` was fully built and unit-tested (the tests directly
+    # above), but `resolve_placements` -- the ONLY function the real pipeline actually calls
+    # (packages/subsystems/assembly.py's auto-layout) -- never dispatched to it. A plain `Connection`
+    # between two kind="mesh" interfaces went through the ordinary coincidence-mate math instead,
+    # silently placing both gear centers on top of each other (center_distance=0) rather than
+    # radius_a+radius_b apart. This test goes through `resolve_placements` itself (not
+    # `resolve_mesh_mate` directly, like every test above it) so this exact gap can't reopen unnoticed.
+    _synthetic_mesh_registry(monkeypatch, {"_synthetic_mesh_gear": _mesh_gear_model()})
+    led = _mesh_ledger(40.0, 60.0)  # radius_a=20, radius_b=30 -> center_distance=50 (hand-computed)
+    led.instances["ga"].transform = Transform(x_mm=0.0, y_mm=0.0, z_mm=0.0)
+    led = led.model_copy(update={"connections": [
+        Connection(id="c1", a=InterfaceRef(instance_id="ga", interface="mesh"),
+                   b=InterfaceRef(instance_id="gb", interface="mesh")),
+    ]})
+    placements = resolve_placements(led)
+    assert placements["ga"].x_mm == pytest.approx(0.0)
+    assert placements["gb"].x_mm == pytest.approx(50.0)
+    assert placements["gb"].y_mm == pytest.approx(0.0)
+    assert placements["gb"].z_mm == pytest.approx(0.0)

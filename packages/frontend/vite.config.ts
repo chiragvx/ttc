@@ -21,7 +21,17 @@ export default defineConfig({
       // "coupling endpoint unavailable (HTTP 404)".
       "/connection_ops": "http://localhost:8001",
       "/coupling_ops": "http://localhost:8001",
+      // 2026-08-04 — same silent-404 gap as the connection_ops/coupling_ops incident above, found live
+      // while verifying the new region_ops feature: fit_ops and join_annotation_ops were already
+      // missing here too (pre-existing, not new), region_ops was missing because it's brand new.
+      "/fit_ops": "http://localhost:8001",
+      "/join_annotation_ops": "http://localhost:8001",
+      "/region_ops": "http://localhost:8001",
       "/manufacturing": "http://localhost:8001",
+      // 2026-08-05 — same silent-404 gap as the connection_ops/coupling_ops and fit_ops/
+      // join_annotation_ops/region_ops incidents above (this is the THIRD time): a new backend route
+      // (/model_capabilities, vision-in-the-loop) shipped without being added here.
+      "/model_capabilities": "http://localhost:8001",
       "/files": "http://localhost:8001",
       "/telemetry": "http://localhost:8001",
       "/requirements": "http://localhost:8001",
@@ -30,6 +40,7 @@ export default defineConfig({
       "/chat": "http://localhost:8001",
       "/mesh": "http://localhost:8001",
       "/blueprint": "http://localhost:8001",
+      "/report": "http://localhost:8001",
       "/validate": "http://localhost:8001",
       "/analyze": "http://localhost:8001",
       "/optimize": "http://localhost:8001",

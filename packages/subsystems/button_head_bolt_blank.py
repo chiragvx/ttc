@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 
 from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import FitProfile
 
 _MIN_WALL_MM = 0.8
 
@@ -84,6 +85,10 @@ BUTTON_HEAD_BOLT_BLANK = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    # 2026-08-05 -- fit_profile HOST (see socket_cap_bolt_blank.py's own comment for the full story:
+    # every bolt-blank subsystem was missing this, so a standoff/spacer could never actually derive
+    # its bore from a real screw). `dia2_mm` is the shank/thread diameter; `dia1_mm` is the head.
+    fit_profile=lambda p: FitProfile(kind="round", dims={"dia_mm": p.dia2_mm}),
     # 2026-07-28 (interface-coverage sweep, final wave): a stepped two-diameter shape -- section1 (the
     # head, z=0..len1_mm) with a narrower section2 (the shank) stacked on top (z=len1_mm..+len2_mm),
     # NOT centered at the origin, so `cylinder_end_interfaces` (assumes a single-diameter cylinder

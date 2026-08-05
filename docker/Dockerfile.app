@@ -11,8 +11,10 @@ RUN npm run build
 
 # --- backend runtime (mirrors docker/Dockerfile.dev kernel libs, + serve/worker + SPA) ---
 FROM python:3.12-slim-bookworm
+# git: py_gearworks (constraints/kernel-linux.txt, spur_gear subsystem) is NOT on PyPI -- installed via
+# a VCS pip ref, which shells out to the `git` binary; python:3.12-slim-bookworm doesn't ship it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        calculix-ccx ca-certificates libgomp1 \
+        calculix-ccx ca-certificates git libgomp1 \
         libgl1 libglu1-mesa libfontconfig1 \
         libx11-6 libxext6 libxrender1 libxfixes3 libxcursor1 libxinerama1 \
         libxft2 libxrandr2 libxi6 libxmu6 libsm6 libice6 \

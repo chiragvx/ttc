@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
-from packages.subsystems.base import cylinder_end_interfaces
+from packages.subsystems.base import FitSocketSpec, cylinder_end_interfaces
 
 _MIN_WALL_MM = 0.8
 
@@ -59,4 +59,10 @@ STANDOFF = register_subsystem(Subsystem(
     # local Z by default (same convention as round_post), so its two flat end faces are exactly what
     # cylinder_end_interfaces expects. The bore is concentric so it doesn't affect either end frame.
     interfaces=cylinder_end_interfaces("height_mm"),
+    # 2026-08-04 (DFM fit expansion) — CONNECTOR side: this is the SAME `render_standoff` shape family
+    # (outer_dia_mm/inner_dia_mm/height_mm) as `spar_joiner_sleeve`/`box_sleeve`, which already declare
+    # this exact fit_socket shape for their own `inner_dia_mm`/`bore_*_mm` — this is the archetype's own
+    # canonical fit_socket case: the through-bore that receives `host_dia_mm + clearance_mm` from
+    # whatever round shaft/post/bolt it's mounted over (e.g. this catalog's own `round_post`/`round_bar`).
+    fit_socket=FitSocketSpec(kind="round", dim_params={"dia_mm": "inner_dia_mm"}),
 ))

@@ -10,9 +10,13 @@
 FROM python:3.12-slim-bookworm
 
 # --- system libraries OCCT/Gmsh need even headless, plus the CalculiX FEA solver (binary: ccx) ---
+# git: py_gearworks (constraints/kernel-linux.txt, spur_gear subsystem) is NOT on PyPI -- its own
+# README's only documented install path is a VCS pip install (`pip install git+https://...`), which
+# pip does by shelling out to the `git` binary. python:3.12-slim-bookworm does not ship it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         calculix-ccx \
         ca-certificates \
+        git \
         libgomp1 \
         libgl1 libglu1-mesa libfontconfig1 \
         libx11-6 libxext6 libxrender1 libxfixes3 libxcursor1 libxinerama1 \

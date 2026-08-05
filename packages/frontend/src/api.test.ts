@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { analyze, analyzeStatus, optimize, runValidate, signoff } from "./api";
+import { analyze, analyzeStatus, fetchBlueprintDataUrl, fetchDesignReport, fetchModelVisionCapable, optimize, runValidate, signoff } from "./api";
 
 // Captures exactly what apiFetch handed to the real fetch() — this is what pins down the
 // 2026-07-15 load-threading fix: analyze()/analyzeStatus()/optimize() must OMIT load_n by default
@@ -49,6 +49,24 @@ describe("analyze/analyzeStatus/optimize load_n resolution", () => {
   });
 });
 
+// 2026-08-04 -- GET /report returns plain text/markdown (mirroring /blueprint's PNG), not JSON --
+// fetchDesignReport must call .text(), not .json(), and surface a non-ok response as a real error
+// instead of silently returning something empty/garbled.
+describe("fetchDesignReport", () => {
+  it("GETs /report and returns the raw markdown text", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response("# Design report\n\nNo parts in this file yet.\n", { status: 200 })));
+    const md = await fetchDesignReport();
+    expect(md).toContain("# Design report");
+    expect(md).toContain("No parts in this file yet.");
+  });
+
+  it("throws when the backend responds with a non-ok status", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
+    await expect(fetchDesignReport()).rejects.toThrow("report failed: 500");
+  });
+});
+
 describe("apiFetch auth header (settings.ts::loadSettings -> Authorization)", () => {
   it("sends no Authorization header when no auth token is configured", async () => {
     const calls = stubFetch();
@@ -82,6 +100,53 @@ describe("runValidate vision_model threading", () => {
     expect(JSON.parse(calls[0].init!.body as string)).toEqual({
       intent: "intent", api_key: "key123", vision_model: "a-vision-capable-model",
     });
+  });
+});
+
+// 2026-08-05 -- fetchModelVisionCapable/fetchBlueprintDataUrl back the vision-in-the-loop feature
+// (chat/buildChatContent.ts): whether the configured model can see, and the self-check's rendered
+// blueprint as a data: URL to hand it.
+describe("fetchModelVisionCapable", () => {
+  it("returns the real boolean from a successful response", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(JSON.stringify({ vision: true }), { status: 200 })));
+    await expect(fetchModelVisionCapable("openai/gpt-5.6-luna")).resolves.toBe(true);
+  });
+
+  it("returns false from a successful response reporting no vision support", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(JSON.stringify({ vision: false }), { status: 200 })));
+    await expect(fetchModelVisionCapable("deepseek/deepseek-v4-flash")).resolves.toBe(false);
+  });
+
+  it("hits /model_capabilities with the model name query-encoded", async () => {
+    const calls = stubFetch();
+    await fetchModelVisionCapable("openai/gpt-5.6-luna");
+    expect(calls[0].url).toBe("/model_capabilities?model=openai%2Fgpt-5.6-luna");
+  });
+
+  it("returns false (never throws) on a non-ok response", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
+    await expect(fetchModelVisionCapable("any-model")).resolves.toBe(false);
+  });
+
+  it("returns false (never throws) on a network error", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("network down"); }));
+    await expect(fetchModelVisionCapable("any-model")).resolves.toBe(false);
+  });
+});
+
+describe("fetchBlueprintDataUrl", () => {
+  it("converts a stubbed Blob response into a data: URL string", async () => {
+    const blob = new Blob(["fake-png-bytes"], { type: "image/png" });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(blob, { status: 200 })));
+    const dataUrl = await fetchBlueprintDataUrl();
+    expect(dataUrl).toMatch(/^data:/);
+  });
+
+  it("throws on a non-ok status", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
+    await expect(fetchBlueprintDataUrl()).rejects.toThrow("blueprint failed: 500");
   });
 });
 

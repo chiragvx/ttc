@@ -42,7 +42,10 @@ def _check(p) -> list[str]:
 
 SPROCKET_BLANK = register_subsystem(Subsystem(
     name="sprocket_blank",
-    description="Sprocket disc with hub, no teeth -- structural/mounting geometry (FDM/FFF or CNC)",
+    description="Sprocket disc with hub, NO TEETH -- structural/mounting geometry only, does NOT engage "
+                 "a chain (FDM/FFF or CNC). No toothed-sprocket subsystem exists in this catalog yet -- "
+                 "this is the only sprocket option; do not confuse it with `spur_gear` (real teeth, but "
+                 "for GEAR-to-gear meshing, not a chain).",
     fragment=_FRAGMENT,
     disciplines=("structures", "manufacturing", "thermal"),
     params=[

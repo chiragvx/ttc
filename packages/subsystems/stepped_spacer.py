@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 
 from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import FitSocketSpec
 
 _MIN_WALL_MM = 0.8
 
@@ -93,4 +94,10 @@ STEPPED_SPACER = register_subsystem(Subsystem(
         InterfaceSpec(name="bottom_face", kind="mount", frame=_bottom_face),
         InterfaceSpec(name="top_face", kind="mount", frame=_top_face),
     ],
+    # 2026-08-04 (DFM fit expansion) — CONNECTOR side: `bore_dia_mm` is this part's own concentric
+    # through-bore (fragment: "bore_dia_mm — concentric through-bore"), unaffected by which of the two
+    # stepped sections it runs through — same "bore receives host_dia_mm + clearance_mm" case
+    # `spar_joiner_sleeve`/`standoff` already establish. kind="round" describes the bore, independent
+    # of the two-diameter stepped OUTER profile (same reasoning as `hex_standoff`'s own bore socket).
+    fit_socket=FitSocketSpec(kind="round", dim_params={"dia_mm": "bore_dia_mm"}),
 ))

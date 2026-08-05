@@ -1,4 +1,4 @@
-import type { ChatEvent, ConnectionOp, CouplingOp, CutFeature, FeatureOp, FitOp, InstanceOp, InstanceSnapshot, LedgerGraphData, ManufacturingManifest, MeshData, PickableFeature, TelemetryDelta, ValidationResult } from "./types";
+import type { ChatContentPart, ChatEvent, ConnectionOp, CouplingOp, CutFeature, FeatureOp, FitOp, InstanceOp, InstanceSnapshot, LedgerGraphData, ManufacturingManifest, MeshData, PickableFeature, RegionOp, TelemetryDelta, ValidationResult } from "./types";
 import { loadSettings, type LlmSettings } from "./settings";
 
 // REST + SSE calls to the FastAPI backend (proxied by Vite in dev).
@@ -30,6 +30,14 @@ export async function fetchMeshFeatures(signal?: AbortSignal): Promise<PickableF
   const res = await apiFetch(`/mesh/features`, { signal });
   if (!res.ok) throw new Error(`mesh features failed: ${res.status}`);
   return (await res.json()).features;
+}
+
+// Topic-organized design report (Transmission/Fasteners/Regions/coarse self-check), 2026-08-04 —
+// plain text, not JSON (the backend returns text/markdown directly, mirroring /blueprint's PNG).
+export async function fetchDesignReport(): Promise<string> {
+  const res = await apiFetch(`/report`);
+  if (!res.ok) throw new Error(`report failed: ${res.status}`);
+  return res.text();
 }
 
 // --- subsystem (part type) selection + its tunable params ---
@@ -219,6 +227,25 @@ export async function applyJoinAnnotationOp(op: JoinAnnotationOp): Promise<JoinA
   return res.json();
 }
 
+// --- RegionOp (2026-08-04): add/remove a named keep-out/keep-in box on a HOST instance's own local
+// frame. Posted VERBATIM as received in a "proposal" SSE event; mirrors applyConnectionOp above.
+export interface RegionOpApplyResponse {
+  ok: boolean;
+  status: "APPLIED" | "REJECTED" | "CONFLICT";
+  region_id: string | null;
+  region: unknown | null;
+  message: string;
+}
+export async function applyRegionOp(op: RegionOp): Promise<RegionOpApplyResponse> {
+  const res = await apiFetch("/region_ops", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(op),
+  });
+  // a backend without this route (older build) returns 404/HTML — surface a clear message instead of
+  // a cryptic JSON-parse error (mirrors applyConnectionOp/applyCouplingOp/applyFitOp's same-day fix)
+  if (!res.ok) throw new Error(`region endpoint unavailable (HTTP ${res.status})`);
+  return res.json();
+}
+
 // --- truth-plane analysis loop ---
 // loadN is left OMITTED by default (not a hardcoded 40/25) so the backend resolves it itself —
 // FileState.effective_load_n(): whatever the stated goal demands (e.g. "holds 200 N"), else its own
@@ -332,9 +359,42 @@ export async function runValidate(
   return res.json();
 }
 
+// Whether `model` can see images, per OpenRouter's live model registry (2026-08-05) — used to decide
+// whether an auto-correction turn should attach the self-check's rendered blueprint (see
+// chat/buildChatContent.ts). Never throws: a caller that can't determine vision capability should
+// default to NOT attaching an image, not crash the turn — so any fetch failure or non-ok response
+// just resolves false, same defensive posture as this file's other "unavailable backend route"
+// guards, but returning a safe default instead of throwing since this sits on the hot chat path.
+export async function fetchModelVisionCapable(model: string): Promise<boolean> {
+  try {
+    const res = await apiFetch(`/model_capabilities?model=${encodeURIComponent(model)}`);
+    if (!res.ok) return false;
+    const body = await res.json();
+    return Boolean(body.vision);
+  } catch {
+    return false;
+  }
+}
+
+// Fetches the current-ledger-state blueprint (GET /blueprint, real PNG bytes) and converts it to a
+// data: URL client-side — reused as-is for both "show it in the chat UI" and "attach it to the next
+// auto-correction turn" (2026-08-05). Throws on a non-ok response (mirrors fetchDesignReport's own
+// error-throwing convention above); jsdom supports FileReader so this is testable without a browser.
+export async function fetchBlueprintDataUrl(): Promise<string> {
+  const res = await apiFetch(`/blueprint`);
+  if (!res.ok) throw new Error(`blueprint failed: ${res.status}`);
+  const blob = await res.blob();
+  return new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result as string);
+    r.onerror = reject;
+    r.readAsDataURL(blob);
+  });
+}
+
 // Stream a conversational reply. Calls onEvent for each SSE event; abortable via signal.
 export async function streamChat(
-  messages: Array<{ role: string; content: string }>,
+  messages: Array<{ role: string; content: string | ChatContentPart[] }>,
   settings: LlmSettings,
   onEvent: (e: ChatEvent) => void | Promise<void>,
   signal: AbortSignal,

@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 
 from packages.subsystems import InterfaceSpec, ParamSpec, Subsystem, register_subsystem
+from packages.subsystems.base import FitProfile
 
 _MIN_WALL_MM = 0.8
 
@@ -84,6 +85,14 @@ SOCKET_CAP_BOLT_BLANK = register_subsystem(Subsystem(
     build=_build,
     volume=_volume,
     invariants=_check,
+    # 2026-08-05 -- this and the other 4 bolt-blank subsystems (hex/button_head/flat_head/thumb_screw)
+    # were never registered as fit_profile HOSTS, discovered live: a standoff/spacer CONNECTOR
+    # (declares fit_socket) trying to fit around one of these got REJECTED with "declares no
+    # fit_profile", even though "derive the standoff bore from the actual screw" is exactly the
+    # DFM-cited use case fit_socket was built for (see standoff.py's own fit_socket comment). `dia2_mm`
+    # is this part's shank/thread diameter (the M3/M4/etc major diameter a nut or clearance hole is
+    # sized against -- dia1_mm is the HEAD, a different, unrelated diameter never used for this).
+    fit_profile=lambda p: FitProfile(kind="round", dims={"dia_mm": p.dia2_mm}),
     # 2026-07-28 (interface-coverage sweep, final wave): a stepped two-diameter shape -- section1 (the
     # head, z=0..len1_mm) with a narrower section2 (the shank) stacked on top (z=len1_mm..+len2_mm),
     # NOT centered at the origin, so `cylinder_end_interfaces` (assumes a single-diameter cylinder

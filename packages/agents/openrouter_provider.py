@@ -11,6 +11,7 @@ callable can be injected for tests so this is exercised with no key / no network
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -118,6 +119,47 @@ def _extract_json_values(s: str) -> list[tuple[dict, str]]:
     return out
 
 
+def _strict_schema(schema: dict) -> dict:
+    """Deep-copy `schema` (a pydantic v2 `model_json_schema()` output, e.g.
+    `parameter_delta_tool_schema()`) into an OpenAI `"strict": true`-compatible shape: every
+    object-shaped node (any dict with a "properties" key) gets `"required"` set to the FULL, sorted
+    list of its own property names, and `"additionalProperties"` set to `False`. Never mutates the
+    caller's dict.
+
+    This is a mechanical transform, not a schema rewrite: pydantic v2 already emits the exact shape
+    strict mode wants for an `Optional[X] = None` field (`"anyOf": [{"type": "X"}, {"type":
+    "null"}], "default": null`) — the ONLY gap is that OpenAI strict mode additionally requires
+    every property to be listed in "required" (nullable or not), which pydantic does not do for
+    optional fields. "default"/enum lists/"title"/"description"/"type" are left exactly as-is.
+
+    Recurses through every place `model_json_schema()` actually nests another schema: "$defs" (one
+    entry per referenced model), "properties" (each field's own schema), "items" (array element
+    schema), and "anyOf"/"oneOf"/"allOf" (union branches, e.g. an Optional[SomeModel] field or an
+    enum-typed field). A `$defs` entry with no "properties" (e.g. a bare enum like `LockState`) is
+    left untouched, as intended — only object nodes get "required"/"additionalProperties"."""
+    schema = copy.deepcopy(schema)
+
+    def walk(node) -> None:
+        if not isinstance(node, dict):
+            return
+        if isinstance(node.get("properties"), dict):
+            node["required"] = sorted(node["properties"].keys())
+            node["additionalProperties"] = False
+            for prop_schema in node["properties"].values():
+                walk(prop_schema)
+        if isinstance(node.get("$defs"), dict):
+            for def_schema in node["$defs"].values():
+                walk(def_schema)
+        if "items" in node:
+            walk(node["items"])
+        for key in ("anyOf", "oneOf", "allOf"):
+            for branch in node.get(key) or []:
+                walk(branch)
+
+    walk(schema)
+    return schema
+
+
 def _is_retryable_transport_error(e: Exception) -> bool:
     """True for a 429, a 5xx, or a request timeout — the transient transport failures worth a bounded
     retry in propose_delta. Duck-typed rather than an `isinstance` check against `httpx`'s exception
@@ -131,6 +173,23 @@ def _is_retryable_transport_error(e: Exception) -> bool:
     if isinstance(status, int) and (status == 429 or status >= 500):
         return True
     return "timeout" in type(e).__name__.lower()
+
+
+def _is_strict_schema_rejection(e: Exception) -> bool:
+    """True for a 4xx OTHER than 429 — the shape a provider/model uses to reject a request it didn't
+    like the STRUCTURE of (e.g. an unsupported `"strict": true` tool schema), as distinct from a
+    transient transport failure. Used to decide whether falling back to a DIFFERENT, known-plain
+    tool schema is worth a retry — narrowly, NOT a general "retry on 4xx" policy (a genuinely bad
+    request — bad model name, malformed conversation — is still propagated immediately, unchanged
+    from the long-standing non-retryable-4xx contract this file already has).
+
+    429 is excluded even though it is itself a 4xx: it's a rate limit, not a schema complaint, and a
+    different schema shape cannot fix "too many requests" — falling back here would just be a wasted
+    extra attempt on top of `_do_post_with_retry`'s own already-exhausted retry budget for it. Every
+    5xx/timeout is excluded for the same reason: those failure classes have nothing to do with
+    strict-schema support either."""
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    return isinstance(status, int) and 400 <= status < 500 and status != 429
 
 
 def _recover_tool_call_proposal(args) -> "DeltaProposal | None":
@@ -166,6 +225,70 @@ def _recover_tool_call_proposal(args) -> "DeltaProposal | None":
         return DeltaProposal.model_validate(parsed)
     except Exception:
         return None
+
+
+# -- model capability lookup (vision-in-the-loop, 2026-08-05) ---------------------------------------
+# OpenRouter's PUBLIC model registry (no auth needed) is the only ground truth for "can THIS model id
+# see an image" -- a hard-coded allowlist of vision-capable model ids would silently go stale the
+# moment a new model ships or an existing one's modalities change. Cached at module level (a plain
+# (models, fetched_at) tuple -- no lock, no distributed cache: this project's established "wedge
+# simplicity" bar) so a capability check isn't a network round-trip on every call.
+_MODEL_REGISTRY_URL = f"{_DEFAULT_BASE}/models"
+_MODEL_REGISTRY_CACHE_TTL_S = 3600.0  # 1 hour
+_model_registry_cache: "tuple[list, float] | None" = None  # (models, fetched_at) -- see _fetch_model_registry
+
+
+def _fetch_model_registry(get) -> list:
+    """Return OpenRouter's `GET /models` response's `"data"` array -- from the module-level cache if
+    a fetch within `_MODEL_REGISTRY_CACHE_TTL_S` already succeeded, else a fresh fetch. The cache is
+    updated ONLY on a successful fetch -- a transient failure must never poison it for the rest of the
+    TTL window (the next call should get a fresh chance, not a cached failure). Raises on any failure
+    (network error, non-dict response, missing/non-list "data"); `model_supports_vision` (the one
+    caller) is what turns that into a safe False.
+
+    `get` mirrors `OpenRouterDeltaProvider._post`'s own constructor-injection pattern: an injectable
+    `(url=...) -> dict` callable for tests, defaulting to a real (unauthenticated -- this endpoint
+    needs no API key) `httpx.get` when not injected."""
+    global _model_registry_cache
+    now = time.time()
+    if _model_registry_cache is not None and now - _model_registry_cache[1] < _MODEL_REGISTRY_CACHE_TTL_S:
+        return _model_registry_cache[0]
+    if get is not None:
+        data = get(url=_MODEL_REGISTRY_URL)
+    else:
+        import httpx
+        resp = httpx.get(_MODEL_REGISTRY_URL, timeout=10.0)
+        resp.raise_for_status()
+        data = resp.json()
+    models = data["data"]
+    if not isinstance(models, list):
+        raise ValueError("malformed OpenRouter /models response: 'data' is not a list")
+    _model_registry_cache = (models, now)
+    return models
+
+
+def model_supports_vision(model: str, *, get=None) -> bool:
+    """True iff OpenRouter's public model registry lists `model`'s own entry with "image" in its
+    `architecture.input_modalities`. Returns False -- NEVER raises -- for an unknown/absent model id,
+    a network failure, or a malformed response: a missing/uncertain capability must never be treated
+    as "yes" (same defensive posture as `vision_model_configured()`/`validate_visual()` in
+    `vision_validator.py` -- a fabricated "this model can see" is exactly the kind of confident-wrong
+    green light this codebase's whole safety posture exists to prevent).
+
+    See `_fetch_model_registry` for the injectable `get` / caching contract."""
+    if not model:
+        return False
+    try:
+        models = _fetch_model_registry(get)
+        for m in models:
+            if isinstance(m, dict) and m.get("id") == model:
+                arch = m.get("architecture")
+                modalities = arch.get("input_modalities") if isinstance(arch, dict) else None
+                return isinstance(modalities, list) and "image" in modalities
+        return False
+    except Exception as e:
+        logger.warning("model_supports_vision: could not resolve vision capability for %r (%s)", model, e)
+        return False
 
 
 class OpenRouterDeltaProvider(LLMProvider):
@@ -214,19 +337,43 @@ class OpenRouterDeltaProvider(LLMProvider):
         if not self.api_key and self._post is None:
             return DeltaProposal(request_clarification="OPENROUTER_API_KEY is not set (see .env.example).")
 
-        tool = {"type": "function", "function": {
-            "name": _FN_NAME, "description": "Emit parameter deltas or request clarification.",
-            "parameters": parameter_delta_tool_schema()}}
-        payload = {
-            "model": self.model,
-            "max_tokens": self.max_tokens,
-            "messages": [{"role": "system", "content": system or _SYSTEM}] + conversation
-                        + [{"role": "user", "content": f"Current ledger: {ledger_json}"}],
-            "tools": [tool],
-            "tool_choice": {"type": "function", "function": {"name": _FN_NAME}},
+        description = "Emit parameter deltas or request clarification."
+        plain_schema = parameter_delta_tool_schema()
+        plain_tool = {"type": "function", "function": {
+            "name": _FN_NAME, "description": description, "parameters": plain_schema}}
+        strict_tool = {"type": "function", "function": {
+            "name": _FN_NAME, "description": description,
+            "parameters": _strict_schema(plain_schema), "strict": True}}
+        messages = ([{"role": "system", "content": system or _SYSTEM}] + conversation
+                    + [{"role": "user", "content": f"Current ledger: {ledger_json}"}])
+        tool_choice = {"type": "function", "function": {"name": _FN_NAME}}
+        strict_payload = {
+            "model": self.model, "max_tokens": self.max_tokens, "messages": messages,
+            "tools": [strict_tool], "tool_choice": tool_choice,
+        }
+        plain_payload = {
+            "model": self.model, "max_tokens": self.max_tokens, "messages": messages,
+            "tools": [plain_tool], "tool_choice": tool_choice,
         }
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-        data = self._do_post_with_retry(f"{self.base_url}/chat/completions", headers, payload)
+        url = f"{self.base_url}/chat/completions"
+        # Bind to `parameter_delta_tool_schema()` under a strict, grammar-constrained tool schema
+        # first (2026-08-04 — eliminates the "dropped comma in a large free-generated JSON blob"
+        # failure class BY CONSTRUCTION, live-reproduced: `stream_chat: failed to parse tool-call
+        # arguments (Expecting ',' delimiter...)` on a syntactically-complete, non-truncated
+        # completion). Not every OpenRouter model/provider supports `"strict": true` though — the
+        # Settings modal lets a user type ANY model string — so a schema-shaped 400 gets exactly ONE
+        # retry against a known-plain (today's original, unconstrained) schema; any other failure
+        # (429, 5xx, timeout, or a genuinely bad 400 unrelated to schema support) propagates exactly
+        # as it always has, with no fallback.
+        try:
+            data = self._do_post_with_retry(url, headers, strict_payload)
+        except Exception as e:
+            if not _is_strict_schema_rejection(e):
+                raise
+            logger.warning("propose_delta: strict-schema tool call rejected (%s) — retrying once "
+                            "with a plain (non-strict) tool schema", e)
+            data = self._do_post_with_retry(url, headers, plain_payload)
 
         message = (data.get("choices") or [{}])[0].get("message", {}) or {}
         # A forced tool_choice should mean exactly one matching tool_calls entry, but a model can
@@ -306,7 +453,18 @@ class OpenRouterDeltaProvider(LLMProvider):
                     return
                 try:
                     yield json.loads(data)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
+                    # 2026-08-04 — this used to swallow a malformed SSE event with zero trace. If this
+                    # ever fires mid-tool-call, whatever `arguments` FRAGMENT lived in this event is
+                    # gone for good — the two surviving fragments on either side of it get concatenated
+                    # in _stream_round with nothing between them, which is EXACTLY the "Expecting ','
+                    # delimiter" shape a downstream json.loads(full_args) failure has (live-reproduced:
+                    # finish_reason='tool_calls', len(args) in the 11-16KB range). Logging the raw event
+                    # here is what turns "the model probably generated bad JSON" from a guess into a
+                    # provable answer next time this happens — if this line NEVER fires across a repro
+                    # of the failure, that rules out a dropped-chunk explanation entirely.
+                    logger.warning("stream_chat: dropped an unparseable SSE event (%s), %d bytes: %r",
+                                   e, len(data), data[:500])
                     continue
 
     def _stream_round(self, headers: dict, payload: dict, out: dict):
@@ -343,6 +501,39 @@ class OpenRouterDeltaProvider(LLMProvider):
                 finish_reason = fr
         out["tool_calls"] = tool_calls
         out["finish_reason"] = finish_reason
+
+    def _stream_round_with_strict_fallback(self, headers: dict, strict_payload: dict, plain_payload: dict,
+                                            out: dict):
+        """`_stream_round`, with the SAME strict-schema-rejection fallback `propose_delta` gets (see
+        `_is_strict_schema_rejection`) — applied to ONE streaming round instead of a single POST.
+        Yields every ('token', text) item from the strict attempt AS IT ARRIVES (live, not
+        buffered), tracking whether anything was yielded yet this round.
+
+        Falls back to a FRESH `_stream_round(headers, plain_payload, out)` ONLY when the strict
+        attempt raises BEFORE yielding anything this round, AND the exception is a genuine
+        strict-schema rejection (not a transport failure, not 429 — see `_is_strict_schema_rejection`
+        for why those are excluded). Once even one token has streamed, the provider already accepted
+        the strict request and started generating — switching schemas mid-stream would be incoherent,
+        and there is no way to un-yield tokens already handed to the caller — so anything yielded, or
+        any non-matching exception, re-raises immediately instead.
+
+        The plain retry is deliberately NOT wrapped in another fallback layer of its own: if it also
+        fails, that exception propagates unchanged, exactly like `propose_delta`'s single fallback
+        attempt — `stream_chat`'s own `except Exception as e: yield ("error", str(e)); yield
+        ("done", None); return` around this call is what turns it into the normal error contract,
+        untouched by this method."""
+        yielded_anything = False
+        try:
+            for item in self._stream_round(headers, strict_payload, out):
+                yielded_anything = True
+                yield item
+        except Exception as e:
+            if yielded_anything or not _is_strict_schema_rejection(e):
+                raise
+            logger.warning("stream_chat: strict-schema tool call rejected before this round produced "
+                            "anything (%s) — retrying this round once with a plain (non-strict) tool "
+                            "schema", e)
+            yield from self._stream_round(headers, plain_payload, out)
 
     def _execute_research(self, arguments: str) -> "ResearchFinding | None":
         """Parse one `research_reference` tool call's arguments and run it through the configured
@@ -385,11 +576,19 @@ class OpenRouterDeltaProvider(LLMProvider):
         if not self.api_key and self._stream_post is None:
             yield ("error", "OPENROUTER_API_KEY is not set")
             return
-        tools = [{"type": "function", "function": {
-            "name": _FN_NAME, "description": "Emit parameter deltas or request clarification.",
-            "parameters": parameter_delta_tool_schema()}}]
+        # Strict/plain variants of the propose_parameter_delta tool ONLY (same fallback rationale as
+        # propose_delta — see its own comment) — the research_reference tool, when offered, is added
+        # UNCHANGED and identical to both lists, out of scope for this fix (a much smaller schema,
+        # not implicated in the reported failure).
+        description = "Emit parameter deltas or request clarification."
+        plain_delta_schema = parameter_delta_tool_schema()
+        plain_tools = [{"type": "function", "function": {
+            "name": _FN_NAME, "description": description, "parameters": plain_delta_schema}}]
+        strict_tools = [{"type": "function", "function": {
+            "name": _FN_NAME, "description": description,
+            "parameters": _strict_schema(plain_delta_schema), "strict": True}}]
         if research_provider_configured():
-            tools.append({"type": "function", "function": {
+            research_tool = {"type": "function", "function": {
                 "name": _RESEARCH_FN_NAME,
                 "description": (
                     "Look up brief reference material (a description + possibly images) for a "
@@ -398,7 +597,9 @@ class OpenRouterDeltaProvider(LLMProvider):
                     "propose_parameter_delta in the same turn) when you want to see the result "
                     "before deciding what to build — it comes back as a tool result and you get "
                     "one more turn to use it."),
-                "parameters": research_tool_schema()}})
+                "parameters": research_tool_schema()}}
+            plain_tools.append(research_tool)
+            strict_tools.append(research_tool)
         stable_prompt = build_system_prompt_from_json(ledger_json)
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         conversation = list(messages)
@@ -406,16 +607,21 @@ class OpenRouterDeltaProvider(LLMProvider):
         saw_token = False
         finish_reason: str | None = None
         for round_num in range(_MAX_RESEARCH_ROUNDS):
-            payload = {
+            round_messages = [{"role": "system",
+                                "content": f"{stable_prompt}\n\n## Current ledger\n{ledger_json}"}] \
+                              + conversation
+            strict_payload = {
                 "model": self.model, "max_tokens": self.chat_max_tokens, "stream": True,
-                "messages": [{"role": "system",
-                               "content": f"{stable_prompt}\n\n## Current ledger\n{ledger_json}"}]
-                            + conversation,
-                "tools": tools, "tool_choice": "auto",
+                "messages": round_messages, "tools": strict_tools, "tool_choice": "auto",
+            }
+            plain_payload = {
+                "model": self.model, "max_tokens": self.chat_max_tokens, "stream": True,
+                "messages": round_messages, "tools": plain_tools, "tool_choice": "auto",
             }
             out: dict = {}
             try:
-                for kind, text in self._stream_round(headers, payload, out):
+                for kind, text in self._stream_round_with_strict_fallback(
+                        headers, strict_payload, plain_payload, out):
                     saw_token = True
                     yield ("token", text)
             except Exception as e:  # network / bad key / stream error
@@ -583,5 +789,15 @@ class OpenRouterDeltaProvider(LLMProvider):
             # was generated" underneath it is pure redundant noise, not new information, in the SAME
             # contradictory-pair-of-messages shape every other fix in this function already guards
             # against. Only fire this generic backstop when NOTHING at all was communicated yet.
+            #
+            # 2026-08-04 — this branch used to fire with ZERO diagnostic trace: live-reproduced (a
+            # user's answer to the copilot's own clarification question — a short, unambiguous reply
+            # with no new build info needed — got this exact message), and there was no way to tell
+            # afterward whether the completion was genuinely empty, a transport hiccup swallowed
+            # somewhere upstream, or something else entirely. Log what's actually known at this point
+            # so the NEXT occurrence is diagnosable instead of another guess.
+            logger.warning("stream_chat: no response was generated (finish_reason=%r, round_tool_calls=%d, "
+                           "saw_token=%r, saw_proposal=%r)", finish_reason, len(round_tool_calls),
+                           saw_token, saw_proposal)
             yield ("error", "no response was generated for that message — try rephrasing or asking again")
         yield ("done", None)

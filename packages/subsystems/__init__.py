@@ -523,3 +523,8 @@ from packages.subsystems import rail_mount_assembly as _rail_mount_assembly  # n
 # Fitted-joint mechanism, Stage 1 rect-family proof (2026-07-27) -- box_sleeve, the rect analog of
 # spar_joiner_sleeve's round-family Stage 0 proof (packages/subsystems/fit.py / base.py::FitSocketSpec).
 from packages.subsystems import box_sleeve as _box_sleeve  # noqa: E402, F401
+
+# Real involute spur gear (2026-08-01) -- actual meshing teeth via py_gearworks, exercises the
+# cylinder_axis_mesh_interface / resolve_mesh_mate center-distance math. See spur_gear.py's module
+# docstring for cited formulas and the fea_eligible=False rationale.
+from packages.subsystems import spur_gear as _spur_gear  # noqa: E402, F401

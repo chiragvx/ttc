@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
-from packages.subsystems.base import cylinder_end_interfaces
+from packages.subsystems.base import FitSocketSpec, cylinder_end_interfaces
 
 _FRAGMENT = """\
 ## Subsystem: Threaded boss
@@ -76,4 +76,22 @@ THREADED_BOSS = register_subsystem(Subsystem(
     # are genuine, useful mount points, so this matches `cylinder_end_interfaces`'s exact convention
     # (see `round_post`/`standoff` for the same reasoning applied to the cylinder-family shape).
     interfaces=cylinder_end_interfaces("height_mm"),
+    # 2026-08-04 (DFM fit expansion) — CONNECTOR side: `pilot_dia_mm` is this boss's own fragment-
+    # documented "smaller pilot for the fastener body" (see `_FRAGMENT` above) — the through-clearance
+    # bore a screw's SHANK passes through below the insert, exactly the same "bore receives host_dia +
+    # clearance_mm" shape `box_sleeve`/`spar_joiner_sleeve` already established (their own `inner_dia_mm`/
+    # `bore_*_mm`), not a new mechanism. kind="round" because the pilot bore is round regardless of the
+    # boss's own (also round) outer profile.
+    #
+    # NOT wired into fit_socket: `outer_dia_mm` (the boss OD). The cited DFM ratios — boss OD = 2x screw
+    # diameter for unfilled thermoplastic, 2.5x for glass-filled (plasticmoulds.net, cross-confirmed by
+    # Protolabs' independent 40-60% boss-wall-thickness figure); boss wall = 0.5-0.6x nominal wall
+    # thickness (Protolabs) — see build-plan/research03aug/parametric/final_packaging_structural_design_
+    # research.md section 1 — are MULTIPLICATIVE scalings of a host dimension, while `compute_fit()`'s
+    # `dim_params` contract (packages/subsystems/fit.py:107) is strictly ADDITIVE
+    # (`host_value + clearance_mm`). There is no `clearance_mm` that makes `host_dia + clearance_mm`
+    # equal `2 * host_dia` for every host diameter, so forcing `outer_dia_mm` into `dim_params` would
+    # either be wrong in general or require the caller to smuggle a ratio through a field named
+    # "clearance" — flagged here per this session's own guidance rather than forced into the mechanism.
+    fit_socket=FitSocketSpec(kind="round", dim_params={"dia_mm": "pilot_dia_mm"}),
 ))

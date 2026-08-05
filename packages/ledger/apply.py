@@ -26,7 +26,7 @@ from typing import Callable, Optional
 
 from pydantic import ValidationError
 
-from packages.ledger.deltas import ConnectionOp, CouplingOp, FeatureOp, FitOp, InstanceOp, JoinAnnotationOp, ParameterDelta, is_forbidden_target
+from packages.ledger.deltas import ConnectionOp, CouplingOp, FeatureOp, FitOp, InstanceOp, JoinAnnotationOp, ParameterDelta, RegionOp, is_forbidden_target
 from packages.ledger.parameter import LockState, ParameterDef, ParamSource
 from packages.ledger.schema import (
     Connection,
@@ -39,6 +39,7 @@ from packages.ledger.schema import (
     InterfaceRef,
     JoinAnnotation,
     MasterParametricLedger,
+    Region,
     Transform,
 )
 
@@ -1268,3 +1269,87 @@ def apply_join_annotation_op(
     new_ledger = ledger.model_copy(update={"join_annotations": [*ledger.join_annotations, annotation]})
     return new_ledger, JoinAnnotationOpOutcome(ApplyStatus.APPLIED, join_id, annotation=annotation,
                                                message=f"annotated connection {op.connection_id} as {op.method}")
+
+
+@dataclass
+class RegionOpOutcome:
+    """RegionOp's analog of ConnectionOpOutcome. Carries the resolved Region (added or removed)."""
+
+    status: ApplyStatus
+    region_id: Optional[str]
+    region: Optional[Region] = None
+    message: str = ""
+
+    @property
+    def changed(self) -> bool:
+        return self.status is ApplyStatus.APPLIED
+
+
+def _next_region_id(ledger: MasterParametricLedger) -> str:
+    existing = {r.id for r in ledger.regions}
+    n = 1
+    while f"region_{n}" in existing:
+        n += 1
+    return f"region_{n}"
+
+
+def apply_region_op(
+    ledger: MasterParametricLedger,
+    op: RegionOp,
+) -> tuple[MasterParametricLedger, RegionOpOutcome]:
+    """Apply one RegionOp (add/remove a typed keep-out/keep-in box on a HOST instance). Returns a NEW
+    ledger + outcome; original never mutated (same event-sourcing convention as apply_connection_op).
+
+    No injected callables needed — unlike ConnectionOp (interfaces_of) / CouplingOp (known_relations,
+    inputs_of) / FitOp (compute_fit, is_managed_child, check_invariants), a Region is a pure geometric
+    ANNOTATION: it never touches the subsystem registry or a part's own params. `host_instance` is
+    checked against `ledger.instances` directly, already in scope in this registry-free package."""
+    if op.op == "remove_region":
+        if not op.id:
+            return ledger, RegionOpOutcome(ApplyStatus.REJECTED, None, message="remove_region requires id")
+        match = next((r for r in ledger.regions if r.id == op.id), None)
+        if match is None:
+            return ledger, RegionOpOutcome(ApplyStatus.REJECTED, op.id, message=f"unknown region id {op.id!r}")
+        new = ledger.model_copy(update={"regions": [r for r in ledger.regions if r.id != op.id]})
+        return new, RegionOpOutcome(ApplyStatus.APPLIED, op.id, region=match, message=f"removed region {op.id}")
+
+    if op.op != "add_region":
+        return ledger, RegionOpOutcome(ApplyStatus.REJECTED, op.id, message=f"unknown op {op.op!r}")
+
+    # add_region: all nine fields required
+    missing = [f for f in ("host_instance", "kind", "label", "x_mm", "y_mm", "z_mm", "dx_mm", "dy_mm", "dz_mm")
+               if getattr(op, f) is None]
+    if missing:
+        return ledger, RegionOpOutcome(ApplyStatus.REJECTED, op.id,
+                                       message=f"add_region requires {', '.join(missing)}")
+    if op.id is not None and any(r.id == op.id for r in ledger.regions):
+        return ledger, RegionOpOutcome(ApplyStatus.REJECTED, op.id, message=f"region id {op.id!r} already exists")
+    if op.host_instance not in ledger.instances:
+        return ledger, RegionOpOutcome(ApplyStatus.REJECTED, op.id,
+                                       message=f"unknown instance {op.host_instance!r}")
+    # box extents must be strictly positive -- REJECT, never silently clamp (same physical-sanity floor
+    # as CutFeature's dia_mm/length_mm/width_mm > 0 check, schema.py::CutFeature._check_shape_fields).
+    # Checked explicitly here (rather than only relying on Region's own Field(gt=0.0)) for a clean
+    # REJECTED message that names every offending field, mirroring ConnectionOp/CouplingOp's own
+    # explicit-field-check style rather than surfacing a raw ValidationError string.
+    bad_dims = [(name, v) for name, v in (("dx_mm", op.dx_mm), ("dy_mm", op.dy_mm), ("dz_mm", op.dz_mm))
+                if v <= 0.0]
+    if bad_dims:
+        clauses = ", ".join(f"{name}={v}" for name, v in bad_dims)
+        return ledger, RegionOpOutcome(ApplyStatus.REJECTED, op.id,
+                                       message=f"region extents must be > 0 (got {clauses})")
+
+    region_id = op.id if op.id is not None else _next_region_id(ledger)
+    try:
+        region = Region(id=region_id, host_instance=op.host_instance, kind=op.kind, label=op.label,
+                        x_mm=op.x_mm, y_mm=op.y_mm, z_mm=op.z_mm,
+                        dx_mm=op.dx_mm, dy_mm=op.dy_mm, dz_mm=op.dz_mm)
+    except Exception as exc:  # belt-and-suspenders — the explicit checks above should already catch
+                               # every REJECT-worthy case, but a schema-level validator must never crash
+                               # this function if it ever disagrees (mirrors apply_feature_op's own
+                               # try/except around CutFeature construction).
+        return ledger, RegionOpOutcome(ApplyStatus.REJECTED, op.id, message=str(exc))
+
+    new_ledger = ledger.model_copy(update={"regions": [*ledger.regions, region]})
+    return new_ledger, RegionOpOutcome(ApplyStatus.APPLIED, region_id, region=region,
+                                       message=f"added region {region_id} ({op.kind}) on {op.host_instance}")

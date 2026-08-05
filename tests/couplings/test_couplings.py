@@ -433,6 +433,88 @@ def test_deflection_only_coupling_is_not_a_load_bearing_claim_and_does_not_block
     assert unknowns == [] and reasons == []
 
 
+# --- 2026-08-04 additions: gear-ratio kinematics (speed + torque out of a simple gear/belt/chain mesh)
+# Every expected value below was HAND-COMPUTED from the closed-form formula (calculator arithmetic,
+# shown inline) BEFORE writing any code — never back-filled from this implementation's own output.
+
+def test_gear_ratio_speed_out():
+    # rpm_out = rpm_in * teeth_in / teeth_out = 3000 rpm * 20 / 60 = 3000 * (1/3) = 1000.0 rpm
+    assert get_relation("gear_ratio_speed_out").evaluate(
+        {"rpm_in": 3000.0, "teeth_in": 20.0, "teeth_out": 60.0}
+    ) == pytest.approx(1000.0)
+
+
+def test_gear_ratio_speed_out_non_round_ratio():
+    # rpm_out = rpm_in * teeth_in / teeth_out = 1750 rpm * 18 / 54
+    # 1750 * 18 = 31500; 31500 / 54 = 583.333... (54*583 = 31482, remainder 18, 18/54 = 1/3) -> 583.3333 rpm
+    assert get_relation("gear_ratio_speed_out").evaluate(
+        {"rpm_in": 1750.0, "teeth_in": 18.0, "teeth_out": 54.0}
+    ) == pytest.approx(583.3333, abs=1e-3)
+
+
+def test_gear_ratio_torque_out():
+    # torque_out_nmm = torque_in_nmm * teeth_out / teeth_in = 500 N*mm * 60 / 20 = 500 * 3 = 1500.0 N*mm
+    assert get_relation("gear_ratio_torque_out").evaluate(
+        {"torque_in_nmm": 500.0, "teeth_in": 20.0, "teeth_out": 60.0}
+    ) == pytest.approx(1500.0)
+
+
+def test_gear_ratio_torque_out_non_round_ratio():
+    # torque_out_nmm = torque_in_nmm * teeth_out / teeth_in = 120 N*mm * 54 / 18 = 120 * 3 = 360.0 N*mm
+    assert get_relation("gear_ratio_torque_out").evaluate(
+        {"torque_in_nmm": 120.0, "teeth_in": 18.0, "teeth_out": 54.0}
+    ) == pytest.approx(360.0)
+
+
+def test_gear_ratio_relations_conserve_ideal_power_across_the_same_mesh():
+    # Bonus hand-derived consistency check (not a new physics claim — a direct algebraic consequence of
+    # both formulas being defined as the exact inverse of each other): for one ideal, lossless mesh with
+    # rpm_in=3000, teeth_in=20, teeth_out=60, torque_in_nmm=500 -> rpm_out=1000 (test above),
+    # torque_out_nmm=1500 (test above). Ideal power P ~ T*omega is conserved iff T_in*rpm_in ==
+    # T_out*rpm_out (the rpm-to-omega constant cancels on both sides):
+    # T_in*rpm_in = 500 * 3000 = 1,500,000
+    # T_out*rpm_out = 1500 * 1000 = 1,500,000 -- equal, as the ideal/lossless assumption requires.
+    rpm_out = get_relation("gear_ratio_speed_out").evaluate(
+        {"rpm_in": 3000.0, "teeth_in": 20.0, "teeth_out": 60.0}
+    )
+    torque_out = get_relation("gear_ratio_torque_out").evaluate(
+        {"torque_in_nmm": 500.0, "teeth_in": 20.0, "teeth_out": 60.0}
+    )
+    assert 500.0 * 3000.0 == pytest.approx(torque_out * rpm_out)
+
+
+def test_gear_ratio_relations_are_explicitly_disclosed_as_ideal_lossless():
+    # Both descriptions MUST state the ideal/lossless assumption explicitly — this registry does not let
+    # a relation imply a real-world mechanical-efficiency number that was never grounded.
+    for name in ("gear_ratio_speed_out", "gear_ratio_torque_out"):
+        desc = get_relation(name).description.lower()
+        assert "ideal" in desc and "lossless" in desc
+
+
+def test_gear_ratio_teeth_unit_is_consistent_between_the_two_relations():
+    speed_rel = get_relation("gear_ratio_speed_out")
+    torque_rel = get_relation("gear_ratio_torque_out")
+    assert speed_rel.inputs["teeth_in"] == torque_rel.inputs["teeth_in"] == "count"
+    assert speed_rel.inputs["teeth_out"] == torque_rel.inputs["teeth_out"] == "count"
+
+
+def test_gear_ratio_torque_out_unit_matches_other_torque_nmm_relations_in_registry():
+    # Continuing the 2026-08-03 1000x-unit-mismatch-fix discipline: every torque quantity in this
+    # catalog must share the SAME unit label ("N*mm"), never a silent mix of N*mm and N*m.
+    gear_torque = get_relation("gear_ratio_torque_out")
+    assert gear_torque.inputs["torque_in_nmm"] == "N*mm"
+    assert gear_torque.output == ("torque_out_nmm", "N*mm")
+    force_radius = get_relation("torque_from_force_radius")
+    bolt_preload = get_relation("bolt_preload_from_torque")
+    assert force_radius.output == ("torque_nmm", "N*mm")
+    assert bolt_preload.inputs["torque_nmm"] == "N*mm"
+
+
+def test_registry_has_the_2026_08_04_additions():
+    for name in ("gear_ratio_speed_out", "gear_ratio_torque_out"):
+        assert name in RELATION_REGISTRY
+
+
 def test_shear_stress_only_coupling_is_not_a_load_bearing_claim_and_does_not_block():
     led = add_instance(make_demo_ledger(), "round_bar", "crank")
     led.couplings = [Coupling(id="c1", target_instance="crank", relation="shear_stress_from_torque_radius",

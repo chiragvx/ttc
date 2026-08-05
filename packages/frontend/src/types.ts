@@ -270,6 +270,33 @@ export interface JoinAnnotationOpOutcome {
   message?: string;
 }
 
+// Add/remove a named keep-out/keep-in box on a HOST instance's own local frame (2026-08-04) — a pure
+// geometric ANNOTATION (contrast CouplingOp, which derives a load, or FitOp, which derives a
+// dimension): it derives nothing and nothing derives it. Posted to POST /region_ops on accept, same
+// "propose then explicit accept" boundary as ConnectionOp/CouplingOp/FitOp/JoinAnnotationOp above.
+// Mirrors packages/ledger/deltas.py::RegionOp. `x_mm`/`y_mm`/`z_mm` are the box's CENTER;
+// `dx_mm`/`dy_mm`/`dz_mm` are its full extents (not half-extents) — both in the HOST's own local frame.
+export interface RegionOp {
+  op: "add_region" | "remove_region";
+  id?: string | null;              // required for remove_region; auto-generated for add
+  host_instance?: string | null;   // required for add_region
+  kind?: "keep_out" | "keep_in" | null;
+  label?: string | null;           // required for add_region, e.g. "gear_train_clearance"
+  x_mm?: number | null;
+  y_mm?: number | null;
+  z_mm?: number | null;
+  dx_mm?: number | null;
+  dy_mm?: number | null;
+  dz_mm?: number | null;
+  rationale?: string | null;
+}
+export interface RegionOpOutcome {
+  op: RegionOp;
+  status: "APPLIED" | "REJECTED" | "CONFLICT";
+  regionId: string | null;
+  message?: string;
+}
+
 // The resolved fit wiring, as stored on MasterParametricLedger.fit_bindings — mirrors
 // packages/ledger/schema.py::FitInput/FitBinding.
 export interface FitInput {
@@ -397,6 +424,21 @@ export interface LedgerConnection {
   kind: string;
   gap_mm: number;
 }
+// Mirrors packages/ledger/schema.py::Region — a named keep-out/keep-in box on a HOST instance's own
+// local frame (2026-08-04). x_mm/y_mm/z_mm are the box's CENTER; dx_mm/dy_mm/dz_mm are its full
+// extents (not half-extents), both in the host's own local frame (same convention as CutFeature).
+export interface LedgerRegion {
+  id: string;
+  host_instance: string;
+  kind: string;
+  label: string;
+  x_mm: number;
+  y_mm: number;
+  z_mm: number;
+  dx_mm: number;
+  dy_mm: number;
+  dz_mm: number;
+}
 export interface LedgerCouplingInput {
   value?: number | null;
   from_instance?: string | null;
@@ -424,12 +466,30 @@ export interface LedgerGraphData {
   couplings: LedgerCoupling[];
   fit_bindings: FitBinding[];
   join_annotations: LedgerJoinAnnotation[];
+  // Optional (unlike every field above) — GET /ledger's full model_dump always sends this, but
+  // EKGGraphView.tsx/EKGGraphView.test.tsx (owned by a different file-set this session) don't read or
+  // fixture it yet, so making it required here would break their existing `Partial<LedgerGraphData>`
+  // test fixtures. Flip to required + backfill `regions: []` in that file's makeLedger() once the
+  // graph view actually renders Region boxes/nodes.
+  regions?: LedgerRegion[];
 }
 
 // --- chat (SSE) ---
+// A single part of a multimodal chat message's `content`, when it's an array rather than a plain
+// string — mirrors OpenRouter's own content-part shape (and
+// packages/agents/openrouter_provider.py::judge_image's identical JSON) exactly: `{type:"text",
+// text}` or `{type:"image_url", image_url:{url}}`. Only ever built client-side by
+// chat/buildChatContent.ts; the backend does zero inspection of `content`'s shape, it's pure
+// pass-through to OpenRouter (2026-08-05).
+export interface ChatContentPart {
+  type: "text" | "image_url";
+  text?: string;
+  image_url?: { url: string };
+}
+
 export type ChatEvent =
   | { type: "token"; text: string }
-  | { type: "proposal"; deltas: ParameterDelta[]; feature_ops: FeatureOp[]; instance_ops: InstanceOp[]; connection_ops: ConnectionOp[]; coupling_ops: CouplingOp[]; fit_ops: FitOp[]; join_annotation_ops: JoinAnnotationOp[]; scope_proposal: ScopeProposal | null; clarification: string | null; suggestions: string[] }
+  | { type: "proposal"; deltas: ParameterDelta[]; feature_ops: FeatureOp[]; instance_ops: InstanceOp[]; connection_ops: ConnectionOp[]; coupling_ops: CouplingOp[]; fit_ops: FitOp[]; join_annotation_ops: JoinAnnotationOp[]; region_ops: RegionOp[]; scope_proposal: ScopeProposal | null; clarification: string | null; suggestions: string[] }
   // Fired BEFORE any token/proposal events, at most once per turn, only when a research vendor is
   // actually configured server-side (see packages/transport/app.py's /chat handler) — most turns
   // never see this event at all. The fields are ResearchFinding's own, flattened onto the event.
@@ -474,7 +534,16 @@ export interface ChatMessage {
   fitOpOutcomes?: (FitOpOutcome | undefined)[];
   joinAnnotationOps?: JoinAnnotationOp[]; // AI-proposed semantic join annotations (2026-07-27) — auto-applied, never touches geometry
   joinAnnotationOpOutcomes?: (JoinAnnotationOpOutcome | undefined)[];
+  regionOps?: RegionOp[];                 // AI-proposed keep-out/keep-in boxes (2026-08-04) — auto-applied, checked by the geometric self-check's "region" issue below
+  regionOpOutcomes?: (RegionOpOutcome | undefined)[];
   scopeProposal?: ScopeProposal | null;   // proposed part manifest for a big/ambiguous ask (Phase 5) — display only, no outcomes
   researchFinding?: ResearchFinding | null; // reference research checked before this turn's design (2026-08-01) — display only
   validation?: ValidationResult;          // self-check run after this turn's geometry changes (2026-07-19)
+  // The rendered blueprint (GET /blueprint) as a data: URL, captured at self-check time right after a
+  // geometry-changing turn (2026-08-05) — shown in the chat UI so the user can visually verify
+  // placement/clipping themselves, AND (when the configured model is vision-capable) attached to the
+  // NEXT auto-correction turn's outgoing message via chat/buildChatContent.ts, so the same model that
+  // placed the parts sees its own render directly. Absent when no self-check ran (e.g. a non-geometry
+  // turn) or the blueprint fetch itself failed.
+  blueprintImage?: string;
 }

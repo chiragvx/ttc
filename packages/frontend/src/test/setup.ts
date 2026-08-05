@@ -11,3 +11,10 @@ if (typeof globalThis.ResizeObserver === "undefined") {
   }
   globalThis.ResizeObserver = ResizeObserverPolyfill as unknown as typeof ResizeObserver;
 }
+
+// chat/MessageList.tsx calls Element.scrollIntoView on every message-list update (auto-scroll to the
+// newest message) — jsdom does not implement it either, same class of gap as ResizeObserver above; a
+// missing polyfill throws inside a passive effect and crashes the whole render tree in a test.
+if (typeof Element.prototype.scrollIntoView === "undefined") {
+  Element.prototype.scrollIntoView = () => {};
+}

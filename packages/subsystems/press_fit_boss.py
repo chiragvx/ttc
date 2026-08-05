@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
-from packages.subsystems.base import cylinder_end_interfaces
+from packages.subsystems.base import FitSocketSpec, cylinder_end_interfaces
 
 _MIN_WALL_MM = 0.8
 
@@ -63,4 +63,15 @@ PRESS_FIT_BOSS = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     interfaces=cylinder_end_interfaces("height_mm"),  # 2026-07-27
+    # 2026-08-04 (DFM fit expansion) — CONNECTOR side: `inner_dia_mm` is this boss's through-bore,
+    # same shape family (`render_standoff`) and same param names as `spar_joiner_sleeve`/`box_sleeve`'s
+    # own already-established `inner_dia_mm` fit_socket — a bore that receives `host_dia + clearance_mm`.
+    # Note the sign: `FitBinding.clearance_mm` is explicitly documented as signed (packages/ledger/
+    # schema.py: "positive = clearance/slip fit, negative = interference/press fit") — for THIS part's
+    # own stated purpose ("a slightly-undersized pilot for a press-fit metal insert", see docstring
+    # above), a caller wiring this fit is expected to pass a small NEGATIVE clearance_mm so the bore
+    # comes out slightly under the insert's nominal OD, not the positive slip-fit clearance a plain
+    # screw-clearance bore would use. compute_fit() itself is agnostic to the sign (packages/subsystems/
+    # fit.py:107) — the interference-vs-clearance choice is the caller's, made at wire time.
+    fit_socket=FitSocketSpec(kind="round", dim_params={"dia_mm": "inner_dia_mm"}),
 ))

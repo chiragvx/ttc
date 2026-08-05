@@ -8,12 +8,14 @@ import { MessageList } from "./MessageList";
 import { ProposalCard } from "./ProposalCard";
 import { ResearchCard } from "./ResearchCard";
 import { ValidationCard } from "./ValidationCard";
+import { buildChatContent } from "./buildChatContent";
 import { buildCorrectionMessage, NO_PRIOR_ATTEMPT, type PriorAttempt } from "./buildCorrectionMessage";
+import { exportConversationToMarkdown, triggerMarkdownDownload } from "./exportConversation";
 import { shouldAutoCorrect } from "./shouldAutoCorrect";
 import { summarizeOutcomes } from "./summarizeOutcomes";
-import { streamChat } from "../api";
+import { fetchBlueprintDataUrl, fetchDesignReport, fetchModelVisionCapable, streamChat } from "../api";
 import type { LlmSettings } from "../settings";
-import type { ChatEvent, ChatMessage, ConnectionOp, ConnectionOpOutcome, CouplingOp, CouplingOpOutcome, DeltaOutcome, FeatureOp, FeatureOpOutcome, FitOp, FitOpOutcome, InstanceOp, InstanceOpOutcome, JoinAnnotationOp, JoinAnnotationOpOutcome, ParameterDelta, ValidationResult } from "../types";
+import type { ChatEvent, ChatMessage, ConnectionOp, ConnectionOpOutcome, CouplingOp, CouplingOpOutcome, DeltaOutcome, FeatureOp, FeatureOpOutcome, FitOp, FitOpOutcome, InstanceOp, InstanceOpOutcome, JoinAnnotationOp, JoinAnnotationOpOutcome, ParameterDelta, RegionOp, RegionOpOutcome, ValidationResult } from "../types";
 
 interface Props {
   settings: LlmSettings;
@@ -25,6 +27,7 @@ interface Props {
   onApplyCouplingOp: (op: CouplingOp) => Promise<CouplingOpOutcome>;  // Phase 2b load coupling
   onApplyFitOp: (op: FitOp) => Promise<FitOpOutcome>;  // 2026-07-27 fitted-dimension binding
   onApplyJoinAnnotationOp: (op: JoinAnnotationOp) => Promise<JoinAnnotationOpOutcome>;  // 2026-07-27 semantic join annotation (BOM-only, never touches geometry)
+  onApplyRegionOp: (op: RegionOp) => Promise<RegionOpOutcome>;  // 2026-08-04 keep-out/keep-in region annotation, checked by the geometric self-check
   onUndoFeatureOp: (outcome: FeatureOpOutcome) => Promise<FeatureOpOutcome>;
   onUndoInstanceOp: (outcome: InstanceOpOutcome) => Promise<InstanceOpOutcome>;
   // called once after a whole batch of feature_ops/instance_ops finishes applying (a full proposal,
@@ -45,10 +48,11 @@ const uid = () => (crypto?.randomUUID?.() ?? String(Math.random()));
 // cap so a design it can't satisfy never loops forever (or burns tokens indefinitely).
 const MAX_AUTO_ROUNDS = 2;
 
-export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInstanceOp, onApplyConnectionOp, onApplyCouplingOp, onApplyFitOp, onApplyJoinAnnotationOp, onUndoFeatureOp, onUndoInstanceOp, onOpsApplied, onValidate, onOpenSettings, onUserMessage, onHoverInstance }: Props) {
+export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInstanceOp, onApplyConnectionOp, onApplyCouplingOp, onApplyFitOp, onApplyJoinAnnotationOp, onApplyRegionOp, onUndoFeatureOp, onUndoInstanceOp, onOpsApplied, onValidate, onOpenSettings, onUserMessage, onHoverInstance }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [undone, setUndone] = useState<Record<string, boolean>>({});
+  const [reportError, setReportError] = useState<string | null>(null);
   // feature_ops/instance_ops are auto-applied like deltas (packages/agents/CLAUDE.md's updated
   // policy — every proposal applies immediately, every applied item carries an Undo). These track
   // which individual items (keyed `${messageId}:${index}`) have already been undone.
@@ -72,6 +76,19 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
   // turns clobbering abortRef and interleaving ops (2026-07-19 review, HIGH). A ref set/checked
   // synchronously at the top of send serializes them; the `streaming` state stays for UI only.
   const streamingRef = useRef(false);
+  // Whether the CONFIGURED model can take an image in its message content -- resolved from
+  // OpenRouter's live model registry, never assumed (fetchModelVisionCapable), and re-checked
+  // whenever the model changes in Settings. Defaults to false until resolved: an auto-correction
+  // turn (below) must never attach an image to what may be a text-only model's request.
+  const [visionCapable, setVisionCapable] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setVisionCapable(false);
+    fetchModelVisionCapable(settings.model)
+      .then((capable) => { if (!cancelled) setVisionCapable(capable); })
+      .catch(() => { if (!cancelled) setVisionCapable(false); });
+    return () => { cancelled = true; };
+  }, [settings.model]);
 
   const patch = (id: string, fn: (m: ChatMessage) => ChatMessage) =>
     setMessages((ms) => ms.map((m) => (m.id === id ? fn(m) : m)));
@@ -93,9 +110,23 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
       // history sent back, invisible in the UI (the cards already show it) — otherwise a REJECTED
       // op just vanishes from what the model can see next turn, with no way to learn why or to
       // target the real id a successful add_instance minted (see summarizeOutcomes.ts).
-      const history = [...messages, user].map((m) => {
+      // Render-in-the-Loop (2026-08-05): only meaningful on an auto-correction turn (isAuto) -- the
+      // PRECEDING assistant message (the one the self-check below just ran against) may already
+      // carry a blueprintImage, patched in BEFORE any correction is queued (see the appliedGeometry
+      // block below) precisely so it's already sitting in `messages` by the time a queued correction
+      // gets here. Attaching it lets the SAME model that placed the parts see its own render
+      // directly, instead of relaying a second model's text summary.
+      const priorBlueprintImage = isAuto ? messages[messages.length - 1]?.blueprintImage : undefined;
+      const history = [...messages, user].map((m, i) => {
         const summary = m.role === "assistant" ? summarizeOutcomes(m) : null;
-        return { role: m.role, content: summary ? `${m.text}\n\n${summary}` : m.text };
+        const msgText = summary ? `${m.text}\n\n${summary}` : m.text;
+        // the LAST entry ONLY (the message just added for THIS turn) may get multimodal content --
+        // every other entry (all past turns, and any non-auto user message) keeps its existing
+        // plain-string content, unchanged.
+        const content = i === messages.length && priorBlueprintImage
+          ? buildChatContent(msgText, priorBlueprintImage, visionCapable)
+          : msgText;
+        return { role: m.role, content };
       });
       setMessages((ms) => [...ms, user, { id: aid, role: "assistant", text: "", streaming: true }]);
       setStreaming(true);
@@ -121,6 +152,12 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
       const thisTurnInstanceOps: InstanceOp[] = [];
       const thisTurnConnectionOps: ConnectionOp[] = [];
       const thisTurnCouplingOps: CouplingOp[] = [];
+      // Tracked for the same reason as the accumulators above, but NOT YET threaded into
+      // `priorAttempt`/`PriorAttempt` below (buildCorrectionMessage.ts, owned by a different file in
+      // this session) — a repeated identical region_ops retry across correction rounds isn't called
+      // out to the model yet the way a repeated delta/feature_op/instance_op/connection_op is. Kept
+      // here so that wiring is a one-line addition once PriorAttempt grows a regionOps field.
+      const thisTurnRegionOps: RegionOp[] = [];
 
       const onEvent = async (e: ChatEvent) => {
         if (e.type === "token") {
@@ -158,6 +195,25 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
               patch(aid, (m) => ({ ...m, connectionOpOutcomes: [...connOutcomes] }));
             }
             if (connOutcomes.some((o) => o?.status === "APPLIED")) appliedGeometry = true;
+            await onOpsApplied();
+          }
+          if (e.region_ops?.length) {
+            // AFTER instance_ops (the host must exist). A Region is a pure geometric ANNOTATION (it
+            // derives nothing and nothing derives it, packages/ledger/schema.py::Region) — but UNLIKE
+            // join_annotation_ops below, it IS read by the geometric self-check
+            // (packages/truth_plane/validate.py's "region" issue flags another part intruding on a
+            // keep_out box), so this still sets appliedGeometry so /validate actually re-runs after
+            // this turn. This is deliberate: the keepout_mm lesson (packages/subsystems/base.py's own
+            // zero-adopter keepout mechanism) is that a keep-out mechanism nothing ever wires to a
+            // live check is dead plumbing — this is what makes Region a real, checked mechanism.
+            thisTurnRegionOps.push(...e.region_ops);
+            const regionOutcomes: (RegionOpOutcome | undefined)[] = new Array(e.region_ops.length).fill(undefined);
+            patch(aid, (m) => ({ ...m, regionOps: e.region_ops, regionOpOutcomes: [...regionOutcomes] }));
+            for (let i = 0; i < e.region_ops.length; i++) {
+              regionOutcomes[i] = await onApplyRegionOp(e.region_ops[i]);
+              patch(aid, (m) => ({ ...m, regionOpOutcomes: [...regionOutcomes] }));
+            }
+            if (regionOutcomes.some((o) => o?.status === "APPLIED")) appliedGeometry = true;
             await onOpsApplied();
           }
           if (e.coupling_ops?.length) {
@@ -250,6 +306,7 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
               !m.couplingOps?.length &&
               !m.fitOps?.length &&
               !m.joinAnnotationOps?.length &&
+              !m.regionOps?.length &&
               !m.scopeProposal &&
               !m.clarification &&
               !m.suggestions?.length;
@@ -280,6 +337,27 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
         try {
           const report = await onValidate(lastIntentRef.current);
           patch(aid, (m) => ({ ...m, validation: report }));
+
+          // Render-in-the-loop visibility (2026-08-05): attach the SAME blueprint image the
+          // self-check just judged to THIS assistant message, for EVERY geometry-changing turn --
+          // not gated on shouldAutoCorrect below, since the user wants to see the render whether or
+          // not the self-check found anything, so they can visually verify placement/clipping
+          // themselves and reach for the existing Stop button once a correction round is actually
+          // streaming (no new pause/confirm gate -- explicitly out of scope). Sequenced BEFORE the
+          // shouldAutoCorrect check/setPendingCorrection below, in its OWN try/catch, so (a) its
+          // patch lands in `messages` before a queued correction's history-build reads
+          // priorBlueprintImage above -- setPendingCorrection's effect can fire the instant it's
+          // called, so patching the image any later would race it -- and (b) a failed fetch here can
+          // never skip the auto-correct decision that follows (mirrors this function's own outer
+          // try/catch posture).
+          try {
+            const dataUrl = await fetchBlueprintDataUrl();
+            patch(aid, (m) => ({ ...m, blueprintImage: dataUrl }));
+          } catch {
+            /* blueprint fetch is best-effort visibility; a failure must never break the turn or the
+               validation/auto-correct flow below */
+          }
+
           if (shouldAutoCorrect(report) && autoRoundRef.current < MAX_AUTO_ROUNDS && settings.apiKey) {
             // capture BEFORE incrementing: was THIS turn itself already a correction attempt? If so,
             // every op kind captured above is a fix that just failed (the self-check above still
@@ -306,7 +384,7 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
         }
       }
     },
-    [messages, streaming, settings, onApply, onUserMessage, onValidate,
+    [messages, streaming, settings, visionCapable, onApply, onUserMessage, onValidate,
      onApplyInstanceOp, onApplyFeatureOp, onOpsApplied],
   );
 
@@ -436,6 +514,29 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
         ),
       });
     }
+    if (m.regionOps && m.regionOps.length > 0) {
+      sections.push({
+        label: "Regions",
+        content: (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {m.regionOps.map((op, i) => {
+              const o = m.regionOpOutcomes?.[i];
+              const ok = o?.status === "APPLIED";
+              const color = o == null ? "#8b949e" : ok ? "#3fb950" : "#f85149";
+              const label = op.op === "add_region"
+                ? `${op.host_instance}: ${op.label} (${op.kind})`
+                : `remove ${op.id}`;
+              return (
+                <div key={i} style={{ fontSize: 11, color: "#c9d1d9" }}>
+                  <span style={{ color }}>{o == null ? "…" : ok ? "✓" : "✕"}</span> {label}
+                  {o && !ok && o.message ? <span style={{ color: "#f85149" }}> — {o.message}</span> : null}
+                </div>
+              );
+            })}
+          </div>
+        ),
+      });
+    }
     if (m.couplingOps && m.couplingOps.length > 0) {
       sections.push({
         label: "Loads",
@@ -546,6 +647,19 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
       <>
         {m.researchFinding && <ResearchCard finding={m.researchFinding} />}
         <ChangesetCard sections={sections} />
+        {m.blueprintImage && (
+          <div style={{ border: "1px solid #30363d", borderRadius: 8, padding: "8px 10px", marginTop: 6, background: "#0d1117" }}>
+            <div style={{ fontSize: 10, color: "#6e7681", marginBottom: 4 }}>
+              Blueprint render — the same image the self-check judges (and, on an auto-correction,
+              hands back to a vision-capable model so it can see its own placement)
+            </div>
+            <img
+              src={m.blueprintImage}
+              alt="Rendered blueprint of the current assembly"
+              style={{ display: "block", width: "100%", maxWidth: 600, borderRadius: 6, border: "1px solid #30363d" }}
+            />
+          </div>
+        )}
         {m.validation && <ValidationCard result={m.validation} />}
         {m.suggestions && m.suggestions.length > 0 && (
           <ClarificationCard suggestions={m.suggestions} onPick={(s) => send(s)} />
@@ -558,10 +672,48 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingBottom: 8, borderBottom: "1px solid #30363d" }}>
         <strong style={{ fontSize: 13 }}>Chat</strong>
-        <button onClick={onOpenSettings} title="LLM settings" style={{ background: "none", border: "none", color: "#8b949e", cursor: "pointer", fontSize: 16 }}>
-          ⚙
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button
+            onClick={() => {
+              const md = exportConversationToMarkdown(messages);
+              const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+              triggerMarkdownDownload(`conversation-${stamp}.md`, md);
+            }}
+            disabled={messages.length === 0}
+            title="Export this conversation as a .md file"
+            style={{
+              background: "none", border: "none", color: messages.length === 0 ? "#484f58" : "#8b949e",
+              cursor: messages.length === 0 ? "default" : "pointer", fontSize: 16,
+            }}
+          >
+            ⭳
+          </button>
+          <button
+            onClick={async () => {
+              setReportError(null);
+              try {
+                const md = await fetchDesignReport();
+                const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+                triggerMarkdownDownload(`design-report-${stamp}.md`, md);
+              } catch (err) {
+                setReportError(String(err));
+              }
+            }}
+            title="Export a design report (transmission, fasteners, keep-outs, coarse self-check — grounded in the current ledger, never a fabricated safety verdict)"
+            style={{ background: "none", border: "none", color: "#8b949e", cursor: "pointer", fontSize: 16 }}
+          >
+            📄
+          </button>
+          <button onClick={onOpenSettings} title="LLM settings" style={{ background: "none", border: "none", color: "#8b949e", cursor: "pointer", fontSize: 16 }}>
+            ⚙
+          </button>
+        </div>
       </div>
+      {reportError && (
+        <div style={{ fontSize: 11, color: "#f85149", padding: "4px 2px" }}>
+          Design report failed: {reportError}
+        </div>
+      )}
       <MessageList messages={messages} renderExtras={renderExtras} onExample={send} />
       <Composer streaming={streaming} noKey={!settings.apiKey} onSend={send} onStop={stop} />
     </div>

@@ -19,13 +19,14 @@ of real 3D math (applying a Transform's rotation to a frame) uses build123d's VE
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 from packages.subsystems import get_subsystem_model
-from packages.subsystems.base import Frame, resolve_namespace
+from packages.subsystems.base import Frame, InterfaceSpec, resolve_namespace
 
 if TYPE_CHECKING:
-    from packages.ledger.schema import MasterParametricLedger, Transform
+    from packages.ledger.schema import InterfaceRef, MasterParametricLedger, Transform
 
 _ANTIPARALLEL_TOL = 1e-3  # dot(n_a, -n_b) must be ~1 for a v1 (rotation-free) mate
 
@@ -141,12 +142,29 @@ def resolve_placements(ledger: "MasterParametricLedger") -> dict[str, "Transform
                 if nb in seen:
                     continue
                 seen.add(nb)
-                p_frame = _apply_transform_to_frame(p_world, _local_frame(ledger, p, my_iface))
-                nb_frame = _local_frame(ledger, nb, nb_iface)
-                # v1: pure translation (rotation-free). Push apart by gap along p's outward normal.
-                tx = p_frame.origin[0] + gap * p_frame.normal[0] - nb_frame.origin[0]
-                ty = p_frame.origin[1] + gap * p_frame.normal[1] - nb_frame.origin[1]
-                tz = p_frame.origin[2] + gap * p_frame.normal[2] - nb_frame.origin[2]
+                # 2026-08-04 fix: a kind="mesh" pair (gear-gear) must NOT be coincidence-mated like an
+                # ordinary mount/containment/port pair -- that would place both gear centers on top of
+                # each other (center_distance=0), silently wrong rather than raising an error. Reuses
+                # resolve_mesh_mate's own verified radius_a+radius_b/world-+X arithmetic (see that
+                # function's docstring for the v1 same-Z-axis-only scope limit) rather than duplicating
+                # it; falls through to the ordinary translation mate for every other kind pair, which is
+                # untouched below.
+                p_spec, p_frame_local = _mesh_interface(ledger, p, my_iface)
+                nb_spec, nb_frame_local = _mesh_interface(ledger, nb, nb_iface)
+                if p_spec.kind == "mesh" and nb_spec.kind == "mesh" \
+                        and p_frame_local.radius is not None and nb_frame_local.radius is not None:
+                    center_distance = p_frame_local.radius + nb_frame_local.radius
+                    p_frame = _apply_transform_to_frame(p_world, p_frame_local)
+                    tx = p_frame.origin[0] + center_distance - nb_frame_local.origin[0]
+                    ty = p_frame.origin[1] - nb_frame_local.origin[1]
+                    tz = p_frame.origin[2] - nb_frame_local.origin[2]
+                else:
+                    p_frame = _apply_transform_to_frame(p_world, p_frame_local)
+                    nb_frame = nb_frame_local
+                    # v1: pure translation (rotation-free). Push apart by gap along p's outward normal.
+                    tx = p_frame.origin[0] + gap * p_frame.normal[0] - nb_frame.origin[0]
+                    ty = p_frame.origin[1] + gap * p_frame.normal[1] - nb_frame.origin[1]
+                    tz = p_frame.origin[2] + gap * p_frame.normal[2] - nb_frame.origin[2]
                 placed[nb] = Transform(x_mm=tx, y_mm=ty, z_mm=tz)
                 queue.append(nb)
 
@@ -243,6 +261,38 @@ def connection_issues(ledger: "MasterParametricLedger", instance_id: str | None 
         wb = _world_frame(ledger, placements, c.b.instance_id, c.b.interface)
         if wa is None or wb is None:
             continue  # unplaced (no-connection/auto-layout) or dangling — already handled above
+        # 2026-08-04 fix: a kind="mesh" pair (gear-gear) is NOT a touching-face mount mate — its
+        # validity criteria are the OPPOSITE shape (found live: a correctly mesh-mated gear pair was
+        # unconditionally flagged "need a rotation" + "do not meet", because the checks below assume
+        # every connection is a coincident/anti-parallel mount mate). Two meshing gears' rotation axes
+        # point the SAME direction (parallel normals, not anti-parallel), and their centers sit
+        # `radius_a + radius_b` apart (not `gap_mm`/coincident) — see resolve_mesh_mate's own math,
+        # which this mirrors so a correctly-solved mesh never gets flagged as broken.
+        looked_up_a = _mesh_interface(ledger, c.a.instance_id, c.a.interface)
+        looked_up_b = _mesh_interface(ledger, c.b.instance_id, c.b.interface)
+        is_mesh_pair = (looked_up_a is not None and looked_up_b is not None
+                        and looked_up_a[0].kind == "mesh" and looked_up_b[0].kind == "mesh")
+        if is_mesh_pair:
+            frame_a_local, frame_b_local = looked_up_a[1], looked_up_b[1]
+            parallel_dot = (wa.normal[0] * wb.normal[0] + wa.normal[1] * wb.normal[1]
+                            + wa.normal[2] * wb.normal[2])
+            if parallel_dot < 1.0 - _ANTIPARALLEL_TOL:
+                issues.append(
+                    f"connection {c.id}: {c.a.instance_id}.{c.a.interface} and {c.b.instance_id}."
+                    f"{c.b.interface} need a rotation to mesh (their world rotation axes aren't "
+                    f"parallel — v1 only supports same-Z-axis meshing, see resolve_mesh_mate's own "
+                    f"docstring) — give one side an explicit transform to align the axes")
+            elif frame_a_local.radius is not None and frame_b_local.radius is not None:
+                expected = frame_a_local.radius + frame_b_local.radius
+                d = math.dist(wa.origin, wb.origin)
+                if abs(d - expected) > 0.05:
+                    issues.append(
+                        f"connection {c.id}: {c.a.instance_id}.{c.a.interface} and {c.b.instance_id}."
+                        f"{c.b.interface} are {d:.1f} mm apart, expected {expected:.1f} mm "
+                        f"(radius_a + radius_b) — the part was placed by another connection, so this "
+                        f"mesh is over-constrained/unsatisfied. Remove the conflicting connection or "
+                        f"make the two mates consistent.")
+            continue  # mesh pair fully checked above — skip the mount-mate checks below
         # rotation-needed: WORLD normals must be anti-parallel for a rotation-free mate
         dot = -(wa.normal[0] * wb.normal[0] + wa.normal[1] * wb.normal[1] + wa.normal[2] * wb.normal[2])
         if dot < 1.0 - _ANTIPARALLEL_TOL:
@@ -292,3 +342,102 @@ def connection_issues(ledger: "MasterParametricLedger", instance_id: str | None 
                 f"repositioned by mating, silently discarding their set transforms. Remove the extra "
                 f"anchors or split the group.")
     return issues
+
+
+# ---------------------------------------------------------------------------------------------------
+# Mesh-kind (gear pitch-circle) mating (2026-08-04) — a GENUINELY DIFFERENT mate math from everything
+# above. Every mount/containment mate in this file works by COINCIDING two interface origins (pure
+# translation, `tx/ty/tz` in `resolve_placements`'s BFS loop above — untouched by this section). Two
+# gears never coincide: they mesh when their pitch circles are TANGENT, i.e. their centers sit
+# `radius_a + radius_b` apart. That is a fundamentally different equation, so — per this session's
+# explicit scope — it gets its OWN function rather than a new branch bolted onto `resolve_placements`.
+# ---------------------------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class MeshMateResult:
+    """Outcome of solving ONE `kind="mesh"` mate — mirrors `fit.py::FitComputeResult`'s own ok/reason
+    discipline: `ok=False` means refused/unknown (with a human-readable `reason`), never a fabricated
+    position. `transform` (set only when `ok`) is the SECOND gear's (`b`'s) world `Transform`, computed
+    relative to the FIRST gear's (`a`'s) own current placement (`a`'s instance `.transform` if it
+    carries one, else identity — the same "anchored, else identity" treatment `resolve_placements`
+    gives an unconnected datum; this function does not run `a` through the BFS solver above)."""
+
+    ok: bool
+    transform: Optional["Transform"] = None
+    center_distance_mm: Optional[float] = None
+    reason: Optional[str] = None
+
+
+def _mesh_interface(ledger: "MasterParametricLedger", instance_id: str, interface: str
+                     ) -> Optional[tuple[InterfaceSpec, Frame]]:
+    """Look up ONE declared interface's full `InterfaceSpec` (not just its resolved `Frame`, unlike
+    `_local_frame` above) — `resolve_mesh_mate` must check `InterfaceSpec.kind` BEFORE trusting any
+    geometry (treating a "mount" frame's coordinates as if they were a "mesh" pitch point would be a
+    silent-wrong-answer risk, not just a style mismatch), so it needs the spec, not only the frame.
+    A fresh, separate lookup — deliberately NOT a refactor of `_local_frame` (existing mate-solving
+    logic in this file is left untouched, per this session's scope)."""
+    inst = ledger.instances.get(instance_id)
+    if inst is None:
+        return None
+    try:
+        model = get_subsystem_model(inst.subsystem_type)
+    except KeyError:
+        return None
+    spec = next((s for s in model.interfaces if s.name == interface), None)
+    if spec is None:
+        return None
+    return spec, spec.frame(resolve_namespace(model, ledger, instance_id))
+
+
+def resolve_mesh_mate(
+    ledger: "MasterParametricLedger", a: "InterfaceRef", b: "InterfaceRef",
+) -> MeshMateResult:
+    """Solve a parallel-axis GEAR MESH mate: position `b`'s gear center `center_distance_mm =
+    radius_a + radius_b` away from `a`'s gear center, in the plane PERPENDICULAR TO their shared Z
+    axis (both gears' rotation axes are assumed parallel and Z-up — see the v1 scope limit below) —
+    i.e. `b`'s center lands at the same world Z as `a`'s, offset only in X/Y. Refuses outright (never
+    coerces) unless BOTH `a` and `b` name a real, declared `kind="mesh"` interface (built via
+    `base.py::cylinder_axis_mesh_interface`) whose `Frame.radius` is set — the same never-coerce-on-a-
+    kind-mismatch discipline `fit.py::compute_fit` already uses for its own host/connector kind check.
+
+    v1 SCOPE LIMIT (honest, matches `cylinder_axis_mesh_interface`'s own docstring): the second gear is
+    placed a fixed `center_distance_mm` along WORLD +X from the first — there is no direction/angle
+    parameter yet, so this only ever produces a mesh along the world X axis. An arbitrary 3D mesh axis
+    (a bevel or worm gear meshing at an angle) is NOT modeled at all; this function only ever reasons
+    about a shared, world-Z-up axis pair. Do not reuse this for a non-parallel-axis mesh — it would
+    silently produce a wrong position for that case rather than raising an error."""
+    from packages.ledger.schema import Transform
+
+    looked_up_a = _mesh_interface(ledger, a.instance_id, a.interface)
+    if looked_up_a is None:
+        return MeshMateResult(ok=False, reason=(
+            f"{a.instance_id}.{a.interface}: instance or interface does not exist"))
+    looked_up_b = _mesh_interface(ledger, b.instance_id, b.interface)
+    if looked_up_b is None:
+        return MeshMateResult(ok=False, reason=(
+            f"{b.instance_id}.{b.interface}: instance or interface does not exist"))
+    iface_a, frame_a = looked_up_a
+    iface_b, frame_b = looked_up_b
+
+    if iface_a.kind != "mesh" or iface_b.kind != "mesh":
+        return MeshMateResult(ok=False, reason=(
+            f"mesh mate requires both interfaces to be kind='mesh' — got "
+            f"{a.instance_id}.{a.interface}={iface_a.kind!r}, {b.instance_id}.{b.interface}="
+            f"{iface_b.kind!r} (never coerced: a non-mesh interface uses different mate math and "
+            f"would silently place the part wrong if treated as a gear mesh)"))
+    if frame_a.radius is None or frame_b.radius is None:
+        return MeshMateResult(ok=False, reason=(
+            f"mesh mate requires both interfaces to declare a pitch radius — "
+            f"{a.instance_id}.{a.interface}.radius={frame_a.radius!r}, "
+            f"{b.instance_id}.{b.interface}.radius={frame_b.radius!r}"))
+
+    center_distance = frame_a.radius + frame_b.radius
+    a_transform = ledger.instances[a.instance_id].transform or _identity_transform()
+    a_world = _apply_transform_to_frame(a_transform, frame_a)
+    target = (a_world.origin[0] + center_distance, a_world.origin[1], a_world.origin[2])
+    b_transform = Transform(
+        x_mm=target[0] - frame_b.origin[0],
+        y_mm=target[1] - frame_b.origin[1],
+        z_mm=target[2] - frame_b.origin[2],
+    )
+    return MeshMateResult(ok=True, transform=b_transform, center_distance_mm=center_distance)

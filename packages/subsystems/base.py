@@ -53,11 +53,18 @@ class Frame:
     Two mating faces touch with ANTI-PARALLEL normals — `wing_panel.root` points -X into the body,
     `bwb_fuselage.tip_right` points +X out of it — which is why a pre-oriented pair (e.g. `side_sign`
     already handles the wing's mirroring) mates with ZERO rotation, pure translation. `up` fully
-    constrains orientation for the rotation-requiring mates deferred to Phase 1b; unused in v1."""
+    constrains orientation for the rotation-requiring mates deferred to Phase 1b; unused in v1.
+
+    `radius` (2026-08-04, mesh-kind interfaces only): the PITCH radius at this axis, used ONLY by
+    `kind="mesh"` interfaces (see `cylinder_axis_mesh_interface` below and
+    `placement.py::resolve_mesh_mate`) — a "mount"/"containment"/"port" frame mates by COINCIDING
+    origins, so it never needs a radius. None (default) means every existing mount/containment
+    interface across the catalog is completely unaffected: zero behavior change."""
 
     origin: tuple[float, float, float]
     normal: tuple[float, float, float] = (1.0, 0.0, 0.0)
     up: Optional[tuple[float, float, float]] = None
+    radius: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -139,6 +146,36 @@ def cylinder_end_interfaces(height_param: str, names: tuple[str, str] = ("bottom
     name_bottom, name_top = names
     return [InterfaceSpec(name=name_bottom, kind="mount", frame=_end(-1.0)),
             InterfaceSpec(name=name_top, kind="mount", frame=_end(1.0))]
+
+
+def cylinder_axis_mesh_interface(dia_param: str, name: str = "mesh") -> InterfaceSpec:
+    """ONE `kind="mesh"` interface at a subsystem's own local origin, for the SAME centered-cylinder
+    shape family `cylinder_end_interfaces` above targets (`gear_blank`/`pinion_blank`/`sprocket_blank`/
+    etc, `bd.Cylinder(radius=..., height=...)`, centered at the origin, standing along local Z BY
+    DEFAULT — confirm the actual `_build` before reusing this on a new file, same discipline as
+    `cylinder_end_interfaces`). Unlike that helper (which marks the two flat END faces, for AXIAL
+    stacking), this marks the part's own ROTATION AXIS for RADIAL (parallel-axis gear mesh) mating:
+    `origin=(0, 0, 0)` (the local origin IS the axis, by the same centered-cylinder construction),
+    `normal=(0, 0, 1)` (the axis direction, Z-up — see the v1 scope limit below), and `radius` set to
+    the PITCH radius: half of the named diameter param (`dia_param`), read fresh from the part's own
+    resolved params exactly like every other frame in this file (`radius = getattr(p, dia_param) / 2.0`).
+
+    `kind="mesh"` (never `"mount"`) is deliberate: `placement.py`'s ordinary coincident-origin/
+    anti-parallel-normal mount solver does NOT understand this interface — two gears mesh with their
+    centers held `radius_a + radius_b` APART, not coincident. Only
+    `placement.py::resolve_mesh_mate` interprets a `kind="mesh"` interface; everything else in this
+    file keeps treating `kind` as an opaque, unvalidated str (deliberately NOT upgraded to a `Literal`
+    here — that would be an unrelated, out-of-scope cleanup of the ~86 existing `kind="mount"` call
+    sites too).
+
+    HONEST LIMITATION (v1 scope, matches `placement.py::resolve_mesh_mate`'s own docstring): only
+    SAME-Z-AXIS (planar) meshing is supported — `normal` is unconditionally `(0, 0, 1)`, so this helper
+    has no way to represent a gear whose rotation axis isn't world/local Z. Arbitrary 3D mesh axes
+    (a bevel or worm gear meshing at an angle) are explicitly OUT OF SCOPE — do not reuse this helper
+    for that case; it would silently build a "mesh" interface with the wrong axis, not an error."""
+    def _frame(p: "Namespace") -> Frame:
+        return Frame(origin=(0.0, 0.0, 0.0), normal=(0.0, 0.0, 1.0), radius=getattr(p, dia_param) / 2.0)
+    return InterfaceSpec(name=name, kind="mesh", frame=_frame)
 
 
 def bar_end_interfaces(length_param: str, names: tuple[str, str] = ("end_a", "end_b")) -> list[InterfaceSpec]:

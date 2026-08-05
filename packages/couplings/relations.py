@@ -18,6 +18,14 @@ every one is a textbook closed-form, verified against a hand-computed value in t
 still no chaining (a relation's inputs are still only literals or a single part param, never another
 relation's output).
 
+2026-08-04: two gear-ratio kinematic relations added (`gear_ratio_speed_out`, `gear_ratio_torque_out`)
+— a simple two-gear (or belt/chain) mesh's output speed and output torque from tooth counts. Both are
+explicitly IDEAL/LOSSLESS in their own description string (no fabricated real-world efficiency number
+is asserted anywhere — see the description text itself). See
+`test_gear_ratio_torque_out_unit_matches_other_torque_nmm_relations_in_registry` in tests/couplings/
+for the unit-consistency check against the pre-existing torque_nmm-typed relations, continuing the
+2026-08-03 1000x-mismatch-fix discipline below.
+
 2026-08-03 — TWO changes, both a human-wall physics review:
 
 1. UNIT-MISMATCH FIX (was dormant only because chaining doesn't exist yet): `torque_from_force_radius`
@@ -306,4 +314,48 @@ register_relation(Relation(
     inputs={"force_n": "N", "dia_mm": "mm"},
     output=("shear_stress_mpa", "MPa"),
     fn=lambda force_n, dia_mm: force_n / (math.pi * dia_mm ** 2 / 4.0),
+))
+
+# --- 2026-08-04 additions: gear-ratio kinematics (speed + torque out of a simple gear/belt/chain mesh) -
+# Both relations model a single two-member mesh (spur/helical gear pair, or an equivalent belt/chain
+# sprocket pair) purely from tooth counts — a standard kinematics-textbook pair of relations, and, per
+# this catalog's rule, EXPLICITLY IDEAL/LOSSLESS: neither relation asserts, models, or implies any real
+# mechanical-efficiency number (friction, backlash, slip) — see each description below.
+
+register_relation(Relation(
+    name="gear_ratio_speed_out",
+    description="Output rotational speed of a simple two-gear mesh (or an equivalent belt/chain "
+                "sprocket-tooth-ratio drive), from the input speed and the tooth counts of the driving "
+                "(in) and driven (out) members: rpm_out = rpm_in * teeth_in / teeth_out — the standard "
+                "kinematic gear-ratio relation, following directly from the constraint that the two "
+                "members share the same pitch-line velocity at the mesh point (teeth_in teeth of the "
+                "driver pass the mesh point for every teeth_out teeth of the driven member, per "
+                "revolution). IDEAL, LOSSLESS: assumes a rigid, no-slip, zero-backlash mesh — real "
+                "mechanical efficiency is lower (mesh friction, bearing drag, belt slip, backlash), so "
+                "an actual measured output speed can differ from this theoretical value. This relation "
+                "does not model, assume, or imply any specific real-world efficiency figure — it is a "
+                "theoretical kinematic ratio only, never a measured or de-rated one.",
+    inputs={"rpm_in": "rpm", "teeth_in": "count", "teeth_out": "count"},
+    output=("rpm_out", "rpm"),
+    fn=lambda rpm_in, teeth_in, teeth_out: rpm_in * teeth_in / teeth_out,
+))
+
+register_relation(Relation(
+    name="gear_ratio_torque_out",
+    description="Output torque of a simple two-gear mesh (or an equivalent belt/chain sprocket-tooth-"
+                "ratio drive), from the input torque and the tooth counts of the driving (in) and "
+                "driven (out) members: torque_out_nmm = torque_in_nmm * teeth_out / teeth_in — the "
+                "standard kinematic gear-ratio torque relation, the mirror image of "
+                "gear_ratio_speed_out (torque scales by the INVERSE tooth ratio, teeth_out/teeth_in "
+                "rather than teeth_in/teeth_out, so that ideal power P = T*omega is exactly conserved "
+                "across the mesh). IDEAL, LOSSLESS: assumes zero mechanical loss (no mesh/bearing "
+                "friction, no backlash) — real mechanical efficiency is lower, so an actual output "
+                "torque is somewhat LESS than this theoretical value. This relation does not model, "
+                "assume, or imply any specific real-world efficiency figure — it is a theoretical "
+                "upper-bound kinematic ratio only, never a measured or de-rated one. Because both "
+                "torque_in_nmm and the output are expressed in N*mm, the tooth-count ratio applies with "
+                "no conversion factor.",
+    inputs={"torque_in_nmm": "N*mm", "teeth_in": "count", "teeth_out": "count"},
+    output=("torque_out_nmm", "N*mm"),
+    fn=lambda torque_in_nmm, teeth_in, teeth_out: torque_in_nmm * teeth_out / teeth_in,
 ))

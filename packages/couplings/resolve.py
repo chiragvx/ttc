@@ -239,3 +239,49 @@ def derived_load_n(ledger: "MasterParametricLedger", instance_id: str) -> tuple[
     if unconsumed:
         return None, _unconsumed_reason(instance_id, unconsumed)
     return None, None  # no coupling at all (any non-force ones present are all non-load-bearing)
+
+
+# --- generic coupling read path (2026-08-04) -----------------------------------------------------
+#
+# derived_param_value is a NEW, ADDITIVE function alongside derived_load_n above — it does not touch
+# derived_load_n, coupling_gate_findings, LOAD_BEARING_OUTPUT_QUANTITIES, or any existing gate-blocking
+# behavior in any way. Where derived_load_n is hardwired to the ONE output_quantity ("force_n") the
+# structural load path consumes, derived_param_value generalizes to ANY registered relation's output,
+# selected by which of the TARGET's own params a coupling names via `Coupling.target_param`
+# (packages/ledger/schema.py) — e.g. a gear-ratio self-check comparing a computed ratio against what's
+# actually stored on the driven gear's own param. Every coupling that predates `target_param` has it as
+# `None`, which can never match a real `param_name` here, so this function is a pure ADDITION: it
+# changes nothing about how any existing coupling resolves or gates.
+
+
+def derived_param_value(
+    ledger: "MasterParametricLedger", instance_id: str, param_name: str,
+) -> tuple[Optional[float], Optional[str]]:
+    """(value, reason) — the DISPLAY / self-check-only derived value for `instance_id`'s OWN param
+    `param_name`, from every coupling whose `target_instance`+`target_param` name it. Generalizes
+    `derived_load_n`'s exact (value, reason) contract (see its docstring) to ANY registered relation's
+    output, instead of just the force_n structural load path.
+
+    Read-only: the caller must NEVER write this value into `param_name` itself — that would silently
+    overwrite a param a user or a prior delta set, exactly what Inversion #1 forbids. This function only
+    RESOLVES what the wired relation(s) currently derive; it never mutates the ledger.
+
+    Same conservative contract as `derived_load_n`:
+      * NO coupling targets (instance_id, param_name) at all -> (None, None) — "no coupling", not
+        "unknown" (mirrors derived_load_n's own contract for a part with no coupling at all).
+      * ANY matching coupling is unknown (bad relation name, missing/unresolvable input) -> (None,
+        reason) for that coupling — an unresolvable contributor makes the whole derived value
+        untrustworthy, never silently dropped.
+      * every matching coupling is known -> the SUPERPOSITION (sum) of their values, mirroring
+        derived_load_n's own "sum, don't drop the rest" precedent for co-located, physically-additive
+        contributions.
+    """
+    matching = [c for c in ledger.couplings
+               if c.target_instance == instance_id and c.target_param == param_name]
+    if not matching:
+        return None, None  # no coupling targets this param at all
+    results = [resolve_coupling(ledger, c) for c in matching]
+    for r in results:
+        if not r.is_known:
+            return None, r.reason
+    return sum(r.value for r in results), None

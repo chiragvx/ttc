@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 
 from packages.subsystems import ParamSpec, Subsystem, register_subsystem
-from packages.subsystems.base import cylinder_end_interfaces
+from packages.subsystems.base import FitSocketSpec, cylinder_end_interfaces
 
 _MIN_WALL_MM = 0.8
 
@@ -63,4 +63,9 @@ PROP_SPACER = register_subsystem(Subsystem(
     volume=_volume,
     invariants=_check,
     interfaces=cylinder_end_interfaces("height_mm"),  # 2026-07-27
+    # 2026-08-04 (DFM fit expansion) — CONNECTOR side: `inner_dia_mm`, same `render_standoff` shape
+    # family/param names as `spar_joiner_sleeve`/`box_sleeve`, which already establish this exact
+    # fit_socket shape (bore receives `host_dia_mm + clearance_mm`) — a prop spacer's bore fits over
+    # the motor shaft (a round host), same case, sized for the shaft instead of a fastener.
+    fit_socket=FitSocketSpec(kind="round", dim_params={"dia_mm": "inner_dia_mm"}),
 ))

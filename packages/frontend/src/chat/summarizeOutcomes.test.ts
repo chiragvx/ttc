@@ -98,3 +98,41 @@ describe("summarizeOutcomes — fit ops (2026-07-27)", () => {
     expect(summarizeOutcomes({ ...base, fitOps: [] })).toBeNull();
   });
 });
+
+describe("summarizeOutcomes — region ops (2026-08-04)", () => {
+  it("feeds a REJECTED region (with reason) back to the model so it doesn't re-propose the same wrong one", () => {
+    const m: ChatMessage = {
+      ...base,
+      regionOps: [{ op: "add_region", host_instance: "gearbox_1", kind: "keep_out", label: "gear_train_clearance", x_mm: 0, y_mm: 0, z_mm: 0, dx_mm: 20, dy_mm: 20, dz_mm: 10 }],
+      regionOpOutcomes: [{ op: {} as any, status: "REJECTED", regionId: null, message: "unknown instance 'gearbox_1'" }],
+    };
+    const s = summarizeOutcomes(m)!;
+    expect(s).toContain("REJECTED");
+    expect(s).toContain("unknown instance 'gearbox_1'");
+  });
+
+  it("feeds an APPLIED region's minted region_id back so a later remove can target it", () => {
+    const m: ChatMessage = {
+      ...base,
+      regionOps: [{ op: "add_region", host_instance: "gearbox_1", kind: "keep_out", label: "gear_train_clearance", x_mm: 0, y_mm: 0, z_mm: 0, dx_mm: 20, dy_mm: 20, dz_mm: 10 }],
+      regionOpOutcomes: [{ op: {} as any, status: "APPLIED", regionId: "region_1" }],
+    };
+    const s = summarizeOutcomes(m)!;
+    expect(s).toContain("region_id=region_1");
+    expect(s).toContain("region gearbox_1: gear_train_clearance (keep_out)");
+  });
+
+  it("summarizes remove_region distinctly from add_region", () => {
+    const m: ChatMessage = {
+      ...base,
+      regionOps: [{ op: "remove_region", id: "region_1" }],
+      regionOpOutcomes: [{ op: {} as any, status: "APPLIED", regionId: "region_1" }],
+    };
+    const s = summarizeOutcomes(m)!;
+    expect(s).toContain("remove_region region_1");
+  });
+
+  it("returns null when there are no region outcomes either", () => {
+    expect(summarizeOutcomes({ ...base, regionOps: [] })).toBeNull();
+  });
+});

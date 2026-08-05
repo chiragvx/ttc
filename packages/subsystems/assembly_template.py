@@ -9,6 +9,12 @@ desired child list, and reconciles it against whatever children currently exist 
 (update existing, create missing, remove stale) — so calling it again after a master param change
 (e.g. a leg count) converges the tree to the new desired shape without duplicating instances.
 
+NESTED assembly-templates (2026-08-04): a child an assembly-template instance materializes can
+itself be an assembly-template instance (its own subsystem_type also declares `assembly_children`)
+— `reconcile_children()` recurses into that child's own children automatically, to any depth, with an
+explicit ancestor-chain guard that rejects (rather than infinitely recurses on) a subsystem type that
+would directly or transitively contain itself. See `reconcile_children()`'s own docstring.
+
 Pure composition only, matching this package's convention (`compose.py`, `assembly.py`): no build123d
 import at module scope, so importing this module never drags in the kernel.
 """
@@ -25,7 +31,9 @@ if TYPE_CHECKING:
 
 
 def reconcile_children(
-    ledger: "MasterParametricLedger", root_instance_id: str
+    ledger: "MasterParametricLedger",
+    root_instance_id: str,
+    _ancestor_types: tuple[str, ...] = (),
 ) -> "MasterParametricLedger":
     """Reconcile `root_instance_id`'s children against its subsystem's `assembly_children` (if any).
 
@@ -39,6 +47,20 @@ def reconcile_children(
     - a desired child with no existing instance of that id gets CREATED;
     - an existing child of this root that is no longer desired gets REMOVED.
 
+    NESTED assembly-templates (2026-08-04): once a child is created/updated, if that child's OWN
+    `subsystem_type` ALSO declares `assembly_children` (i.e. it's itself an assembly-template
+    instance, not a leaf part), this function recurses into reconciling THAT child's own children
+    too — so a single top-level `reconcile_children()` call fully materializes an arbitrarily-deep
+    tree of nested assembly-templates, not just one level. `_ancestor_types` is private recursion
+    bookkeeping (the chain of subsystem TYPES already being reconciled on the path down to this
+    call, this instance's own type included) — every pre-existing call site (`add_instance`,
+    `reconcile_all`, every test) passes just `(ledger, root_instance_id)` and is unaffected.
+
+    Guarded against infinite recursion: if a desired child's `subsystem_type` already appears in
+    `_ancestor_types`, that subsystem type would (directly or transitively) contain itself as a
+    descendant — raised immediately as a `ValueError` naming the offending type and the ancestor
+    chain, instead of recursing forever / hitting Python's own `RecursionError`.
+
     Returns a new ledger (`model_copy`) — `ledger.instances` is never mutated in place.
     """
     from packages.ledger.schema import Instance
@@ -48,6 +70,8 @@ def reconcile_children(
     model = get_subsystem_model(inst.subsystem_type)
     if model.assembly_children is None:
         return ledger
+
+    ancestor_types = _ancestor_types + (inst.subsystem_type,)
 
     ns = resolve_namespace(model, ledger, root_instance_id)
     desired = model.assembly_children(ns)
@@ -110,7 +134,28 @@ def reconcile_children(
         if child_id not in desired_ids:
             del new_instances[child_id]
 
-    return ledger.model_copy(update={"instances": new_instances})
+    ledger = ledger.model_copy(update={"instances": new_instances})
+
+    # Nested assembly-templates: recurse into any child that is ITSELF an assembly-template
+    # instance (its own subsystem_type also declares assembly_children). The child instance already
+    # exists in `ledger.instances` at this point (created/updated above), so the recursive call's own
+    # `ledger.instances[root_instance_id]` lookup succeeds immediately.
+    for spec in desired:
+        child_model = get_subsystem_model(spec.subsystem_type)
+        if child_model.assembly_children is None:
+            continue  # leaf part — no children of its own, nothing to recurse into
+        if spec.subsystem_type in ancestor_types:
+            raise ValueError(
+                f"assembly-template self-nesting detected: subsystem_type {spec.subsystem_type!r} "
+                f"would (directly or transitively) contain itself as a descendant — ancestor chain "
+                f"{' -> '.join(ancestor_types)} -> {spec.subsystem_type!r} "
+                f"(at instance {root_instance_id!r}'s child {spec.local_id!r}). "
+                f"A subsystem type must not contain itself in its own assembly_children tree."
+            )
+        child_id = f"{root_instance_id}_{spec.local_id}"
+        ledger = reconcile_children(ledger, child_id, _ancestor_types=ancestor_types)
+
+    return ledger
 
 
 def reconcile_all(ledger: "MasterParametricLedger") -> "MasterParametricLedger":
@@ -122,8 +167,16 @@ def reconcile_all(ledger: "MasterParametricLedger") -> "MasterParametricLedger":
     as a child elsewhere via `add_instance`. Safe to call on every read (`SessionState.ledger()`):
     `reconcile_children` is idempotent and a fast no-op on an already-converged tree.
 
-    Single pass: does not (yet) handle an assembly-template instance whose OWN children are
-    themselves assembly-template instances — no such nesting exists in the registry today.
+    NESTED assembly-templates (2026-08-04): this function's own loop is still a single pass over
+    `ledger.instances`, but that's sufficient — `reconcile_children` itself now recurses into a
+    child's own `assembly_children` (see its docstring), so ONE `reconcile_children` call, on
+    whichever instance is the outermost assembly-template touched, fully materializes however many
+    levels of nested assembly-template instances exist beneath it. This loop can end up calling
+    `reconcile_children` again on an instance that recursion already reconciled (e.g. it still shows
+    up in this loop's `list(ledger.instances)` snapshot from a prior read) — harmless, since
+    `reconcile_children` is idempotent; just some redundant no-op work, not a correctness bug. A
+    subsystem type that (directly or transitively) contains itself is rejected with a clear
+    `ValueError` (raised from `reconcile_children`) rather than recursing forever.
     """
     from packages.subsystems import get_subsystem_model
 

@@ -4,8 +4,15 @@ from __future__ import annotations
 
 import json
 
-from packages.agents.openrouter_provider import OpenRouterDeltaProvider, _extract_json_values, _looks_truncated
-from packages.ledger.deltas import ParameterDelta
+import packages.agents.openrouter_provider as openrouter_provider
+from packages.agents.openrouter_provider import (
+    OpenRouterDeltaProvider,
+    _extract_json_values,
+    _looks_truncated,
+    _strict_schema,
+    model_supports_vision,
+)
+from packages.ledger.deltas import ParameterDelta, parameter_delta_tool_schema
 
 SKIN = "instances.root.params.skin_thickness_mm"
 
@@ -49,6 +56,64 @@ def test_looks_truncated_false_for_a_mid_string_syntax_error_with_trailing_conte
     assert _looks_truncated(args, _decode_error(args)) is False
 
 
+def _assert_every_object_node_is_strict(node) -> None:
+    """Recursively walk a `_strict_schema()` output and assert every object-shaped node (a dict with
+    a "properties" key) has "required" == sorted(its own property names) and "additionalProperties"
+    is False -- mirrors `_strict_schema`'s OWN recursion rules ($defs / properties / items /
+    anyOf|oneOf|allOf) so this check is exhaustive over the real schema, not a spot-check of one or
+    two hand-picked fields."""
+    if not isinstance(node, dict):
+        return
+    if isinstance(node.get("properties"), dict):
+        assert node["required"] == sorted(node["properties"].keys()), \
+            f"required != sorted(properties) for node titled {node.get('title')!r}: {node}"
+        assert node["additionalProperties"] is False, f"additionalProperties not closed: {node}"
+        for prop_schema in node["properties"].values():
+            _assert_every_object_node_is_strict(prop_schema)
+    if isinstance(node.get("$defs"), dict):
+        for def_schema in node["$defs"].values():
+            _assert_every_object_node_is_strict(def_schema)
+    if "items" in node:
+        _assert_every_object_node_is_strict(node["items"])
+    for key in ("anyOf", "oneOf", "allOf"):
+        for branch in node.get(key) or []:
+            _assert_every_object_node_is_strict(branch)
+
+
+def test_strict_schema_makes_every_property_required_and_closes_every_object_exhaustively():
+    # Against the REAL schema (12 object types across $defs + the root DeltaProposal), not a
+    # synthetic toy -- this is what actually gets sent to OpenRouter.
+    original = parameter_delta_tool_schema()
+    transformed = _strict_schema(original)
+
+    _assert_every_object_node_is_strict(transformed)
+    # a few concrete objects that must all have been visited, so the exhaustive walk above isn't
+    # silently vacuous (e.g. because "properties" was renamed/missing and the walk found nothing)
+    assert transformed["required"] == sorted(transformed["properties"].keys())
+    assert transformed["$defs"]["FitOp"]["required"] == sorted(transformed["$defs"]["FitOp"]["properties"].keys())
+    assert "id" in transformed["$defs"]["FitOp"]["required"]  # a previously-optional field, now required
+
+
+def test_strict_schema_never_mutates_the_caller_schema():
+    original = parameter_delta_tool_schema()
+    before = json.dumps(original, sort_keys=True)
+    _strict_schema(original)
+    assert json.dumps(original, sort_keys=True) == before
+
+
+def test_strict_schema_preserves_defaults_enums_and_leaves_non_object_defs_untouched():
+    transformed = _strict_schema(parameter_delta_tool_schema())
+    delta = transformed["$defs"]["ParameterDelta"]
+    assert delta["properties"]["source"]["default"] == "unsourced"
+    assert delta["properties"]["source"]["enum"] == \
+        ["verified", "rule_derived", "solver_validated", "unsourced"]
+    # LockState is a bare enum $def (no "properties") -- never touched by the transform
+    lock_state = transformed["$defs"]["LockState"]
+    assert lock_state["enum"] == ["DYNAMIC", "HARD_LOCK"]
+    assert "required" not in lock_state
+    assert "additionalProperties" not in lock_state
+
+
 def _tool_response(arguments):
     return {"choices": [{"message": {"tool_calls": [
         {"function": {"name": "propose_parameter_delta", "arguments": arguments}}]}}]}
@@ -70,6 +135,30 @@ def test_parses_string_arguments_and_wires_forced_function_call():
     assert captured["payload"]["tool_choice"] == {"type": "function", "function": {"name": "propose_parameter_delta"}}
     assert captured["headers"]["Authorization"] == "Bearer x"
     assert "deepseek" in captured["payload"]["model"]
+
+
+def test_propose_delta_first_attempt_is_bound_to_a_strict_transformed_tool_schema():
+    # 2026-08-04: propose_delta's FIRST attempt is now a strict, grammar-constrained tool schema --
+    # eliminates the "dropped comma in a large free-generated JSON blob" failure class by
+    # construction, rather than only detecting/recovering from it after the fact.
+    captured = {}
+
+    def fake_post(*, url, headers, **kw):
+        captured["payload"] = kw["json"]
+        return _tool_response(json.dumps({"deltas": [{"target_node": SKIN, "requested_value": 3.0}]}))
+
+    prov = OpenRouterDeltaProvider(api_key="x", post=fake_post)
+    prov.propose_delta(system="", conversation=[{"role": "user", "content": "skin 3mm"}], ledger_json="{}")
+
+    tool = captured["payload"]["tools"][0]
+    assert tool["function"]["strict"] is True
+    params = tool["function"]["parameters"]
+    # the transform actually ran: spot-check a couple of nested optional fields are now required
+    assert params["required"] == sorted(params["properties"].keys())
+    connection_op = params["$defs"]["ConnectionOp"]
+    assert "a_instance" in connection_op["required"] and "kind" in connection_op["required"]
+    fit_op = params["$defs"]["FitOp"]
+    assert "clearance_mm" in fit_op["required"]
 
 
 def test_parses_feature_ops_round_trip():
@@ -261,6 +350,16 @@ def test_propose_delta_gives_up_after_exhausting_retries_on_a_persistent_429():
 def test_propose_delta_does_not_retry_a_non_retryable_error():
     # a 400 (bad request) is a caller-side error retrying can never fix — must propagate immediately,
     # with no backoff sleep and no wasted extra attempt.
+    #
+    # UPDATED 2026-08-04: calls["n"] is now genuinely 2, not 1 — NEW, INTENDED behavior, not a
+    # loosened bound. propose_delta's first attempt now uses a STRICT tool schema; a 400 there is
+    # ambiguous between "genuinely bad request" and "this model/provider rejects strict schemas", so
+    # it gets exactly ONE fallback attempt against the ORIGINAL plain (unconstrained) schema — see
+    # test_propose_delta_falls_back_to_a_plain_schema_and_still_propagates_if_that_also_fails just
+    # below for the dedicated test of this exact path (this fake_post rejects BOTH attempts with a
+    # 400, so the final exception still propagates immediately either way, with no sleep and no
+    # retry-loop attempt beyond the one intentional fallback — the "no wasted extra attempt" contract
+    # this test's own comment describes is preserved, just against a budget of 2 instead of 1).
     calls = {"n": 0}
 
     def fake_post(*, url, headers, **kw):
@@ -274,7 +373,71 @@ def test_propose_delta_does_not_retry_a_non_retryable_error():
         raise AssertionError("expected the non-retryable 400 to propagate immediately")
     except _FakeHTTPStatusError:
         pass
-    assert calls["n"] == 1
+    assert calls["n"] == 2  # 1 strict attempt + 1 plain fallback attempt, both non-retryable 400s
+
+
+def test_propose_delta_falls_back_to_a_plain_schema_after_a_strict_400_then_succeeds():
+    calls = []
+
+    def fake_post(*, url, headers, **kw):
+        calls.append(kw["json"])
+        if len(calls) == 1:
+            raise _FakeHTTPStatusError(400)
+        return _tool_response(json.dumps({"deltas": [{"target_node": SKIN, "requested_value": 9.0}]}))
+
+    prov = OpenRouterDeltaProvider(api_key="x", post=fake_post, sleep=lambda s: (_ for _ in ()).throw(
+        AssertionError("should not sleep on a strict-schema fallback — it is not a transport retry")))
+    out = prov.propose_delta(system="", conversation=[{"role": "user", "content": "x"}], ledger_json="{}")
+
+    assert out.deltas == [ParameterDelta(target_node=SKIN, requested_value=9.0)]
+    assert len(calls) == 2
+    assert calls[0]["tools"][0]["function"]["strict"] is True
+    assert "strict" not in calls[1]["tools"][0]["function"]  # the fallback attempt is the plain shape
+
+
+def test_propose_delta_falls_back_to_a_plain_schema_and_still_propagates_if_that_also_fails():
+    calls = []
+
+    def fake_post(*, url, headers, **kw):
+        calls.append(kw["json"])
+        raise _FakeHTTPStatusError(400)
+
+    prov = OpenRouterDeltaProvider(api_key="x", post=fake_post, sleep=lambda s: (_ for _ in ()).throw(
+        AssertionError("should not sleep on a non-retryable error")))
+    try:
+        prov.propose_delta(system="", conversation=[{"role": "user", "content": "x"}], ledger_json="{}")
+        raise AssertionError("expected the 400-then-400 to still propagate")
+    except _FakeHTTPStatusError as e:
+        assert e.response.status_code == 400
+    assert len(calls) == 2
+    assert calls[0]["tools"][0]["function"]["strict"] is True
+    assert "strict" not in calls[1]["tools"][0]["function"]
+
+
+def test_propose_delta_a_persistent_429_never_falls_back_to_a_plain_schema():
+    # 429 is retryable transport noise, not a schema complaint -- a different schema shape can't fix
+    # a rate limit, so it must NEVER trigger the strict->plain fallback on top of the existing
+    # transport-retry budget (_PROPOSE_DELTA_RETRY_ATTEMPTS), which _do_post_with_retry already
+    # exhausts on its own.
+    from packages.agents.openrouter_provider import _PROPOSE_DELTA_RETRY_ATTEMPTS
+
+    calls = []
+
+    def fake_post(*, url, headers, **kw):
+        calls.append(kw["json"])
+        raise _FakeHTTPStatusError(429)
+
+    prov = OpenRouterDeltaProvider(api_key="x", post=fake_post, sleep=lambda s: None)
+    try:
+        prov.propose_delta(system="", conversation=[{"role": "user", "content": "x"}], ledger_json="{}")
+        raise AssertionError("expected the persistent 429 to propagate once retries are exhausted")
+    except _FakeHTTPStatusError:
+        pass
+
+    # exactly the pre-existing transport-retry budget -- the fallback logic added NO extra attempt
+    assert len(calls) == _PROPOSE_DELTA_RETRY_ATTEMPTS
+    # the plain (non-strict) shape never appeared in any captured payload -- no fallback was attempted
+    assert all(c["tools"][0]["function"].get("strict") is True for c in calls)
 
 
 def test_stream_chat_yields_tokens_then_proposal():
@@ -294,6 +457,91 @@ def test_stream_chat_yields_tokens_then_proposal():
     assert tokens == "I'll set the skin."
     proposals = [p for k, p in events if k == "proposal"]
     assert proposals and proposals[0].deltas == [ParameterDelta(target_node=SKIN, requested_value=3.0)]
+    assert events[-1] == ("done", None)
+
+
+def test_stream_chat_first_attempt_is_bound_to_a_strict_transformed_tool_schema():
+    # 2026-08-04: same strict-schema-first fix as propose_delta, applied per streaming round.
+    captured = {}
+
+    def fake_stream(*, url, headers, json):
+        captured["payload"] = json
+        yield {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}
+
+    prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+    list(prov.stream_chat(messages=[{"role": "user", "content": "hi"}], ledger_json="{}"))
+
+    tool = captured["payload"]["tools"][0]
+    assert tool["function"]["name"] == "propose_parameter_delta"
+    assert tool["function"]["strict"] is True
+    params = tool["function"]["parameters"]
+    assert params["required"] == sorted(params["properties"].keys())
+    feature_op = params["$defs"]["FeatureOp"]
+    assert "shape" in feature_op["required"] and "kind" in feature_op["required"]
+
+
+def test_stream_chat_falls_back_to_a_plain_schema_after_a_strict_400_then_succeeds():
+    calls = []
+    delta_args = json.dumps({"deltas": [{"target_node": SKIN, "requested_value": 9.0}]})
+
+    def fake_stream(*, url, headers, json):
+        calls.append(json)
+        if len(calls) == 1:
+            raise _FakeHTTPStatusError(400)
+        yield {"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {"arguments": delta_args}}]}}]}
+        yield {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}
+
+    prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+    events = list(prov.stream_chat(messages=[{"role": "user", "content": "x"}], ledger_json="{}"))
+
+    assert not any(k == "error" for k, _ in events)
+    proposals = [p for k, p in events if k == "proposal"]
+    assert proposals and proposals[0].deltas == [ParameterDelta(target_node=SKIN, requested_value=9.0)]
+    assert len(calls) == 2
+    assert calls[0]["tools"][0]["function"]["strict"] is True
+    assert "strict" not in calls[1]["tools"][0]["function"]  # the fallback attempt is the plain shape
+    assert events[-1] == ("done", None)
+
+
+def test_stream_chat_falls_back_to_a_plain_schema_and_still_errors_if_that_also_fails():
+    calls = []
+
+    def fake_stream(*, url, headers, json):
+        calls.append(json)
+        raise _FakeHTTPStatusError(400)
+
+    prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+    events = list(prov.stream_chat(messages=[{"role": "user", "content": "x"}], ledger_json="{}"))
+
+    assert len(calls) == 2  # 1 strict attempt + 1 plain fallback attempt, both 400
+    assert calls[0]["tools"][0]["function"]["strict"] is True
+    assert "strict" not in calls[1]["tools"][0]["function"]
+    # a genuine failure still gets the SAME ('error', ...) then ('done', None) contract stream_chat
+    # has always used for a transport-level exception — the fallback machinery doesn't change that.
+    errors = [msg for k, msg in events if k == "error"]
+    assert len(errors) == 1 and "HTTP 400" in errors[0]
+    assert not any(k == "proposal" for k, _ in events)
+    assert events[-1] == ("done", None)
+
+
+def test_stream_chat_a_429_never_falls_back_to_a_plain_schema():
+    calls = []
+
+    def fake_stream(*, url, headers, json):
+        calls.append(json)
+        raise _FakeHTTPStatusError(429)
+
+    prov = OpenRouterDeltaProvider(api_key="x", stream_post=fake_stream)
+    events = list(prov.stream_chat(messages=[{"role": "user", "content": "x"}], ledger_json="{}"))
+
+    # no fallback attempt at all -- 429 is excluded from the fallback condition, and stream_chat's
+    # own streaming path has no separate transport-retry budget of its own to exhaust first either.
+    assert len(calls) == 1
+    assert calls[0]["tools"][0]["function"]["strict"] is True
+    errors = [msg for k, msg in events if k == "error"]
+    assert len(errors) == 1 and "HTTP 429" in errors[0]
+    assert not any(k == "proposal" for k, _ in events)
     assert events[-1] == ("done", None)
 
 
@@ -787,3 +1035,125 @@ def test_stream_chat_default_chat_max_tokens_higher_than_propose_delta():
 
     assert captured["max_tokens"] > 1024
     assert captured["max_tokens"] == prov.chat_max_tokens
+
+
+# --- model_supports_vision (vision-in-the-loop, 2026-08-05) ----------------------------------------
+# Fixture is a TRIMMED but real subset of OpenRouter's actual `GET /models` response shape (fetched
+# for real on 2026-08-05 against https://openrouter.ai/api/v1/models to confirm this shape before
+# writing it: a top-level {"data": [...], ...} envelope, each entry keyed by "id" with an
+# "architecture": {"input_modalities": [...]} block) -- not a guessed/invented shape. The two model
+# ids mirror the live registry at fetch time: openai/gpt-5.6-luna is vision-capable
+# (["file", "image", "text"]), deepseek/deepseek-v4-flash is text-only (["text"]).
+
+
+def _fake_registry_response():
+    return {
+        "data": [
+            {
+                "id": "openai/gpt-5.6-luna",
+                "canonical_slug": "openai/gpt-5.6-luna-20260709",
+                "name": "OpenAI: GPT-5.6 Luna",
+                "context_length": 1050000,
+                "architecture": {
+                    "modality": "text+image+file->text",
+                    "input_modalities": ["file", "image", "text"],
+                    "output_modalities": ["text"],
+                    "tokenizer": "GPT",
+                },
+            },
+            {
+                "id": "deepseek/deepseek-v4-flash",
+                "canonical_slug": "deepseek/deepseek-v4-flash-20260423",
+                "name": "DeepSeek: DeepSeek V4 Flash 0423",
+                "context_length": 1048576,
+                "architecture": {
+                    "modality": "text->text",
+                    "input_modalities": ["text"],
+                    "output_modalities": ["text"],
+                    "tokenizer": "DeepSeek",
+                },
+            },
+        ],
+        "total_count": 2,
+        "links": {},
+    }
+
+
+def _reset_model_registry_cache(monkeypatch):
+    # every test below gets a clean cache, regardless of what an earlier test (or an earlier import)
+    # may have left in the module-level (models, fetched_at) tuple -- monkeypatch reverts this back
+    # to whatever it was (None, its true initial value) once the test ends.
+    monkeypatch.setattr(openrouter_provider, "_model_registry_cache", None)
+
+
+def test_model_supports_vision_true_for_a_vision_capable_model(monkeypatch):
+    _reset_model_registry_cache(monkeypatch)
+    fake_get = lambda *, url: _fake_registry_response()
+    assert model_supports_vision("openai/gpt-5.6-luna", get=fake_get) is True
+
+
+def test_model_supports_vision_false_for_a_text_only_model(monkeypatch):
+    _reset_model_registry_cache(monkeypatch)
+    fake_get = lambda *, url: _fake_registry_response()
+    assert model_supports_vision("deepseek/deepseek-v4-flash", get=fake_get) is False
+
+
+def test_model_supports_vision_false_for_an_unknown_model_id():
+    # not in the registry at all -- False, not an error, not a guess.
+    fake_get = lambda *, url: _fake_registry_response()
+    assert model_supports_vision("some-vendor/does-not-exist", get=fake_get) is False
+
+
+def test_model_supports_vision_false_for_an_absent_model_id():
+    # empty/None model id must short-circuit before ever calling `get` -- nothing to look up.
+    fake_get = lambda *, url: (_ for _ in ()).throw(
+        AssertionError("should not fetch the registry for an empty model id"))
+    assert model_supports_vision("", get=fake_get) is False
+
+
+def test_model_supports_vision_false_on_a_network_failure(monkeypatch):
+    _reset_model_registry_cache(monkeypatch)
+
+    def fake_get(*, url):
+        raise ConnectionError("network is down")
+
+    # never raises -- a transport failure degrades to "no, can't confirm it", exactly like
+    # vision_model_configured()/validate_visual()'s own defensive posture elsewhere in this codebase.
+    assert model_supports_vision("openai/gpt-5.6-luna", get=fake_get) is False
+
+
+def test_model_supports_vision_false_on_a_malformed_response(monkeypatch):
+    _reset_model_registry_cache(monkeypatch)
+    fake_get = lambda *, url: {"unexpected": "shape", "no": "data key"}
+    assert model_supports_vision("openai/gpt-5.6-luna", get=fake_get) is False
+
+
+def test_model_supports_vision_caches_the_registry_within_the_ttl_window(monkeypatch):
+    _reset_model_registry_cache(monkeypatch)
+    calls = {"n": 0}
+
+    def fake_get(*, url):
+        calls["n"] += 1
+        return _fake_registry_response()
+
+    assert model_supports_vision("openai/gpt-5.6-luna", get=fake_get) is True
+    assert model_supports_vision("deepseek/deepseek-v4-flash", get=fake_get) is False
+    assert model_supports_vision("some-vendor/does-not-exist", get=fake_get) is False
+    assert calls["n"] == 1  # the 2nd and 3rd calls were served from the module-level cache
+
+
+def test_model_supports_vision_a_failed_fetch_does_not_poison_the_cache(monkeypatch):
+    # a transient failure must not get cached as if it were a successful (empty) fetch -- the very
+    # next call should get a fresh chance, not be stuck returning False for the rest of the TTL.
+    _reset_model_registry_cache(monkeypatch)
+    calls = {"n": 0}
+
+    def flaky_get(*, url):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("network is down")
+        return _fake_registry_response()
+
+    assert model_supports_vision("openai/gpt-5.6-luna", get=flaky_get) is False  # 1st call: fails
+    assert model_supports_vision("openai/gpt-5.6-luna", get=flaky_get) is True   # 2nd call: succeeds
+    assert calls["n"] == 2  # both calls actually hit `get` -- the failure wasn't cached

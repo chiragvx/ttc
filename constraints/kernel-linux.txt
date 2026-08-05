@@ -7,6 +7,16 @@ build123d==0.10.0
 cadquery-ocp==7.8.1.1.post1
 numpy==2.2.1
 gmsh==4.13.1          # meshing for the FEA tier (Spike 4)
+scipy==1.18.0         # py_gearworks' own transitive dep (requires scipy>=1.10.1) -- pinned exactly,
+                       # same discipline as everything else in this file, not left to float
+# py_gearworks (real involute gear geometry, spur_gear subsystem) -- NOT on PyPI (its own README's
+# only documented install path is `pip install git+https://github.com/GarryBGoode/py_gearworks`), so
+# it's pinned here to the exact commit its v0.0.18 tag resolves to (checked live 2026-08-04 via the
+# GitHub API against github.com/GarryBGoode/py_gearworks -- latest tag at the time, published
+# 2026-01-16) rather than a movable tag ref, matching this file's own "exact-pinned" discipline for
+# build123d above. Depends on build123d>=0.9.1 (satisfied by the 0.10.0 pin above) and numpy>=2,<3
+# (satisfied by the 2.2.1 pin above).
+git+https://github.com/GarryBGoode/py_gearworks@2fc2a13d82a9997a65f30c870498f0bb3be62318#egg=py_gearworks
 
 # dev tooling
 pytest==8.3.4

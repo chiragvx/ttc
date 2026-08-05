@@ -608,6 +608,33 @@ def test_chat_proposal_includes_instance_ops(monkeypatch):
     assert '"subsystem_type": "enclosure"' in res.text
 
 
+def test_chat_proposal_includes_region_ops(monkeypatch):
+    """The /chat SSE `proposal` event must carry `region_ops` alongside `deltas`/`feature_ops`/
+    `instance_ops`, serialized the same way (`[ro.model_dump(mode='json') ...]`). Regression for the
+    finding that the handler hand-listed every other op-list field but omitted `region_ops` entirely,
+    silently dropping any model-proposed RegionOp before it reached the SSE frame (and thus the
+    frontend, whose ChatEvent["proposal"] type and Chat.tsx both already expect this key)."""
+    from packages.ledger.deltas import DeltaProposal, RegionOp
+
+    def fake_stream_chat(self, *, messages, ledger_json):
+        yield "proposal", DeltaProposal(
+            region_ops=[RegionOp(op="add_region", host_instance="root", kind="keep_out",
+                                  label="battery_pack_reserve", x_mm=-15, y_mm=-10, z_mm=0,
+                                  dx_mm=25, dy_mm=30, dz_mm=15)]
+        )
+        yield "done", None
+
+    monkeypatch.setattr(
+        "packages.agents.openrouter_provider.OpenRouterDeltaProvider.stream_chat", fake_stream_chat,
+    )
+    res = _client().post("/chat", json={"messages": [{"role": "user", "content": "reserve space for the battery"}], "api_key": "x"})
+    assert res.status_code == 200
+    assert '"type": "proposal"' in res.text
+    assert '"region_ops"' in res.text
+    assert '"op": "add_region"' in res.text
+    assert '"label": "battery_pack_reserve"' in res.text
+
+
 def test_instance_op_rejects_unknown_subsystem_type():
     res = _client().post("/instance_ops", json={"op": "add_instance", "subsystem_type": "spaceship"}).json()
     assert res["ok"] is False

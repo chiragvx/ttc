@@ -23,7 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from packages.ledger.apply import apply_delta
 from packages.ledger.deltas import ParameterDelta
-from packages.ledger.schema import Connection, Coupling, CutFeature, FitBinding, Instance, JoinAnnotation, MasterParametricLedger, Review, ReviewState, Transform
+from packages.ledger.schema import Connection, Coupling, CutFeature, FitBinding, Instance, JoinAnnotation, MasterParametricLedger, Region, Review, ReviewState, Transform
 
 
 class EventKind(str, Enum):
@@ -46,6 +46,8 @@ class EventKind(str, Enum):
     FIT_RESYNCED = "FIT_RESYNCED"              # re-derived an existing binding's params after the host resized
     JOIN_ANNOTATION_ADDED = "JOIN_ANNOTATION_ADDED"      # semantic HOW-joined data on a Connection
     JOIN_ANNOTATION_REMOVED = "JOIN_ANNOTATION_REMOVED"
+    REGION_ADDED = "REGION_ADDED"              # a typed keep-out/keep-in box on a host instance (2026-08-04)
+    REGION_REMOVED = "REGION_REMOVED"
 
 
 FACT_KINDS = {
@@ -56,6 +58,7 @@ FACT_KINDS = {
     EventKind.COUPLING_ADDED, EventKind.COUPLING_REMOVED,
     EventKind.FIT_BOUND, EventKind.FIT_UNBOUND, EventKind.FIT_RESYNCED,
     EventKind.JOIN_ANNOTATION_ADDED, EventKind.JOIN_ANNOTATION_REMOVED,
+    EventKind.REGION_ADDED, EventKind.REGION_REMOVED,
 }
 
 # Facts that change the actual geometry/design — a prior ENGINEER_REVIEWED sign-off must not survive
@@ -262,6 +265,23 @@ def replay(
             join_id = ev.payload["join_id"]
             ledger = ledger.model_copy(update={
                 "join_annotations": [j for j in ledger.join_annotations if j.id != join_id]})
+        elif ev.kind is EventKind.REGION_ADDED:
+            assert ledger is not None
+            # store the resolved Region fact (exactly RegionOpOutcome.region at apply time) -- same
+            # "store the fact, not a diff" pattern as JOIN_ANNOTATION_ADDED/COUPLING_ADDED. Deliberately
+            # NOT in GEOMETRY_CLASS_KINDS below (see that set's own definition) -- Region's own docstring
+            # (packages/ledger/schema.py) calls it a "Pure geometric ANNOTATION: it records WHERE a
+            # volume of interest is; it derives nothing and nothing derives it", and apply_region_op
+            # never touches instance params/placement -- same rationale JOIN_ANNOTATION_ADDED's own
+            # comment gives for staying out of that set, never resets an engineer sign-off.
+            region = Region.model_validate(ev.payload["region"])
+            ledger = ledger.model_copy(update={
+                "regions": [r for r in ledger.regions if r.id != region.id] + [region]})
+        elif ev.kind is EventKind.REGION_REMOVED:
+            assert ledger is not None
+            region_id = ev.payload["region_id"]
+            ledger = ledger.model_copy(update={
+                "regions": [r for r in ledger.regions if r.id != region_id]})
         # NL_INTENT: recorded, no state change
         if (ledger is not None and ev.kind in GEOMETRY_CLASS_KINDS
                 and ledger.review.state is not ReviewState.AI_PROPOSED):
@@ -437,6 +457,13 @@ class BaseEventLog(ABC):
 
     def append_join_annotation_removed(self, join_id: str, actor: str, ts: str) -> Event:
         return self._append(EventKind.JOIN_ANNOTATION_REMOVED, {"join_id": join_id}, actor, ts)
+
+    def append_region_added(self, region: "Region", actor: str, ts: str) -> Event:
+        """FACT counterpart to `apply_region_op`'s add_region outcome — stores the resolved Region."""
+        return self._append(EventKind.REGION_ADDED, {"region": region.model_dump(mode="json")}, actor, ts)
+
+    def append_region_removed(self, region_id: str, actor: str, ts: str) -> Event:
+        return self._append(EventKind.REGION_REMOVED, {"region_id": region_id}, actor, ts)
 
     def append_nl_intent(self, text: str, actor: str, ts: str) -> Event:
         return self._append(EventKind.NL_INTENT, {"text": text}, actor, ts)

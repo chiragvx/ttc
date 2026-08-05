@@ -78,6 +78,131 @@ _BAD_MASTER = register_subsystem(Subsystem(
 ))
 
 
+# ------- synthetic fixtures for NESTED assembly-templates (2026-08-04): a genuine 2-level nesting
+# needs an outer master whose OWN child is itself an assembly-template ("middle"), whose OWN children
+# are leaves. Checked first (per the task instructions): none of the real catalog's assembly-template
+# composites (table.py, standoff_frame.py, rail_mount_assembly.py) have a nested assembly-template as
+# a child — their children (flat_bar, round_post, standoff, mounting_plate_grid) are all leaf parts
+# with no `assembly_children` of their own — so no existing combination can exercise this path. This
+# is a small TEST-ONLY fixture pair (middle + outer), reusing the `_test_at_leg` leaf fixture already
+# defined above instead of inventing a third new type — NOT a real catalog addition. -------
+
+def _nested_middle_children(p):
+    """The "middle" assembly-template's own desired children: N `_test_at_leg` leaves — same shape
+    as `_master_children` above, just reused one level deeper to prove nesting, not fusion."""
+    n = int(p.mid_leg_count)
+    return [
+        ChildSpec(
+            local_id=f"mleg{i}",
+            subsystem_type="_test_at_leg",
+            transform=Transform(x_mm=float(i) * 5.0),
+            params={"leg_height_mm": p.mid_leg_height_mm},
+        )
+        for i in range(n)
+    ]
+
+
+_NESTED_MIDDLE = register_subsystem(Subsystem(
+    name="_test_at_nested_middle",
+    description="synthetic assembly-template that is ITSELF a child of another assembly-template",
+    fragment="test fragment",
+    disciplines=(),
+    params=[
+        ParamSpec("mid_leg_count", value=2.0, min=1.0, max=8.0, unit="count"),
+        ParamSpec("mid_leg_height_mm", value=9.0, min=1.0, max=100.0, unit="mm"),
+    ],
+    build=None,
+    assembly_children=_nested_middle_children,
+))
+
+
+def _nested_outer_children(p):
+    """The "outer" master's desired children: one DIRECT `_test_at_leg` leaf plus one "core" child of
+    subsystem_type `_test_at_nested_middle` — that "core" instance is ITSELF an assembly-template
+    instance, so reconciling `outer` must recurse into reconciling `core`'s own children too."""
+    return [
+        ChildSpec(
+            local_id="direct_leg",
+            subsystem_type="_test_at_leg",
+            transform=Transform(y_mm=1.0),
+            params={"leg_height_mm": p.outer_direct_height_mm},
+        ),
+        ChildSpec(
+            local_id="core",
+            subsystem_type="_test_at_nested_middle",
+            transform=Transform(z_mm=1.0),
+            params={
+                "mid_leg_count": p.outer_mid_leg_count,
+                "mid_leg_height_mm": p.outer_direct_height_mm,
+            },
+        ),
+    ]
+
+
+_NESTED_OUTER = register_subsystem(Subsystem(
+    name="_test_at_nested_outer",
+    description="synthetic 2-level assembly-template master (outer -> middle -> leaf)",
+    fragment="test fragment",
+    disciplines=(),
+    params=[
+        ParamSpec("outer_mid_leg_count", value=2.0, min=1.0, max=8.0, unit="count"),
+        ParamSpec("outer_direct_height_mm", value=30.0, min=1.0, max=100.0, unit="mm"),
+    ],
+    build=None,
+    assembly_children=_nested_outer_children,
+))
+
+
+# ------- synthetic fixtures for self-nesting cycle detection (2026-08-04) -------
+
+def _self_nest_children(p):
+    """Directly contains ITS OWN subsystem_type as a child — the simplest possible cycle."""
+    return [
+        ChildSpec(local_id="child", subsystem_type="_test_at_self_nest", transform=Transform(), params={}),
+    ]
+
+
+_SELF_NEST = register_subsystem(Subsystem(
+    name="_test_at_self_nest",
+    description="synthetic DIRECTLY self-nesting assembly-template (must be rejected, not hang)",
+    fragment="test fragment",
+    disciplines=(),
+    params=[],
+    build=None,
+    assembly_children=_self_nest_children,
+))
+
+
+def _cycle_a_children(p):
+    return [ChildSpec(local_id="b", subsystem_type="_test_at_cycle_b", transform=Transform(), params={})]
+
+
+_CYCLE_A = register_subsystem(Subsystem(
+    name="_test_at_cycle_a",
+    description="synthetic TRANSITIVELY self-nesting assembly-template, half A of A -> B -> A",
+    fragment="test fragment",
+    disciplines=(),
+    params=[],
+    build=None,
+    assembly_children=_cycle_a_children,
+))
+
+
+def _cycle_b_children(p):
+    return [ChildSpec(local_id="a", subsystem_type="_test_at_cycle_a", transform=Transform(), params={})]
+
+
+_CYCLE_B = register_subsystem(Subsystem(
+    name="_test_at_cycle_b",
+    description="synthetic TRANSITIVELY self-nesting assembly-template, half B of A -> B -> A",
+    fragment="test fragment",
+    disciplines=(),
+    params=[],
+    build=None,
+    assembly_children=_cycle_b_children,
+))
+
+
 def _seed(base_ledger, name):
     return get_subsystem(name).seed_defaults(base_ledger)
 
@@ -243,4 +368,92 @@ def test_reconcile_unknown_child_param_raises_keyerror(base_ledger):
     led = _seed(base_ledger, "_test_at_bad_master")
     root_id = led.root_id
     with pytest.raises(KeyError):
+        reconcile_children(led, root_id)
+
+
+# ------- (f) NESTED assembly-templates: a genuine 2-level tree (outer -> middle -> leaf) -------
+
+def test_reconcile_materializes_a_two_level_nested_assembly_template(base_ledger):
+    """A single top-level `reconcile_children(led, root_id)` call on the OUTER master must materialize
+    not just its own direct children, but also recurse into its "core" child (itself an
+    assembly-template instance of type `_test_at_nested_middle`) and materialize ITS children too —
+    real grandchild `Instance`s, parented under the middle instance, not the outer root."""
+    led = _seed(base_ledger, "_test_at_nested_outer")
+    root_id = led.root_id
+    led = reconcile_children(led, root_id)
+
+    direct_id = f"{root_id}_direct_leg"
+    core_id = f"{root_id}_core"
+    assert direct_id in led.instances
+    assert core_id in led.instances
+    assert led.instances[direct_id].subsystem_type == "_test_at_leg"
+    assert led.instances[core_id].subsystem_type == "_test_at_nested_middle"
+    assert led.instances[core_id].parent_id == root_id
+
+    # grandchildren: "core"'s OWN children, materialized by the recursive reconcile — NOT visible
+    # unless reconcile_children actually recursed into the nested instance.
+    mleg0_id = f"{core_id}_mleg0"
+    mleg1_id = f"{core_id}_mleg1"
+    assert mleg0_id in led.instances
+    assert mleg1_id in led.instances
+    assert led.instances[mleg0_id].subsystem_type == "_test_at_leg"
+    assert led.instances[mleg0_id].parent_id == core_id
+    # params flowed outer -> middle -> leaf: outer's default outer_direct_height_mm=30.0 was passed
+    # as the middle's mid_leg_height_mm, which the middle then passed down to each leg's leg_height_mm.
+    assert led.instances[mleg0_id].params["leg_height_mm"].value == 30.0
+    assert led.instances[mleg1_id].params["leg_height_mm"].value == 30.0
+    # the middle's own default leg count (2) produced exactly 2 grandchildren, not 3+
+    assert f"{core_id}_mleg2" not in led.instances
+
+
+def test_reconcile_two_level_nesting_resizes_grandchildren_on_outer_param_change(base_ledger):
+    """Changing the OUTER master's `outer_mid_leg_count` must cascade through the middle instance and
+    resize the LEAF-level grandchildren (add on growth, remove on shrink) — proving the recursive
+    reconcile re-runs on every read, not just at creation, exactly like the existing single-level
+    count-change test above but one level deeper."""
+    led = _seed(base_ledger, "_test_at_nested_outer")
+    root_id = led.root_id
+    led = reconcile_children(led, root_id)
+    core_id = f"{root_id}_core"
+
+    def _with_outer_count(led, n):
+        new_instances = dict(led.instances)
+        root = new_instances[root_id]
+        new_bag = dict(root.params)
+        new_bag["outer_mid_leg_count"] = new_bag["outer_mid_leg_count"].model_copy(update={"value": float(n)})
+        new_instances[root_id] = root.model_copy(update={"params": new_bag})
+        return led.model_copy(update={"instances": new_instances})
+
+    # grow 2 -> 3
+    led = _with_outer_count(led, 3)
+    led = reconcile_children(led, root_id)
+    for i in range(3):
+        assert f"{core_id}_mleg{i}" in led.instances
+
+    # shrink 3 -> 1
+    led = _with_outer_count(led, 1)
+    led = reconcile_children(led, root_id)
+    assert f"{core_id}_mleg0" in led.instances
+    assert f"{core_id}_mleg1" not in led.instances
+    assert f"{core_id}_mleg2" not in led.instances
+
+
+# ------- (g) infinite self-nesting is detected and rejected, not hung / silently truncated -------
+
+def test_reconcile_rejects_direct_self_nesting(base_ledger):
+    """A subsystem type whose own `assembly_children` names itself as a child (`_test_at_self_nest`)
+    must raise a clear error instead of recursing forever."""
+    led = _seed(base_ledger, "_test_at_self_nest")
+    root_id = led.root_id
+    with pytest.raises(ValueError, match="self-nest"):
+        reconcile_children(led, root_id)
+
+
+def test_reconcile_rejects_transitive_self_nesting(base_ledger):
+    """A -> B -> A: neither `_test_at_cycle_a` nor `_test_at_cycle_b` directly names itself, but A
+    transitively contains itself via B — must still be caught (by the ancestor-chain guard, not by
+    exhausting the recursion limit) rather than raising a bare `RecursionError`."""
+    led = _seed(base_ledger, "_test_at_cycle_a")
+    root_id = led.root_id
+    with pytest.raises(ValueError, match="self-nest"):
         reconcile_children(led, root_id)

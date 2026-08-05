@@ -22,13 +22,14 @@ from typing import TYPE_CHECKING, Optional
 
 from pydantic import BaseModel, ConfigDict
 
-from packages.subsystems import get_subsystem, get_subsystem_model
+from packages.subsystems import get_subsystem, get_subsystem_model, resolve_namespace
 from packages.subsystems.assembly import instance_world_offsets
 from packages.subsystems.fit import fit_drift_findings
 from packages.subsystems.placement import connection_issues, world_frame_for_interface
 
 if TYPE_CHECKING:
-    from packages.ledger.schema import MasterParametricLedger
+    from packages.ledger.schema import MasterParametricLedger, Region
+    from packages.subsystems.base import Subsystem
 
 _logger = logging.getLogger(__name__)
 
@@ -44,11 +45,27 @@ _EMBED_VOLUME_RATIO = 0.5  # engulfed part's volume < this * the container's
 # A true 3D intersection deeper than this (on EVERY axis) is "interference", not a flush touching
 # seam — see _overlap_mm/_interferes below.
 _INTERFERE_TOL_MM = 0.5
+# DFM (2026-08-04) — both figures cited to build-plan/research03aug/parametric/
+# final_packaging_structural_design_research.md section 2 (Xometry + Protolabs, cross-corroborated
+# commercial injection-molding DFM sources). A rib/boss thicker than its host wall sinks/warps on
+# cooling (uneven wall thickness -> uneven shrinkage); a face with less than the minimum draft won't
+# release cleanly from its tool. Assumption a human should confirm: these are injection-molding-
+# sourced figures, reused here as a general thick-section/draft heuristic for FDM/CNC parts too — the
+# research doc's own section 4 rib-placement row found the underlying "don't let a thick feature rise
+# off a thin wall unsupported" principle independently in both a plastics-DFM guide and metal
+# gearbox-housing NVH papers, i.e. not molding-only, even though the exact ratio is molding-sourced.
+_DFM_RIB_RATIO_MAX = 0.6   # "Rib thickness <= 60% of nominal wall" (Xometry); "Boss wall thickness
+                           # 40-60% of the wall it rises from" (Protolabs) — section 2.
+_DFM_DRAFT_MIN_DEG = 0.5   # "minimum 0.5 deg on all vertical faces" (Protolabs) — section 2. Only the
+                           # floor is checked — the research doc documents no universal UPPER bound
+                           # (more draft is a legitimate design choice, e.g. 3 deg+ for shutoffs/
+                           # texture), so an upper-bound flag would be fabricating a rule the citation
+                           # doesn't support.
 
 
 class ValidationIssue(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    check: str                 # "degeneracy" | "connections" | "connectivity" | "embedding" | "interference" | "keepout" | "fit"
+    check: str                 # "degeneracy" | "connections" | "connectivity" | "embedding" | "interference" | "keepout" | "fit" | "dfm" | "region"
     severity: str              # "error" | "warning" | "info"
     message: str
     instances: list[str]       # the instance ids involved
@@ -175,6 +192,57 @@ def _connected_partner(ledger: "MasterParametricLedger", instance_id: str, inter
     return None
 
 
+def _dfm_wall_rib_params(model: "Subsystem") -> Optional[tuple[str, str]]:
+    """(wall_thickness_param, rib_thickness_param) if `model` exposes BOTH the established nominal-
+    wall convention (the exact name `wall_thickness_mm` — see `enclosure.py`) AND a rib-thickness
+    param (an underscore TOKEN `rib`, not just a substring — excludes false positives like a
+    hypothetical `distribution_thickness_mm`, and excludes `bracket.py`'s real
+    `internal_rib_spacing_mm`, which is a pitch, not a thickness) — else None. No subsystem in the
+    catalog exposes both today (2026-08-04); every call site must skip cleanly rather than guess, the
+    same discipline every other check in this file already holds to. Driven purely by NAMING
+    CONVENTION over params that already exist for other reasons — unlike `keepout_mm` (a dedicated
+    opt-in field nothing was ever taught to set), this activates automatically the moment any
+    subsystem happens to declare matching param names, with zero further plumbing."""
+    names = {p.name for p in model.params}
+    if "wall_thickness_mm" not in names:
+        return None
+    rib = next((n for n in sorted(names)
+                if "rib" in n.split("_") and n.endswith("thickness_mm")), None)
+    if rib is None:
+        return None
+    return "wall_thickness_mm", rib
+
+
+def _dfm_draft_param(model: "Subsystem") -> Optional[str]:
+    """A declared draft-angle param (any name ending `draft_deg`) if `model` exposes one, else None.
+    Same naming-convention/never-guess discipline as `_dfm_wall_rib_params` above."""
+    return next((p.name for p in model.params if p.name.endswith("draft_deg")), None)
+
+
+def _region_world_bbox(ledger: "MasterParametricLedger", region: "Region") -> Optional[BBox]:
+    """A Region's world-space AABB — its LOCAL box (`region.x/y/z_mm` center, `region.dx/dy/dz_mm`
+    extents, in the HOST's own local frame per `Region`'s own docstring) transformed the SAME way
+    `_placed` transforms that host's own solid: rotate around the host's local origin using the
+    host's `Transform`, THEN translate by the host's resolved world offset. None if the host instance
+    no longer exists (a dangling `host_instance`, e.g. after the host was deleted)."""
+    import build123d as bd
+
+    if region.host_instance not in ledger.instances:
+        return None
+    inst = ledger.instances[region.host_instance]
+    box = bd.Pos(region.x_mm, region.y_mm, region.z_mm) \
+          * bd.Box(region.dx_mm, region.dy_mm, region.dz_mm)
+    rx = ry = rz = 0.0
+    if inst.transform is not None:
+        rx, ry, rz = inst.transform.rx_deg, inst.transform.ry_deg, inst.transform.rz_deg
+    if rx or ry or rz:
+        box = bd.Rotation(rx, ry, rz) * box
+    ox, oy, oz = instance_world_offsets(ledger).get(region.host_instance, (0.0, 0.0, 0.0))
+    box = bd.Pos(ox, oy, oz) * box
+    bb = box.bounding_box()
+    return ((bb.min.X, bb.min.Y, bb.min.Z), (bb.max.X, bb.max.Y, bb.max.Z))
+
+
 def validate_geometry(ledger: "MasterParametricLedger") -> ValidationReport:
     """Structural self-check of the whole assembly. Returns a `ValidationReport` (`ok` is True iff no
     error-severity issue). Empty/single-part files trivially pass connectivity."""
@@ -199,6 +267,47 @@ def validate_geometry(ledger: "MasterParametricLedger") -> ValidationReport:
         healthy[iid] = info
 
     ids = list(healthy)
+
+    # --- dfm: manufacturability heuristics read STRAIGHT off whatever thickness/draft-style params a
+    # subsystem already declares by NAME (never a new opt-in flag/field — the keepout_mm lesson this
+    # session: a mechanism nothing is ever taught to set is dead plumbing; this one instead activates
+    # automatically the moment any subsystem happens to expose matching param names). Two sub-checks,
+    # both cited to build-plan/research03aug/parametric/final_packaging_structural_design_research.md
+    # section 2 — see `_DFM_RIB_RATIO_MAX`/`_DFM_DRAFT_MIN_DEG`'s own comments for the exact figures
+    # and citations. Pure param arithmetic, no geometry build needed — runs over EVERY instance, not
+    # gated on `healthy`, same as the `connections`/`fit` checks below. A subsystem exposing neither
+    # param pair (the whole catalog today, 2026-08-04) is silently skipped — never fabricated from a
+    # missing value, the same discipline `_dfm_wall_rib_params`/`_dfm_draft_param` themselves hold to. ---
+    for iid, inst in ledger.instances.items():
+        try:
+            model = get_subsystem_model(inst.subsystem_type)
+        except KeyError:
+            continue
+        wall_rib = _dfm_wall_rib_params(model)
+        if wall_rib is not None:
+            wall_name, rib_name = wall_rib
+            ns = resolve_namespace(model, ledger, iid)
+            wall_v, rib_v = getattr(ns, wall_name), getattr(ns, rib_name)
+            if wall_v > 0 and rib_v > _DFM_RIB_RATIO_MAX * wall_v:
+                issues.append(ValidationIssue(check="dfm", severity="warning",
+                    message=(f"{iid} ({inst.subsystem_type})'s {rib_name} ({rib_v:.2f} mm) is "
+                             f"{100.0 * rib_v / wall_v:.0f}% of {wall_name} ({wall_v:.2f} mm) — ribs/"
+                             f"bosses over {_DFM_RIB_RATIO_MAX * 100:.0f}% of nominal wall sink/warp "
+                             f"on cooling (Xometry/Protolabs DFM guidance, research03aug/parametric/"
+                             f"final_packaging_structural_design_research.md section 2). Thin the rib "
+                             f"or thicken the wall."),
+                    instances=[iid]))
+        draft_name = _dfm_draft_param(model)
+        if draft_name is not None:
+            draft_v = getattr(resolve_namespace(model, ledger, iid), draft_name)
+            if draft_v < _DFM_DRAFT_MIN_DEG:
+                issues.append(ValidationIssue(check="dfm", severity="warning",
+                    message=(f"{iid} ({inst.subsystem_type})'s {draft_name} ({draft_v:.2f}°) is "
+                             f"below the {_DFM_DRAFT_MIN_DEG}° manufacturing minimum draft angle "
+                             f"(Protolabs DFM guidance, research03aug/parametric/"
+                             f"final_packaging_structural_design_research.md section 2) — a molded/"
+                             f"cast face this shallow won't release cleanly from its tool."),
+                    instances=[iid]))
 
     # --- connections: dangling refs, or a mate that needs a rotation the v1 solver won't auto-place
     # (packages/subsystems/placement.py). A declared connection that can't resolve is a real error —
@@ -286,25 +395,51 @@ def validate_geometry(ledger: "MasterParametricLedger") -> ValidationReport:
     # `connections`/`connectivity` above (a bbox heuristic, advisory, never blocks export) — but
     # confident enough to drive the self-correct loop, unlike `embedding`.
     #
-    # Gated on comparable size (same 0.5x ratio as embedding) so this does NOT fire on the
-    # legitimate, EXPECTED mid-build state where `assembly.py`'s 2026-07-20 two-lane auto-layout
-    # cursor deliberately clusters an ordinary system part near/inside a big airframe body's own
-    # footprint before it's ever connected — that stays embedding's territory, not this one.
+    # Gated on TRUE CONTAINMENT (via `_inside`, the same helper the embedding check above uses), not
+    # size ratio alone (2026-08-04 fix — a live gear-mesh bug exposed this: a 60-tooth/90-tooth gear
+    # pair heavily overlapping by roughly half a radius has a volume ratio of (60/90)^2 ~= 0.44, under
+    # the old bare `smaller < _EMBED_VOLUME_RATIO * larger` gate — so it was silently exempted from
+    # `interference` and only ever produced an unrelated `connectivity` gap warning elsewhere, never
+    # the finding that would have driven auto-correction. A much-smaller part TRULY INSIDE a bigger
+    # one (`assembly.py`'s 2026-07-20 two-lane auto-layout cursor clustering an ordinary part near/
+    # inside a big airframe body's own footprint before it's connected, or a genuinely embedded
+    # component) is still legitimately embedding's territory — that case is unaffected. A
+    # smaller-but-NOT-contained part merely partially overlapping a bigger one (this gear pair; two
+    # differently-sized brackets that happen to clip each other) is NOT embedding's territory and must
+    # not be silently exempted just because one of them is smaller.
     # Exempted by ANY declared Connection between the exact pair (regardless of its advisory
     # `kind` — a declared connection already means "this touching/overlap is intentional"), but only
     # a connection that actually RESOLVES (2026-07-27, same fix as the connectivity loop above) — a
-    # dangling connection must not exempt two truly-interpenetrating parts from this check. ---
+    # dangling connection must not exempt two truly-interpenetrating parts from this check.
+    #
+    # 2026-08-05 fix — ALSO exempted by a FitBinding between the exact pair: found live, a standoff
+    # correctly fitted around its own screw (packages/subsystems/fit.py::compute_fit, the connector
+    # wraps AROUND the host by construction — that overlap is the entire point of a fit, not a
+    # placement mistake) was flagged here as a false-positive "interference", every time, for every
+    # fitted connector/host pair, because this exemption set only ever looked at `ledger.connections`.
+    # A FitBinding is a pure wiring fact between two instance ids (packages/ledger/schema.py — no
+    # frame/interface resolution needed to know it exists, unlike a Connection), so the only staleness
+    # guard needed is that both ends still reference real instances (a fit whose host or connector was
+    # since removed must NOT exempt an unrelated overlap that happens to reuse a freed pair of ids). ---
     connected_pairs = {frozenset((c.a.instance_id, c.b.instance_id))
                        for c in ledger.connections if _connection_resolves(ledger, c)}
+    fitted_pairs = {frozenset((fb.connector_instance, fb.host_instance))
+                    for fb in ledger.fit_bindings
+                    if fb.connector_instance in ledger.instances and fb.host_instance in ledger.instances}
+    exempt_pairs = connected_pairs | fitted_pairs
     for a in range(len(ids)):
         for b in range(a + 1, len(ids)):
             iid, oid = ids[a], ids[b]
-            if frozenset((iid, oid)) in connected_pairs:
+            if frozenset((iid, oid)) in exempt_pairs:
                 continue
             bi, bo = healthy[iid], healthy[oid]
-            smaller, larger = min(bi["volume"], bo["volume"]), max(bi["volume"], bo["volume"])
-            if larger > 0 and smaller < _EMBED_VOLUME_RATIO * larger:
-                continue  # comparable-size gate — a much-smaller part is embedding's territory
+            if bi["volume"] <= bo["volume"]:
+                smaller_vol, larger_vol, smaller_bbox, larger_bbox = bi["volume"], bo["volume"], bi["bbox"], bo["bbox"]
+            else:
+                smaller_vol, larger_vol, smaller_bbox, larger_bbox = bo["volume"], bi["volume"], bo["bbox"], bi["bbox"]
+            if (larger_vol > 0 and smaller_vol < _EMBED_VOLUME_RATIO * larger_vol
+                    and _inside(smaller_bbox, larger_bbox)):
+                continue  # comparable-size + TRUE containment — legitimately embedding's territory
             if _interferes(bi["bbox"], bo["bbox"]):
                 issues.append(ValidationIssue(check="interference", severity="warning",
                     message=(f"{iid} ({bi['subsystem']}) and {oid} ({bo['subsystem']}) physically "
@@ -344,6 +479,40 @@ def validate_geometry(ledger: "MasterParametricLedger") -> ValidationReport:
                                  f"{spec.keepout_mm:.0f} mm clear, but {oid} "
                                  f"({healthy[oid]['subsystem']}) comes within {dist:.1f} mm."),
                         instances=[iid, oid]))
+
+    # --- region: named keep-out/keep-in volumes (packages/ledger/schema.py::Region, 2026-08-04). A
+    # keep_out box intruded on by another instance's placed geometry is a real spatial conflict the
+    # `interference` check above can't see (it only ever compares instance-vs-instance, never against
+    # an annotation with no solid of its own) — reuses THIS FILE's own `_interferes`/`_overlap_mm`
+    # overlap heuristic rather than reimplementing bbox overlap, so "intrudes" means exactly the same
+    # thing here as it does there. keep_in regions are INFORMATIONAL ONLY this pass — asserting "the
+    # right thing is actually inside" is a real judgment call (which OTHER instances are even relevant
+    # to a given keep_in box is domain-semantic, not geometric) deliberately out of scope; this only
+    # surfaces that the design intent exists, for a human/copilot to reason about, never a containment
+    # verdict. The host instance itself is always exempt from its OWN region (a keep_out cavity is
+    # routinely carved out of/near the host's own body on purpose; a keep_in region often names a
+    # volume the host itself defines) — matches the same "the declared owner never triggers its own
+    # check" shape `keepout`'s partner-exclusion above already uses. ---
+    for region in ledger.regions:
+        if region.kind == "keep_in":
+            issues.append(ValidationIssue(check="region", severity="info",
+                message=(f"{region.host_instance} declares a keep_in region '{region.label}' "
+                         f"({region.dx_mm:.0f}×{region.dy_mm:.0f}×{region.dz_mm:.0f} mm) — "
+                         f"informational only, this check does not verify what's actually inside it."),
+                instances=[region.host_instance]))
+            continue
+        rbb = _region_world_bbox(ledger, region)
+        if rbb is None:
+            continue
+        for oid in ids:
+            if oid == region.host_instance:
+                continue
+            if _interferes(rbb, healthy[oid]["bbox"]):
+                issues.append(ValidationIssue(check="region", severity="warning",
+                    message=(f"{oid} ({healthy[oid]['subsystem']}) intrudes on {region.host_instance}"
+                             f"'s keep_out region '{region.label}' "
+                             f"({region.dx_mm:.0f}×{region.dy_mm:.0f}×{region.dz_mm:.0f} mm)."),
+                    instances=[region.host_instance, oid]))
 
     # --- fit: a live FitBinding whose connector's stored dimensions no longer match what the host's
     # CURRENT cross-section implies (packages/subsystems/fit.py::fit_drift_findings) — the host was

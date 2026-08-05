@@ -393,6 +393,39 @@ GOLDEN_GRAPH: list[GraphEvalCase] = [
             expect_connected("brk", "wall_mount", "box", "right"),
         ),
     ),
+    # 2026-08-04 -- regression case for a live-observed defect: a chat-driven 2-gear meshing request
+    # built as gear_blank (toothless, mount-kind interfaces only) got manually-guessed x/y/z positions
+    # that ended up heavily overlapping (no grounded center-distance math exists for gear_blank at
+    # all). This case pins the CORRECT path -- spur_gear (kind="mesh" interface, real center-distance
+    # solver in packages/subsystems/placement.py::resolve_mesh_mate) wired via connection_ops, never a
+    # hand-computed position -- so if that dispatch (fixed the same day this case was added -- see
+    # placement.py::resolve_placements) ever regresses, this eval case fails loudly instead of only
+    # ever being caught by a user looking at a rendered blueprint again.
+    GraphEvalCase(
+        name="two_spur_gears_mesh_via_connection_ops_not_hand_computed_position",
+        prompt="add a 20-tooth pinion meshing with a 30-tooth gear",
+        initial_instances=(),
+        fixture_tool_call={
+            "instance_ops": [
+                {"op": "add_instance", "subsystem_type": "spur_gear", "instance_id": "pinion"},
+                {"op": "add_instance", "subsystem_type": "spur_gear", "instance_id": "gear"},
+            ],
+            "deltas": [
+                {"target_node": "instances.pinion.params.tooth_count", "requested_value": 20.0},
+                {"target_node": "instances.gear.params.tooth_count", "requested_value": 30.0},
+            ],
+            "connection_ops": [
+                {"op": "add_connection", "a_instance": "pinion", "a_interface": "mesh",
+                 "b_instance": "gear", "b_interface": "mesh"},
+            ],
+        },
+        check=all_of(
+            expect_types(exact={"spur_gear"}, min_counts={"spur_gear": 2}),
+            expect_no_hand_computed_position("pinion"),
+            expect_no_hand_computed_position("gear"),
+            expect_connected("pinion", "mesh", "gear", "mesh"),
+        ),
+    ),
 
     # --- item 4: a dimension smuggled directly onto add_instance (2026-07-27 documented live
     # failure — packages/ledger/deltas.py::DeltaProposal._repair_known_wire_quirks) must be

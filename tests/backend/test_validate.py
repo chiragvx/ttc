@@ -372,6 +372,71 @@ def test_clean_bracket_enclosure_mate_is_not_flagged_as_interference():
     assert not any(i.check == "interference" for i in r.issues), r.summary
 
 
+def test_unequal_size_parts_that_merely_overlap_ARE_flagged_as_interference():
+    # 2026-08-04 regression -- THE live gear-mesh bug this fix responds to: a 60-tooth gear
+    # (dia_mm=60, radius 30) and a 90-tooth gear (dia_mm=90, radius 45) built as gear_blank (no real
+    # teeth, no mesh interface), positioned 40mm apart instead of the correct 75mm (radius_a+radius_b)
+    # center distance -- heavily overlapping, not touching. Volume ratio (30/45)^2 = 0.444, UNDER the
+    # old bare _EMBED_VOLUME_RATIO=0.5 gate, which silently exempted this exact shape of bug from
+    # `interference` (live-reproduced during the investigation that found it: ok=True, zero
+    # interference issues, only two unrelated connectivity warnings elsewhere). The smaller gear is
+    # NOT actually contained inside the larger one (it sticks out on one side) -- `_inside()` now
+    # correctly refuses to treat this as embedding's territory, so `interference` must fire.
+    from packages.truth_plane.validate import validate_geometry
+    led = _make([
+        ("gear_blank", "idler_gear", {"x_mm": 0, "y_mm": 0, "z_mm": 0}, {"dia_mm": 60, "height_mm": 10}),
+        ("gear_blank", "output_gear", {"x_mm": 40, "y_mm": 0, "z_mm": 0}, {"dia_mm": 90, "height_mm": 10}),
+    ])
+    r = validate_geometry(led)
+    interference = [i for i in r.issues if i.check == "interference"]
+    assert len(interference) == 1, r.summary
+    assert set(interference[0].instances) == {"idler_gear", "output_gear"}
+    assert r.ok  # warning, not error -- never blocks export
+
+
+def test_a_fitted_connector_around_its_own_host_is_not_flagged_as_interference():
+    # 2026-08-05 regression -- THE live bug this fix responds to: a standoff correctly fitted around
+    # its own screw (packages/subsystems/fit.py::compute_fit -- the connector wraps AROUND the host
+    # by construction, that overlap is the entire point of the fit) was flagged as a false-positive
+    # "interference" every single time, because the exemption set only ever checked
+    # `ledger.connections`, never `ledger.fit_bindings`. Same coincident-position setup as
+    # test_coincident_comparable_size_parts_flagged_as_interference above (so this would DEFINITELY
+    # still fire without the fix), but wired via a FitBinding instead of a Connection.
+    from packages.truth_plane.validate import validate_geometry
+    from packages.ledger.schema import FitBinding, FitInput
+    led = _make([
+        ("standoff", "standoff_1", {"x_mm": 0, "y_mm": 0, "z_mm": 0}, {}),
+        ("round_post", "screw_1", {"x_mm": 0, "y_mm": 0, "z_mm": 0}, {}),
+    ])
+    led.fit_bindings = [
+        FitBinding(id="fit_1", connector_instance="standoff_1", host_instance="screw_1", kind="round",
+                  inputs=[FitInput(host_param="dia_mm", connector_param="inner_dia_mm")], clearance_mm=0.4),
+    ]
+    r = validate_geometry(led)
+    assert not any(i.check == "interference" for i in r.issues), r.summary
+
+
+def test_a_stale_fit_binding_referencing_a_removed_instance_does_not_exempt_an_unrelated_overlap():
+    # The staleness guard: a FitBinding whose host/connector no longer exists in `ledger.instances`
+    # must NOT exempt an overlap -- mirrors _connection_resolves' own dangling-reference discipline
+    # for Connections, applied here to FitBindings.
+    from packages.truth_plane.validate import validate_geometry
+    from packages.ledger.schema import FitBinding, FitInput
+    led = _make([
+        ("lbracket", "brk_a", {"x_mm": 0, "y_mm": 0, "z_mm": 0}, {}),
+        ("lbracket", "brk_b", {"x_mm": 0, "y_mm": 0, "z_mm": 0}, {}),
+    ])
+    led.fit_bindings = [
+        FitBinding(id="fit_1", connector_instance="brk_a", host_instance="ghost_removed_instance",
+                  kind="round", inputs=[FitInput(host_param="dia_mm", connector_param="inner_dia_mm")],
+                  clearance_mm=0.4),
+    ]
+    r = validate_geometry(led)
+    interference = [i for i in r.issues if i.check == "interference"]
+    assert len(interference) == 1, r.summary
+    assert set(interference[0].instances) == {"brk_a", "brk_b"}
+
+
 def test_auto_layout_clustering_an_ordinary_part_near_an_airframe_body_is_not_interference():
     # assembly.py's 2026-07-20 two-lane auto-layout cursor DELIBERATELY seeds an airframe-defining
     # body's lane and an ordinary system part's lane independently, so an untouched system part can
@@ -438,6 +503,137 @@ def test_keepout_does_not_fire_when_nothing_is_within_range(monkeypatch):
     ])
     r = validate_geometry(led)
     assert not any(i.check == "keepout" for i in r.issues), r.summary
+
+
+# --- dfm: rib-to-wall thickness ratio + draft-angle range, driven by param NAMING CONVENTION rather
+# than a new opt-in field (packages/truth_plane/validate.py's own "keepout_mm lesson" comment) -- it
+# activates the moment any subsystem happens to declare matching param names, no further plumbing
+# needed. No subsystem in the real catalog exposes a rib-thickness or draft-angle param yet
+# (2026-08-04), so the "fires"/"within spec" tests below monkeypatch a synthetic param onto a REAL
+# registered model (same style as `_with_lbracket_wall_mount_keepout` above), reverted automatically
+# by pytest's monkeypatch fixture -- never a permanent catalog change. The "absent -> no finding"
+# tests use the REAL, unmodified catalog (enclosure genuinely has no rib param; bracket genuinely has
+# neither), so they prove the never-fabricate discipline honestly, with no monkeypatch involved.
+
+def _with_extra_param(monkeypatch, subsystem_name: str, name: str, value: float, unit: str = "mm"):
+    import dataclasses
+    from packages.subsystems import SUBSYSTEM_MODELS, ParamSpec, get_subsystem_model
+    model = get_subsystem_model(subsystem_name)
+    new_params = [p for p in model.params if p.name != name]
+    new_params.append(ParamSpec(name=name, value=value, min=-100.0, max=1000.0, unit=unit))
+    monkeypatch.setitem(SUBSYSTEM_MODELS, subsystem_name, dataclasses.replace(model, params=new_params))
+
+
+def test_dfm_flags_a_rib_thicker_than_60pct_of_nominal_wall(monkeypatch):
+    # enclosure's real wall_thickness_mm default is 2.0 mm; a 2.0 mm rib is 100% of that -- well over
+    # the 60% Xometry/Protolabs ceiling (final_packaging_structural_design_research.md section 2).
+    _with_extra_param(monkeypatch, "enclosure", "rib_thickness_mm", 2.0)
+    from packages.truth_plane.validate import validate_geometry
+    led = _make([("enclosure", "box", {}, {})])
+    r = validate_geometry(led)
+    dfm = [i for i in r.issues if i.check == "dfm"]
+    assert len(dfm) == 1, r.summary
+    assert dfm[0].instances == ["box"]
+    assert dfm[0].severity == "warning"
+    assert r.ok  # advisory, never blocks export
+
+
+def test_dfm_does_not_fire_when_rib_ratio_is_within_spec(monkeypatch):
+    _with_extra_param(monkeypatch, "enclosure", "rib_thickness_mm", 1.0)  # 1.0 / 2.0 = 50% <= 60%
+    from packages.truth_plane.validate import validate_geometry
+    led = _make([("enclosure", "box", {}, {})])
+    r = validate_geometry(led)
+    assert not any(i.check == "dfm" for i in r.issues), r.summary
+
+
+def test_dfm_rib_check_does_not_fire_when_no_rib_thickness_param_exists():
+    # enclosure genuinely exposes wall_thickness_mm but NO rib-thickness param on the real catalog --
+    # must skip cleanly, never fabricate a finding from a param that isn't there (the same discipline
+    # every other check in this file already holds to).
+    from packages.truth_plane.validate import validate_geometry
+    led = _make([("enclosure", "box", {}, {})])
+    r = validate_geometry(led)
+    assert not any(i.check == "dfm" for i in r.issues), r.summary
+
+
+def test_dfm_flags_a_draft_angle_below_the_manufacturing_minimum(monkeypatch):
+    # Protolabs' 0.5 deg minimum on any vertical face (same research doc, section 2).
+    _with_extra_param(monkeypatch, "enclosure", "wall_draft_deg", 0.1, unit="deg")
+    from packages.truth_plane.validate import validate_geometry
+    led = _make([("enclosure", "box", {}, {})])
+    r = validate_geometry(led)
+    dfm = [i for i in r.issues if i.check == "dfm"]
+    assert len(dfm) == 1, r.summary
+    assert dfm[0].instances == ["box"]
+    assert dfm[0].severity == "warning"
+    assert r.ok
+
+
+def test_dfm_does_not_fire_when_draft_is_within_range(monkeypatch):
+    _with_extra_param(monkeypatch, "enclosure", "wall_draft_deg", 1.5, unit="deg")
+    from packages.truth_plane.validate import validate_geometry
+    led = _make([("enclosure", "box", {}, {})])
+    r = validate_geometry(led)
+    assert not any(i.check == "dfm" for i in r.issues), r.summary
+
+
+def test_dfm_draft_check_does_not_fire_when_no_draft_param_exists():
+    # bracket exposes neither a rib-thickness nor a draft-angle param on the real catalog.
+    from packages.truth_plane.validate import validate_geometry
+    led = _make([("bracket", "b1", {}, {})])
+    r = validate_geometry(led)
+    assert not any(i.check == "dfm" for i in r.issues), r.summary
+
+
+# --- region: named keep-out/keep-in volumes (packages/ledger/schema.py::Region, 2026-08-04). ------
+
+def test_region_keepout_intrusion_is_flagged():
+    from packages.truth_plane.validate import validate_geometry
+    from packages.ledger.schema import Region
+    led = _make([
+        ("enclosure", "box", {"x_mm": 0, "y_mm": 0, "z_mm": 0}, {}),
+        ("standoff", "post", {"x_mm": 0, "y_mm": 0, "z_mm": 0}, {}),
+    ])
+    led.regions = [Region(id="r1", host_instance="box", kind="keep_out", label="gear_train_clearance",
+                          x_mm=0, y_mm=0, z_mm=0, dx_mm=30, dy_mm=30, dz_mm=30)]
+    r = validate_geometry(led)
+    region_issues = [i for i in r.issues if i.check == "region"]
+    assert len(region_issues) == 1, r.summary
+    assert region_issues[0].severity == "warning"
+    assert set(region_issues[0].instances) == {"box", "post"}
+    assert r.ok  # warning, never blocks export
+
+
+def test_region_keepout_does_not_fire_when_nothing_intrudes():
+    from packages.truth_plane.validate import validate_geometry
+    from packages.ledger.schema import Region
+    led = _make([
+        ("enclosure", "box", {"x_mm": 0, "y_mm": 0, "z_mm": 0}, {}),
+        ("standoff", "post", {"x_mm": 500, "y_mm": 0, "z_mm": 0}, {}),
+    ])
+    led.regions = [Region(id="r1", host_instance="box", kind="keep_out", label="gear_train_clearance",
+                          x_mm=0, y_mm=0, z_mm=0, dx_mm=30, dy_mm=30, dz_mm=30)]
+    r = validate_geometry(led)
+    assert not any(i.check == "region" for i in r.issues), r.summary
+
+
+def test_region_keepin_is_info_only_even_when_something_overlaps_it():
+    # keep_in is deliberately NOT a containment verdict this pass -- even with a part sitting right
+    # inside the box, this must produce exactly one INFO entry (existence-only), never a warning.
+    from packages.truth_plane.validate import validate_geometry
+    from packages.ledger.schema import Region
+    led = _make([
+        ("enclosure", "box", {"x_mm": 0, "y_mm": 0, "z_mm": 0}, {}),
+        ("standoff", "post", {"x_mm": 0, "y_mm": 0, "z_mm": 0}, {}),
+    ])
+    led.regions = [Region(id="r1", host_instance="box", kind="keep_in", label="payload_bay",
+                          x_mm=0, y_mm=0, z_mm=0, dx_mm=30, dy_mm=30, dz_mm=30)]
+    r = validate_geometry(led)
+    region_issues = [i for i in r.issues if i.check == "region"]
+    assert len(region_issues) == 1, r.summary
+    assert region_issues[0].severity == "info"
+    assert region_issues[0].instances == ["box"]
+    assert r.ok
 
 
 def test_visual_validation_skipped_cleanly_without_a_model(monkeypatch):

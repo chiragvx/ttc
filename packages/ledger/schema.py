@@ -245,12 +245,22 @@ class Coupling(_Strict):
     `relation` names a registered relation (packages/couplings/relations.py); `inputs` map the
     relation's declared input quantities to `CouplingInput`s. The LLM WIRES this; it never authors the
     physics — a relation not in the registry makes the target's load `"unknown"`, which blocks the
-    green light rather than fabricating one."""
+    green light rather than fabricating one.
+
+    `target_param` (2026-08-04, generic coupling read path) is OPTIONAL and defaults to `None` —
+    byte-identical to today's behavior on every existing coupling, which never sets it. When set, it
+    names which of `target_instance`'s OWN params this coupling's resolved value corresponds to, for
+    DISPLAY / self-check purposes ONLY (e.g. a gear-ratio self-check comparing a computed ratio against
+    what's actually stored on the driven gear). It is a read-only annotation — nothing in this codebase
+    ever writes a coupling's resolved value into that param (that would silently overwrite a param a
+    user or a prior delta set, exactly what Inversion #1 forbids); see
+    `packages/couplings/resolve.py::derived_param_value`, the one (additive, read-only) consumer."""
 
     id: str
     target_instance: str
     relation: str
     inputs: dict[str, CouplingInput] = Field(default_factory=dict)
+    target_param: Optional[str] = None
 
 
 class FitInput(_Strict):
@@ -290,6 +300,37 @@ class FitBinding(_Strict):
     clearance_mm: float = 0.0
 
 
+class Region(_Strict):
+    """A named keep-out/keep-in box on a HOST instance's own local frame (2026-08-04,
+    ENGINEERING_GRAPH_ARCHITECTURE.md follow-on) — e.g. "gear_train_clearance" or a sensor's optical
+    cone. Pure geometric ANNOTATION: it records WHERE a volume of interest is; it derives nothing and
+    nothing derives it (contrast `Coupling`, which derives a load, or `FitBinding`, which derives a
+    dimension). `kind="keep_out"` means nothing else may occupy this box; `kind="keep_in"` means
+    everything relevant must stay INSIDE it.
+
+    Per this session's keepout_mm lesson (packages/subsystems/base.py's existing, zero-adopter keepout
+    mechanism is the cautionary example): this record alone is NOT a consumer — a caller that adds
+    Regions must also be the one wiring an actual interference/containment check against them, or this
+    is dead plumbing exactly like keepout_mm.
+
+    `x_mm`/`y_mm`/`z_mm` are the box's CENTER; `dx_mm`/`dy_mm`/`dz_mm` are its full extents (not
+    half-extents) — both in the host's own local frame, the SAME convention as `CutFeature`'s
+    x_mm/y_mm. Extents must be strictly positive (a zero/negative box is not "unknown", it's
+    malformed) — enforced here AND re-checked at apply time (packages/ledger/apply.py::apply_region_op)
+    for a clean REJECTED message rather than a raw ValidationError."""
+
+    id: str
+    host_instance: str
+    kind: Literal["keep_out", "keep_in"]
+    label: str          # human/LLM-given purpose, e.g. "gear_train_clearance"
+    x_mm: float
+    y_mm: float
+    z_mm: float
+    dx_mm: float = Field(gt=0.0)
+    dy_mm: float = Field(gt=0.0)
+    dz_mm: float = Field(gt=0.0)
+
+
 class MasterParametricLedger(_Strict):
     project_metadata: ProjectMetadata
     global_constraints: GlobalConstraints = Field(default_factory=GlobalConstraints)
@@ -312,5 +353,8 @@ class MasterParametricLedger(_Strict):
     # 2026-07-27 -- typed fit edges: a connector's own params derived ONCE from a host's cross-section
     # and written as ordinary deltas (see FitBinding's own docstring). Empty for every pre-existing design.
     fit_bindings: list[FitBinding] = Field(default_factory=list)
+    # 2026-08-04 -- named keep-out/keep-in volumes on a host instance (see Region's own docstring).
+    # Pure geometric annotation, empty for every pre-existing design.
+    regions: list[Region] = Field(default_factory=list)
     derived: DerivedSafety = Field(default_factory=DerivedSafety)
     review: Review = Field(default_factory=Review)

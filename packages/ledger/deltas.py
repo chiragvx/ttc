@@ -236,6 +236,34 @@ class JoinAnnotationOp(BaseModel):
     rationale: Optional[str] = None
 
 
+class RegionOp(BaseModel):
+    """Add/remove a typed keep-out/keep-in volume (`packages/ledger/schema.py::Region`) on a HOST
+    instance — the SAME precedent as `ConnectionOp`/`CouplingOp`/`FitOp`: a new field on
+    `DeltaProposal`, not a second tool. A Region is a pure geometric ANNOTATION (see `Region`'s own
+    docstring) — it derives nothing and nothing derives it, so unlike `CouplingOp`/`FitOp` this needs
+    no injected relation/fit catalog at apply time, only that `host_instance` is a real instance.
+
+    For `add_region`: `host_instance`, `kind`, `label`, `x_mm`/`y_mm`/`z_mm` (box center, host-local
+    frame), and `dx_mm`/`dy_mm`/`dz_mm` (box full extents — all three MUST be > 0) are REQUIRED. `id`
+    is optional (auto-generated if omitted, like add_connection). For `remove_region`: `id` is REQUIRED
+    (a real existing region id)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["add_region", "remove_region"]
+    id: Optional[str] = None                # required for remove_region; auto-generated for add
+    host_instance: Optional[str] = None     # required for add_region: the instance this box is local to
+    kind: Optional[Literal["keep_out", "keep_in"]] = None
+    label: Optional[str] = None             # required for add_region: e.g. "gear_train_clearance"
+    x_mm: Optional[float] = None            # required for add_region: box center, host-local frame
+    y_mm: Optional[float] = None
+    z_mm: Optional[float] = None
+    dx_mm: Optional[float] = None           # required for add_region: box full extents, must be > 0
+    dy_mm: Optional[float] = None
+    dz_mm: Optional[float] = None
+    rationale: Optional[str] = None
+
+
 class ScopePartProposal(BaseModel):
     """One row of a `ScopeProposal`'s part manifest — a proposed decomposition entry, not an op (no
     apply/outcome; see `ScopeProposal` docstring below). Flat, no nested dicts, same precedent as
@@ -322,6 +350,11 @@ class DeltaProposal(BaseModel):
                     "press_fit, welded, adhesive, or custom — for the bill of materials. Purely "
                     "semantic/documentation, never affects geometry. Requires the two parts to "
                     "already have a real connection_ops mate (references its id)")
+    region_ops: list[RegionOp] = Field(
+        default_factory=list,
+        description="add/remove a named keep-out/keep-in box on a HOST instance's own local frame "
+                    "(e.g. clearance a gear train needs to swing, a sensor's optical cone) — a pure "
+                    "geometric annotation, not itself a load or a derived dimension")
     scope_proposal: Optional[ScopeProposal] = Field(
         default=None,
         description="a structured part-manifest summary for a BIG or AMBIGUOUS multi-part ask ('make "

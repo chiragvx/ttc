@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { activateInstance, addInstance, analyze, analyzeStatus, applyFeatureOp as postFeatureOp, applyConnectionOp as postConnectionOp, applyCouplingOp as postCouplingOp, applyFitOp as postFitOp, applyJoinAnnotationOp as postJoinAnnotationOp, applyInstanceOp as postInstanceOp, createFile, exportCheck, fetchTelemetry, getLedger, getManufacturingManifest, getParams, getRequirements, getSubsystems, listFiles, listInstances, openFile, optimize, optimizeStatus, removeInstance, runValidate, setGoal, signoff, type FileRow, type InstanceRow, type ParamSpec, type RequirementsData, type SubsystemInfo } from "./api";
+import { activateInstance, addInstance, analyze, analyzeStatus, applyFeatureOp as postFeatureOp, applyConnectionOp as postConnectionOp, applyCouplingOp as postCouplingOp, applyFitOp as postFitOp, applyJoinAnnotationOp as postJoinAnnotationOp, applyRegionOp as postRegionOp, applyInstanceOp as postInstanceOp, createFile, exportCheck, fetchTelemetry, getLedger, getManufacturingManifest, getParams, getRequirements, getSubsystems, listFiles, listInstances, openFile, optimize, optimizeStatus, removeInstance, runValidate, setGoal, signoff, type FileRow, type InstanceRow, type ParamSpec, type RequirementsData, type SubsystemInfo } from "./api";
 import { AnalysisBar, type AnalysisState } from "./AnalysisBar";
 import { OptimizeResult, type OptimizeResultData } from "./OptimizeResult";
 import { Chat } from "./chat/Chat";
@@ -11,7 +11,7 @@ import { SettingsModal } from "./SettingsModal";
 import { Viewport } from "./Viewport";
 import { loadSettings, type LlmSettings } from "./settings";
 import { useCadSocket } from "./useCadSocket";
-import { type ConnectionOp, type ConnectionOpOutcome, type CouplingOp, type CouplingOpOutcome, type DeltaOutcome, type FeatureOp, type FeatureOpOutcome, type FitOp, type FitOpOutcome, type InstanceOp, type InstanceOpOutcome, type JoinAnnotationOp, type JoinAnnotationOpOutcome, type LedgerGraphData, type ManufacturingManifest, type ParameterDelta, type ServerMessage, type ValidationResult } from "./types";
+import { type ConnectionOp, type ConnectionOpOutcome, type CouplingOp, type CouplingOpOutcome, type DeltaOutcome, type FeatureOp, type FeatureOpOutcome, type FitOp, type FitOpOutcome, type InstanceOp, type InstanceOpOutcome, type JoinAnnotationOp, type JoinAnnotationOpOutcome, type LedgerGraphData, type ManufacturingManifest, type ParameterDelta, type RegionOp, type RegionOpOutcome, type ServerMessage, type ValidationResult } from "./types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -369,6 +369,23 @@ export default function App() {
     }
   };
 
+  // 2026-08-04: apply a typed keep-out/keep-in Region on a HOST instance's own local frame — a pure
+  // geometric ANNOTATION (see packages/ledger/schema.py::Region), like applyJoinAnnotationOp above,
+  // but UNLIKE it, a Region is read by the geometric self-check (packages/truth_plane/validate.py's
+  // "region" check flags another part intruding on a keep_out box) — so it still counts toward
+  // Chat.tsx's `appliedGeometry` gate that decides whether to re-run /validate after this turn (the
+  // keepout_mm lesson: a keep-out mechanism with no live consumer wired up is dead plumbing). Like
+  // applyFitOp/applyJoinAnnotationOp, does NOT refresh itself — the proposal loop calls onOpsApplied
+  // once for the batch.
+  const applyRegionOp = async (op: RegionOp): Promise<RegionOpOutcome> => {
+    try {
+      const resp = await postRegionOp(op);
+      return { op, status: resp.status, regionId: resp.region_id, message: resp.message };
+    } catch (e) {
+      return { op, status: "REJECTED", regionId: op.id ?? null, message: String(e) };
+    }
+  };
+
   // Called ONCE after a whole batch of feature_ops/instance_ops has finished applying (a full chat
   // proposal, or a single manual Undo click) — reloads the outliner/params/viewport/telemetry a
   // single time instead of once per op. 2026-07-04: a 25-part proposal was doing a full project
@@ -618,6 +635,7 @@ export default function App() {
                   onApplyCouplingOp={applyCouplingOp}
                   onApplyFitOp={applyFitOp}
                   onApplyJoinAnnotationOp={applyJoinAnnotationOp}
+                  onApplyRegionOp={applyRegionOp}
                   onValidate={(intent) => runValidate(intent, settings.apiKey, settings.visionModel || settings.model)}
                   onUserMessage={applyGoal} onHoverInstance={setHoveredInstanceId}
                   onOpenSettings={() => setSettingsOpen(true)} />

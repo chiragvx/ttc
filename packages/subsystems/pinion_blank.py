@@ -42,7 +42,11 @@ def _check(p) -> list[str]:
 
 PINION_BLANK = register_subsystem(Subsystem(
     name="pinion_blank",
-    description="Small gear blank (short axial length, hub optional) -- structural/mounting geometry (FDM/FFF or CNC)",
+    description="Small gear blank (short axial length, hub optional), NO TEETH -- structural/mounting "
+                 "geometry only, does NOT mesh with another gear (FDM/FFF or CNC). For a part that must "
+                 "actually MESH with another gear, use `spur_gear` instead -- it has real involute teeth "
+                 "and a working center-distance mate solver; this part's axial mount interfaces cannot "
+                 "position a mesh.",
     fragment=_FRAGMENT,
     disciplines=("structures", "manufacturing", "thermal"),
     params=[

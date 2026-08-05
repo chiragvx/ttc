@@ -38,9 +38,9 @@ from packages.subsystems import (
 from packages.subsystems.assembly_template import reconcile_all, reconcile_children
 from packages.subsystems.base import seed_instance
 from packages.couplings import RELATION_REGISTRY
-from packages.ledger.apply import apply_connection_op, apply_coupling_op, apply_delta, apply_feature_op, apply_fit_op, apply_instance_op, apply_join_annotation_op
+from packages.ledger.apply import apply_connection_op, apply_coupling_op, apply_delta, apply_feature_op, apply_fit_op, apply_instance_op, apply_join_annotation_op, apply_region_op
 from packages.ledger.bom import BOM, Component, ComponentKind, material
-from packages.ledger.deltas import ConnectionOp, CouplingOp, FeatureOp, FitOp, InstanceOp, JoinAnnotationOp, ParameterDelta
+from packages.ledger.deltas import ConnectionOp, CouplingOp, FeatureOp, FitOp, InstanceOp, JoinAnnotationOp, ParameterDelta, RegionOp
 from packages.ledger.events import EventLog
 from packages.ledger.derived_resolver import latest_verdict, ledger_with_derived
 from packages.ledger.fingerprint import fingerprint
@@ -476,6 +476,229 @@ def _coarse_structural_summary(ledger: MasterParametricLedger) -> "ValidationRep
     return ValidationReport(ok=ok, issues=issues, summary=summary)
 
 
+_GEAR_RATIO_RELATIONS = frozenset({"gear_ratio_speed_out", "gear_ratio_torque_out"})
+
+
+def _coarse_drivetrain_summary(ledger: MasterParametricLedger) -> "ValidationReport":
+    """2026-08-04 — the drivetrain analog of `_coarse_structural_summary` above: mirrors that
+    function's EXACT shape/posture (a `ValidationReport` of "info"/"warning" issues, NEVER "error",
+    so `ok` is always True — see that function's own `ok = not any(...)` line, copied verbatim below)
+    and its docstring's own live-repro rationale — a coupling can be wired correctly and STILL never
+    surface a single number back to the user if nothing ever reads what it derived. Here that would be
+    a gear-ratio kinematic coupling (`packages/couplings/relations.py::gear_ratio_speed_out` /
+    `gear_ratio_torque_out`, both 2026-08-04, both explicitly IDEAL/LOSSLESS per their own
+    descriptions) wired via `Coupling.target_param` (2026-08-04, `packages/ledger/schema.py`) onto a
+    gear instance's own stored speed/torque param, for a self-check comparing what the kinematics
+    PREDICT against what's actually stored there — read through `packages/couplings/resolve.py::
+    derived_param_value`, the generic per-param read path `derived_load_n` itself cannot serve (it is
+    hardwired to the ONE `force_n` structural-load output quantity; a gear ratio's rpm/torque outputs
+    are not a `force_n` load on anything, so a gear-ratio coupling is INVISIBLE to `derived_load_n`,
+    `_iter_coarse_cantilever_fs`, and `_coarse_structural_summary` above, all three, by construction).
+
+    DISPLAY-ONLY, exactly like `_coarse_structural_summary`: never writes `ledger.derived.*`, never
+    feeds `_all_gate_findings`/the export gate (contrast `_region_gate_findings` below, which does) —
+    this reuses the SAME crude/no-loss-model posture (`gear_ratio_speed_out`/`_torque_out`'s own
+    description strings state plainly they assume a rigid, no-slip, zero-backlash mesh; a real drive
+    train's actual output is somewhat less than this theoretical value), never a substitute for a real
+    grounded verdict.
+
+    A `target_param`-less gear-ratio coupling (wired but with nothing to self-check against — v1 has
+    no relation-chaining, per `packages/couplings/resolve.py`'s own module docstring, so an un-targeted
+    gear-ratio coupling currently derives a value nothing downstream consumes at all) is NOT silently
+    dropped — same "don't go silent about a real gap" discipline `_coarse_structural_summary`'s own
+    second pass (uncovered_relations) already holds itself to for a torque/moment coupling this coarse
+    check has no model for."""
+    from packages.couplings.resolve import derived_param_value
+    from packages.truth_plane.validate import ValidationIssue, ValidationReport
+
+    issues: list[ValidationIssue] = []
+    for c in ledger.couplings:
+        if c.relation not in _GEAR_RATIO_RELATIONS:
+            continue
+        if c.target_param is None:
+            issues.append(ValidationIssue(
+                check="drivetrain", severity="info", instances=[c.target_instance],
+                message=f"{c.target_instance}: gear-ratio coupling {c.id} ({c.relation}) is wired but "
+                        f"has no target_param to self-check against — not silently ignored, just not "
+                        f"comparable to anything stored yet. Set target_param to the instance's own "
+                        f"rpm/torque param to get a live self-check.",
+            ))
+            continue
+        value, reason = derived_param_value(ledger, c.target_instance, c.target_param)
+        if reason is not None:
+            issues.append(ValidationIssue(
+                check="drivetrain", severity="info", instances=[c.target_instance],
+                message=f"{c.target_instance}: gear-ratio coupling {c.id} ({c.relation}) targeting "
+                        f"{c.target_param!r} could not be resolved: {reason}. This is a CRUDE "
+                        f"kinematic self-check, not a grounded verdict.",
+            ))
+            continue
+        if value is None:
+            continue  # defensive -- the filter above guarantees a matching coupling, so this shouldn't
+                       # happen, but derived_param_value's own (None, None) "no coupling" contract is
+                       # honored literally rather than assumed away.
+        inst = ledger.instances.get(c.target_instance)
+        stored_pd = inst.params.get(c.target_param) if inst is not None else None
+        if stored_pd is None:
+            issues.append(ValidationIssue(
+                check="drivetrain", severity="info", instances=[c.target_instance],
+                message=f"{c.target_instance}: gear-ratio coupling {c.id} ({c.relation}) computes "
+                        f"{c.target_param!r} ≈ {value:.3g}, but {c.target_instance} has no such param "
+                        f"stored to compare against.",
+            ))
+            continue
+        stored = stored_pd.value
+        mismatch = abs(stored - value) > max(1e-6, 0.01 * abs(value))  # >1% relative drift (or 1e-6 abs)
+        issues.append(ValidationIssue(
+            check="drivetrain", severity="warning" if mismatch else "info", instances=[c.target_instance],
+            message=(f"{c.target_instance}: gear-ratio coupling {c.id} ({c.relation}, IDEAL/LOSSLESS — "
+                     f"no mesh-friction/backlash losses modeled) computes {c.target_param!r} ≈ "
+                     f"{value:.3g}, ledger stores {stored:.3g}"
+                     + ("" if not mismatch else " — MISMATCH, review the stored value or the wired "
+                                                 "tooth counts") +
+                     ". This is a CRUDE kinematic estimate, not a grounded verdict."),
+        ))
+
+    ok = not any(i.severity == "error" for i in issues)  # this check never emits "error" — always ok
+    summary = "no gear-equipped instances to estimate" if not issues else \
+        f"coarse drivetrain estimate for {len(issues)} coupling(s)"
+    return ValidationReport(ok=ok, issues=issues, summary=summary)
+
+
+def _design_report_markdown(ledger: MasterParametricLedger, title: str) -> str:
+    """2026-08-04 — a topic-organized, single-document design report (Transmission / Fasteners /
+    Keep-out / Coarse structural), the honest answer to a real competitor comparison this session did
+    live: a Gemini-generated "blueprint" for the identical prompt stated a bare, undisclosed
+    'Calculated FoS Torque: 1.88 — SAFE. RUN AT FULL TORQUE' with no derivation shown anywhere — the
+    textbook fabricated-green-light Inversion #1 exists to prevent. This function is ONLY a
+    presentation layer over data that ALREADY exists and is ALREADY grounded (Coupling resolution via
+    `resolve_couplings`, FitBinding's own stored derived params, Region, the two coarse
+    ValidationReport oracles above) — it computes nothing new and asserts nothing the underlying
+    ledger doesn't already contain. Every section that has nothing to report says so plainly (never
+    silently omitted, never padded to look complete) — matching this session's own citation-honesty
+    discipline for the research docs, applied here to a generated report instead of a web search."""
+    from datetime import datetime, timezone
+    from packages.couplings.resolve import resolve_couplings
+
+    lines: list[str] = [f"# {title}", "", f"Generated {datetime.now(timezone.utc).isoformat()}", ""]
+
+    # --- Part manifest --------------------------------------------------------------------------
+    lines += ["## Parts", ""]
+    if not ledger.instances:
+        lines += ["No parts in this file yet.", ""]
+    else:
+        for iid, inst in sorted(ledger.instances.items()):
+            lines.append(f"- `{iid}` — {inst.subsystem_type}")
+        lines.append("")
+
+    # --- Transmission (real coupling-resolved values, never hand-computed here) -----------------
+    lines += ["## Transmission", ""]
+    results = resolve_couplings(ledger)
+    if not results:
+        lines += ["No load/kinematic couplings wired — nothing derived to report.", ""]
+    else:
+        for r in results:
+            if r.is_known:
+                lines.append(f"- `{r.coupling_id}` → `{r.target_instance}`: **{r.relation}** = "
+                             f"{r.value:.4g}{' ' + r.unit if r.unit else ''}")
+            else:
+                lines.append(f"- `{r.coupling_id}` → `{r.target_instance}`: **{r.relation}** = "
+                             f"unknown — {r.reason}")
+        lines.append("")
+        lines.append("_All gear-ratio relations are stated ideal/lossless by their own registered "
+                     "description — real efficiency is lower. This is a graph readout, not a new "
+                     "calculation._")
+        lines.append("")
+
+    # --- Fasteners / fitted dimensions (real FitBinding data, never re-derived here) ------------
+    lines += ["## Fasteners & fitted dimensions", ""]
+    if not ledger.fit_bindings:
+        lines += ["No fitted-dimension bindings wired — nothing derived to report.", ""]
+    else:
+        for fb in ledger.fit_bindings:
+            dims = ", ".join(f"`{i.connector_param}`" for i in fb.inputs)
+            clearance_word = "clearance" if fb.clearance_mm >= 0 else "interference"
+            lines.append(f"- `{fb.connector_instance}` fitted to `{fb.host_instance}` ({fb.kind}): "
+                         f"{dims} derived as host value {'+' if fb.clearance_mm >= 0 else ''}"
+                         f"{fb.clearance_mm:g} mm ({clearance_word})")
+        lines.append("")
+
+    # --- Keep-out / keep-in corridors (real Region data) -----------------------------------------
+    lines += ["## Reserved regions", ""]
+    if not ledger.regions:
+        lines += ["No keep-out/keep-in regions defined.", ""]
+    else:
+        for reg in ledger.regions:
+            lines.append(f"- `{reg.label}` ({reg.kind}) on `{reg.host_instance}`: "
+                         f"{reg.dx_mm:g}×{reg.dy_mm:g}×{reg.dz_mm:g} mm")
+        lines.append("")
+
+    # --- Coarse structural / drivetrain estimate — ALWAYS advisory language, NEVER a verdict -----
+    lines += ["## Coarse self-check (advisory only — NOT a certified result)", ""]
+    structural = _coarse_structural_summary(ledger)
+    drivetrain = _coarse_drivetrain_summary(ledger)
+    for label, report in (("Structural", structural), ("Drivetrain", drivetrain)):
+        lines.append(f"**{label}**: {report.summary}")
+        for issue in report.issues:
+            lines.append(f"- {issue.message}")
+        lines.append("")
+    lines.append(
+        "This section is a coarse, closed-form estimate — never a substitute for a real solver run, "
+        "and never a safety verdict. A real factor of safety only exists after `/analyze` converges; "
+        "until then it is `unknown`, and export stays blocked on it. Nothing in this report should be "
+        "read as \"safe to run.\""
+    )
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def _region_gate_findings(ledger, instance_id: str | None = None) -> list[str]:
+    """Export-gate finding for a genuinely INVALID `Region` (packages/ledger/schema.py) reference —
+    NOT the physical "another part's geometry intrudes on a keep_out box" case, which is deliberately
+    kept ADVISORY-ONLY (see the DECISION note below); this checks the narrower, unambiguous-invalidity
+    case: a `Region` whose `host_instance` no longer exists (e.g. the host instance was removed via
+    `/instance_ops` AFTER the region was added — `apply_region_op` itself already refuses to CREATE a
+    region against an unknown host, but nothing previously caught one going stale afterward). Same
+    "a genuinely broken reference blocks, doesn't silently pass" precedent
+    `packages/subsystems/placement.py::connection_issues` already established for a dangling
+    Connection endpoint — folded into `_all_gate_findings` below exactly the same way (`r3 =
+    connection_issues(...)`, reasons-only, no `unknowns` counterpart, since an orphaned reference is a
+    deterministic yes/no, never an "unknown" pending-solver-result case).
+
+    DECISION (explicitly required by this task): should a keep_out volume ACTUALLY being physically
+    violated by another instance's placed geometry block export? NO — that check is already built,
+    live, and advisory-only: `packages/truth_plane/validate.py::validate_geometry` now emits a
+    `ValidationIssue(check="region", severity="warning"/"info")` for exactly that case (a keep_out box
+    another instance's solid intrudes on; a keep_in box is informational-only there), consumed by
+    `/validate`, the SAME never-blocks-export posture the pre-existing `"interference"` self-check
+    finding already holds in that same file. `packages/truth_plane/validate.py` is NOT owned by this
+    change (a different file in this session's ownership split) — this function deliberately does NOT
+    duplicate that physical-overlap check; re-implementing it here folded into `_all_gate_findings`
+    would be architecturally UNABLE to stay advisory-only regardless of intent, since
+    `evaluate_export_gates` (packages/ledger/gates.py) has no non-blocking channel at all — anything
+    `_all_gate_findings` returns lands directly in `GateResult.reasons`/`.unknowns`, and `reasons`
+    non-empty ALWAYS flips `EXPORT_BLOCKED` (see that module's own `if not reasons` line). So: the
+    keep_out-violation self-check stays exactly where it already correctly lives (advisory, via
+    `/validate`); this function instead gives `_all_gate_findings` a genuinely different, correctly-
+    blocking job — catching stale/orphaned region metadata, a real data-integrity defect regardless of
+    what's advisory about the geometry itself.
+
+    `instance_id` (default None -> every region) scopes to regions HOSTED BY that instance, matching
+    every other gate here's own per-instance scoping (foundations-audit H3, 2026-07-21) — note this
+    means an orphaned region (host already gone) is only caught when scanning the WHOLE ledger
+    (`instance_id=None`), never via a surviving instance's own scoped export check, since by
+    definition no surviving instance can be its host any more; the whole-ledger scan path
+    (`_export_gate`'s `len(led.instances) <= 1` fallback, and any direct `instance_id=None` caller)
+    still reaches it."""
+    regions = ledger.regions if instance_id is None else [
+        r for r in ledger.regions if r.host_instance == instance_id]
+    return [
+        f"region {r.id} ({r.label!r}) references host instance {r.host_instance!r}, which no longer exists"
+        for r in regions if r.host_instance not in ledger.instances
+    ]
+
+
 def _all_gate_findings(ledger, instance_id: str | None = None):
     """Combined export-gate `extra_findings`: discipline gates (thermal, …) PLUS Phase-2 coupling gates
     (an unknown derived load blocks, same as an unknown FS) PLUS Phase-3 connection-graph topology
@@ -498,7 +721,13 @@ def _all_gate_findings(ledger, instance_id: str | None = None):
     Discipline findings (all_discipline_findings) stay whole-ledger: material/thermal state is currently
     ONE global value for the whole project, not per-instance (a separate, known limitation), so there is
     no narrower scope to apply there yet. `instance_id=None` preserves the exact pre-existing whole-ledger
-    behavior for any caller that doesn't have a specific instance in mind."""
+    behavior for any caller that doesn't have a specific instance in mind.
+
+    2026-08-04: PLUS `_region_gate_findings` (r6, reasons-only, no u6) — an orphaned `Region` (host
+    instance removed after the region was added). See that function's own DECISION note for why a
+    keep_out volume being physically VIOLATED is deliberately NOT also folded in here (it stays
+    advisory-only, already live via `/validate`'s `validate_geometry`) — only the orphaned-reference
+    case blocks."""
     from packages.couplings import coupling_gate_findings
     from packages.subsystems.fit import fit_gate_findings
     from packages.subsystems.placement import connection_issues
@@ -507,7 +736,8 @@ def _all_gate_findings(ledger, instance_id: str | None = None):
     r3 = connection_issues(ledger, instance_id)
     r4 = _gross_error_findings(ledger, instance_id)
     r5, u5 = fit_gate_findings(ledger, instance_id)
-    return r1 + r2 + r3 + r4 + r5, u1 + u2 + u5
+    r6 = _region_gate_findings(ledger, instance_id)
+    return r1 + r2 + r3 + r4 + r5 + r6, u1 + u2 + u5
 
 
 def _export_gate(state, instance_id: str | None):
@@ -1264,6 +1494,19 @@ def create_app() -> FastAPI:
                                "disciplines": list(s.applicable_disciplines)}
                               for s in SUBSYSTEM_REGISTRY.values()]}
 
+    @router.get("/model_capabilities")
+    @_rest_error_guard
+    def model_capabilities(model: str | None = None):
+        # Vision-in-the-loop (2026-08-05): lets the frontend ask "can the model I've configured
+        # actually SEE the image I'm about to attach to this turn?" before it bothers building a
+        # multimodal message. A caller with no model configured yet (fresh session, Settings not
+        # filled in) is a normal case, not a bug -- short-circuit to {"vision": False} rather than
+        # hitting the registry (or _rest_error_guard) over an empty/missing query param.
+        if not model:
+            return {"vision": False}
+        from packages.agents.openrouter_provider import model_supports_vision
+        return {"vision": model_supports_vision(model)}
+
     # --- Files (2026-07-04) — a session can hold several independent design files, each with its
     # own parts/goal/history (think browser tabs). Replaces the old switch_subsystem/project-reset
     # mechanic entirely: picking a part type was never a separate action to begin with (it's just
@@ -1567,6 +1810,29 @@ def create_app() -> FastAPI:
             "status": outcome.status.value,
             "join_id": outcome.join_id,
             "annotation": outcome.annotation.model_dump(mode="json") if outcome.annotation is not None else None,
+            "message": outcome.message,
+        }
+
+    @router.post("/region_ops")
+    @_rest_error_guard
+    def create_region_op(op: RegionOp):
+        # 2026-08-04: add/remove a typed keep-out/keep-in box on a HOST instance's own local frame --
+        # a pure geometric ANNOTATION (packages/ledger/schema.py::Region's own docstring), mirroring
+        # /connection_ops's exact shape above. apply_region_op needs no injected callable at all
+        # (unlike /connection_ops's interfaces_of / /coupling_ops's inputs_of / /fit_ops's
+        # compute_fit+is_managed_child+check_invariants) -- `host_instance` is checked directly
+        # against `ledger.instances`, already in scope in that registry-free package.
+        _, outcome = apply_region_op(state.ledger(), op)
+        if outcome.changed:
+            if op.op == "add_region":
+                state.log.append_region_added(outcome.region, actor="user", ts=_TS)
+            else:
+                state.log.append_region_removed(outcome.region_id, actor="user", ts=_TS)
+        return {
+            "ok": outcome.changed,
+            "status": outcome.status.value,
+            "region_id": outcome.region_id,
+            "region": outcome.region.model_dump(mode="json") if outcome.region is not None else None,
             "message": outcome.message,
         }
 
@@ -1991,6 +2257,7 @@ def create_app() -> FastAPI:
                                     "coupling_ops": [co.model_dump(mode="json") for co in payload.coupling_ops],
                                     "fit_ops": [fo.model_dump(mode="json") for fo in payload.fit_ops],
                                     "join_annotation_ops": [jo.model_dump(mode="json") for jo in payload.join_annotation_ops],
+                                    "region_ops": [ro.model_dump(mode="json") for ro in payload.region_ops],
                                     "scope_proposal": payload.scope_proposal.model_dump(mode="json") if payload.scope_proposal else None,
                                     "clarification": payload.request_clarification,
                                     "suggestions": payload.suggestions})
@@ -2107,6 +2374,19 @@ def create_app() -> FastAPI:
         return Response(content=png, media_type="image/png",
                         headers={"Cache-Control": "no-store"})
 
+    @router.get("/report")
+    @_rest_error_guard
+    async def report():
+        # Topic-organized design report (Transmission/Fasteners/Regions/coarse self-check) — pure
+        # presentation over data already in the ledger, no OCCT, no LLM, cheap enough for the hot
+        # path. See _design_report_markdown's own docstring for why this exists.
+        led = state.ledger()
+        inst = state.active_instance()
+        title = "Design report" if inst is None else f"Design report — {get_subsystem(inst.subsystem_type).name}"
+        markdown = _design_report_markdown(led, title)
+        return Response(content=markdown.encode("utf-8"), media_type="text/markdown",
+                        headers={"Cache-Control": "no-store"})
+
     @router.post("/validate")
     @_rest_error_guard
     async def validate(req: ValidateRequest):
@@ -2125,6 +2405,10 @@ def create_app() -> FastAPI:
         # rough one. Cheap closed-form math (same tier as the geometric check above, not the real
         # async solver), so it belongs on the hot path here.
         structural = await run_in_threadpool(_coarse_structural_summary, led)
+        # Drivetrain coarse estimate (2026-08-04) -- see _coarse_drivetrain_summary's own docstring:
+        # same dead-plumbing risk _coarse_structural_summary was built to avoid (a coupling can be
+        # wired and STILL never surface a number if nothing ever reads what it derived).
+        drivetrain = await run_in_threadpool(_coarse_drivetrain_summary, led)
         visual = None
         vision_on = bool(req.vision_model) or vision_model_configured()
         if vision_on:
@@ -2134,6 +2418,7 @@ def create_app() -> FastAPI:
             "ok": geo.ok and (visual.ok if visual is not None else True),
             "geometric": geo.model_dump(),
             "structural": structural.model_dump(),
+            "drivetrain": drivetrain.model_dump(),
             "visual": visual.model_dump() if visual is not None else None,
             "vision_enabled": vision_on,
             "vision_ran": visual is not None,

@@ -89,5 +89,24 @@ export function summarizeOutcomes(m: ChatMessage): string | null {
     });
   }
 
+  // 2026-08-04: region outcomes MUST reach the model too, symmetric with connection/coupling/fit/
+  // instance/feature ops above — otherwise a REJECTED region (e.g. an unknown host_instance, or
+  // non-positive extents) never gets fed back and the model re-proposes the identical wrong region
+  // next turn, and an APPLIED region's minted region_id is never learned so it can't be targeted by a
+  // later remove_region.
+  if (m.regionOps) {
+    m.regionOps.forEach((op, i) => {
+      const outcome = m.regionOpOutcomes?.[i];
+      if (!outcome) return;
+      const what = op.op === "add_region"
+        ? `region ${op.host_instance}: ${op.label} (${op.kind})`
+        : `remove_region ${op.id}`;
+      let entry = `${what} -> ${outcome.status}`;
+      if (outcome.status === "APPLIED" && outcome.regionId) entry += ` (region_id=${outcome.regionId})`;
+      if (outcome.message && outcome.status !== "APPLIED") entry += `: ${outcome.message}`;
+      parts.push(entry);
+    });
+  }
+
   return parts.length > 0 ? `[outcomes: ${parts.join("; ")}]` : null;
 }
