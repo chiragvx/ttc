@@ -38,15 +38,16 @@ from packages.subsystems import (
 from packages.subsystems.assembly_template import reconcile_all, reconcile_children
 from packages.subsystems.base import seed_instance
 from packages.couplings import RELATION_REGISTRY
-from packages.ledger.apply import apply_connection_op, apply_coupling_op, apply_delta, apply_feature_op, apply_fit_op, apply_instance_op, apply_join_annotation_op, apply_region_op
+from packages.ledger.apply import ApplyStatus, apply_connection_op, apply_coupling_op, apply_delta, apply_envelope_op, apply_feature_op, apply_fit_op, apply_instance_op, apply_join_annotation_op, apply_region_op
 from packages.ledger.bom import BOM, Component, ComponentKind, material
-from packages.ledger.deltas import ConnectionOp, CouplingOp, FeatureOp, FitOp, InstanceOp, JoinAnnotationOp, ParameterDelta, RegionOp
+from packages.ledger.deltas import ConnectionOp, CouplingOp, EnvelopeOp, FeatureOp, FitOp, InstanceOp, JoinAnnotationOp, ParameterDelta, RegionOp
 from packages.ledger.events import EventLog
 from packages.ledger.derived_resolver import latest_verdict, ledger_with_derived
 from packages.ledger.fingerprint import fingerprint
 from packages.ledger.gates import ExportStatus, GateResult, evaluate_export_gates
 from packages.ledger.requirements import VerificationMatrix
 from packages.truth_plane.analysis import analyze_in_subprocess, optimize_in_subprocess  # module-level for monkeypatch
+from packages.subsystems.envelope import compute_envelope, housing_alignment_transform  # module-level for monkeypatch, same rationale
 from packages.truth_plane.verdict_store import InMemoryJobStatusStore, InMemoryVerdictStore
 from packages.ledger.parameter import LockState, ParameterDef
 from packages.ledger.schema import (
@@ -699,6 +700,39 @@ def _region_gate_findings(ledger, instance_id: str | None = None) -> list[str]:
     ]
 
 
+def _envelope_gate_findings(ledger, instance_id: str | None = None) -> tuple[list[str], list[str]]:
+    """`(reasons, unknowns)` for the export gate — a thin wrapper around `packages/truth_plane/
+    validate.py::envelope_missing_findings` (2026-08-06, gearbox-housing-generation initiative Phase
+    4): a housing-family instance (declares `envelope_socket`, Phase 2) whose `wraps` is empty or
+    names an instance id that no longer exists in the ledger. UNGROUNDED, not just incomplete — "a
+    housing was added before the group it's supposed to wrap was even placed" is exactly the
+    fabricated-green-light-shaped gap Inversion #1 already forbids elsewhere (CLAUDE.md: "a missing
+    safety/construction input blocks export — never a fabricated green light"), so this is wired the
+    SAME way `fit_gate_findings`/`_region_gate_findings` are below — every message lands in `reasons`
+    (which unconditionally flips `evaluate_export_gates` to EXPORT_BLOCKED, packages/ledger/gates.py's
+    own `if not reasons` line), plus the housing's own id in `unknowns` (mirroring `fit_gate_findings`'s
+    own `unknowns.append(f"fit:{binding.id}")` shape — a construction input that's missing, same
+    category as an unresolved fit or an unknown safety scalar).
+
+    Reuses `envelope_missing_findings` itself rather than re-deriving the same detection independently
+    (unlike `_region_gate_findings`, which has no advisory-side counterpart to share with at all) — so
+    the self-check UI (`validate_geometry`'s `envelope_missing` issue) and the actual export block can
+    never independently drift on "what counts as missing." DRIFT (wraps fully resolves, but the
+    housing's stored dims are merely stale) is deliberately NOT included here — that stays advisory-
+    only via `/validate`'s `envelope_drift` issue, never export-blocking, mirroring `fit_gate_findings`/
+    `fit_drift_findings`'s own dangling-vs-drift split one layer out.
+
+    `instance_id` (default None -> every housing) scopes to ONE housing, matching every other gate
+    here's own per-instance scoping (foundations-audit H3, 2026-07-21)."""
+    from packages.truth_plane.validate import envelope_missing_findings
+    reasons: list[str] = []
+    unknowns: list[str] = []
+    for iid, msg in envelope_missing_findings(ledger, instance_id):
+        reasons.append(msg)
+        unknowns.append(f"envelope:{iid}")
+    return reasons, unknowns
+
+
 def _all_gate_findings(ledger, instance_id: str | None = None):
     """Combined export-gate `extra_findings`: discipline gates (thermal, …) PLUS Phase-2 coupling gates
     (an unknown derived load blocks, same as an unknown FS) PLUS Phase-3 connection-graph topology
@@ -727,7 +761,15 @@ def _all_gate_findings(ledger, instance_id: str | None = None):
     instance removed after the region was added). See that function's own DECISION note for why a
     keep_out volume being physically VIOLATED is deliberately NOT also folded in here (it stays
     advisory-only, already live via `/validate`'s `validate_geometry`) — only the orphaned-reference
-    case blocks."""
+    case blocks.
+
+    2026-08-06 (gearbox-housing-generation initiative Phase 4): PLUS `_envelope_gate_findings` (r7/u7)
+    — a housing-family instance whose `wraps` is empty or dangling. See that function's own docstring
+    for why this blocks (Inversion #1: an ungrounded housing is a missing construction input, never a
+    fabricated green light) and why envelope DRIFT (stored dims merely stale) is deliberately NOT
+    folded in here either — same advisory-only posture `_region_gate_findings`' own keep_out-violation
+    case holds, and the same dangling-vs-drift split `fit_gate_findings`/`fit_drift_findings` already
+    established one layer in."""
     from packages.couplings import coupling_gate_findings
     from packages.subsystems.fit import fit_gate_findings
     from packages.subsystems.placement import connection_issues
@@ -737,7 +779,8 @@ def _all_gate_findings(ledger, instance_id: str | None = None):
     r4 = _gross_error_findings(ledger, instance_id)
     r5, u5 = fit_gate_findings(ledger, instance_id)
     r6 = _region_gate_findings(ledger, instance_id)
-    return r1 + r2 + r3 + r4 + r5 + r6, u1 + u2 + u5
+    r7, u7 = _envelope_gate_findings(ledger, instance_id)
+    return r1 + r2 + r3 + r4 + r5 + r6 + r7, u1 + u2 + u5 + u7
 
 
 def _export_gate(state, instance_id: str | None):
@@ -1658,11 +1701,18 @@ def create_app() -> FastAPI:
         def seed_defaults(subsystem_type: str, instance_id: str, parent_id):
             return seed_instance(get_subsystem_model(subsystem_type), instance_id, parent_id=parent_id)
 
-        _, outcome = apply_instance_op(
+        new_led, outcome = apply_instance_op(
             led, op, frozenset(SUBSYSTEM_REGISTRY),
             seed_defaults=seed_defaults, reconcile=reconcile_children,
         )
         if outcome.changed:
+            # Explicit `elif` per op value (2026-08-05: was `if add / elif move / else <assumed
+            # remove>`) — that bare `else` used to unconditionally run remove_instance's cascade-
+            # removal EVENT LOGGING for anything that wasn't add/move. `clear_transform` (below) is a
+            # NEW op value that changed nothing about connections/couplings/instances-removed, so
+            # letting it fall into that `else` would have logged bogus CONNECTION_REMOVED /
+            # COUPLING_REMOVED / INSTANCE_REMOVED events and wrongly cleared `active_instance_id`
+            # bookkeeping for an instance that was never actually removed.
             if op.op == "add_instance":
                 state.log.append_instance_added(outcome.instance, actor="user", ts=_TS)
                 with state.active_file().lock:  # guards this write, same as POST /instances above
@@ -1674,18 +1724,50 @@ def create_app() -> FastAPI:
                 # logic that already ran.
                 state.log.append_instance_moved(outcome.instance_id, outcome.instance.transform,
                                                 actor="user", ts=_TS)
-            else:
-                # persist the cascade-removed connections and couplings FIRST (a dangling connection/
-                # coupling resurrecting on an id-reused new part is exactly what this prevents —
-                # 2026-07-19 review), then the instance removal itself. `transaction()` (2026-07-21):
-                # these are ONE logical removal expressed as several events — without it, a crash
-                # between two of these appends could leave a partial removal durable (e.g. the instance
-                # gone but a companion connection-removed event never landing, or vice versa).
+            elif op.op == "clear_transform":
+                # The escape hatch from the "two mated instances both carry an explicit transform"
+                # self-check trap: revert this instance to pure mate-based auto-layout instead of
+                # forcing a destructive remove+re-add. Mirrors `move_instance`'s own
+                # `append_instance_moved` call as closely as possible — same instance_id-keyed FACT
+                # shape — but there is no new Transform value to persist (the whole point is that one
+                # no longer exists after the clear), so this logs the sibling
+                # INSTANCE_TRANSFORM_CLEARED event instead of reusing INSTANCE_MOVED with a fabricated
+                # transform.
+                state.log.append_instance_transform_cleared(outcome.instance_id, actor="user", ts=_TS)
+            elif op.op == "remove_instance":
+                # persist the cascade-removed connections/couplings/regions/fit_bindings/
+                # join_annotations FIRST (a dangling relation resurrecting on an id-reused new part is
+                # exactly what this prevents — 2026-07-19 review, extended 2026-08-05 to the region/
+                # fit_binding/join_annotation cascades apply_instance_op ALSO computes: leaving those
+                # three off this list left them live in `state.ledger()` — which is ALWAYS the replayed
+                # event log, never separately-mutated state — even though the REST response already
+                # reported them as removed), then the instance removal itself. `transaction()`
+                # (2026-07-21): these are ONE logical removal expressed as several events — without it,
+                # a crash between two of these appends could leave a partial removal durable (e.g. the
+                # instance gone but a companion connection-removed event never landing, or vice versa).
                 with state.log.transaction():
                     for cid in outcome.removed_connection_ids:
                         state.log.append_connection_removed(cid, actor="user", ts=_TS)
                     for coupling_id in outcome.removed_coupling_ids:
                         state.log.append_coupling_removed(coupling_id, actor="user", ts=_TS)
+                    for region_id in outcome.removed_region_ids:
+                        state.log.append_region_removed(region_id, actor="user", ts=_TS)
+                    for fit_id in outcome.removed_fit_binding_ids:
+                        state.log.append_fit_unbound(fit_id, actor="user", ts=_TS)
+                    for join_id in outcome.removed_join_annotation_ids:
+                        state.log.append_join_annotation_removed(join_id, actor="user", ts=_TS)
+                    # 2026-08-06 fix (R2 follow-up, surfaced-but-not-fixed during the Phase 3 envelope
+                    # review): the sixth cascade -- a housing's `wraps` list getting the removed
+                    # instance id scrubbed out -- was computed correctly by apply_instance_op and
+                    # surfaced in the REST response, but never persisted, so it didn't survive a
+                    # reload/replay (the exact "stale reference silently reattaches to a reused id"
+                    # hazard the scrub itself exists to prevent, just one step further down). Reuses
+                    # ENVELOPE_WRAPPED (not a new EventKind) since scrubbing IS a re-SET of `wraps` to
+                    # its new, shorter list -- same semantics `wrap_group` already gives that event.
+                    # `new_led` (not `led`) so the persisted list reflects the post-scrub state.
+                    for housing_id in outcome.scrubbed_wraps_instance_ids:
+                        state.log.append_envelope_wrapped(
+                            housing_id, new_led.instances[housing_id].wraps, actor="user", ts=_TS)
                     state.log.append_instance_removed(outcome.instance_id, actor="user", ts=_TS)
                 with state.active_file().lock:  # the check-then-write below is one read-modify-write step
                     if state.active_instance_id == outcome.instance_id:  # it just got removed -> fall
@@ -1698,6 +1780,23 @@ def create_app() -> FastAPI:
             "instance": outcome.instance.model_dump(mode="json") if outcome.instance is not None else None,
             "previous_instance": (outcome.previous_instance.model_dump(mode="json")
                                   if outcome.previous_instance is not None else None),
+            # Cascade ids the model would otherwise never see (2026-08-05 fix — root cause #3 of the
+            # cascade-visibility bug): apply_instance_op already computes all five on remove_instance;
+            # every other op leaves them at their dataclass default `[]`. Surfacing them here is what
+            # lets the copilot notice a remove_instance call just destroyed N couplings/a Region/a
+            # FitBinding/a JoinAnnotation and re-derive them, instead of the destruction being silently
+            # visible only in the (unreturned) event log.
+            "removed_connection_ids": outcome.removed_connection_ids,
+            "removed_coupling_ids": outcome.removed_coupling_ids,
+            "removed_region_ids": outcome.removed_region_ids,
+            "removed_fit_binding_ids": outcome.removed_fit_binding_ids,
+            "removed_join_annotation_ids": outcome.removed_join_annotation_ids,
+            # Sixth cascade output, same rationale as the five above but NOT a "removed_*" list
+            # (2026-08-06 fix — R2 review): remove_instance ONLY, ids of housing instances whose
+            # `wraps` just got the removed instance id scrubbed out of it. Without this, a caller
+            # that just removed an instance has no way to learn from the REST response alone that a
+            # housing's `wraps` was quietly rewritten as a side effect.
+            "scrubbed_wraps_instance_ids": outcome.scrubbed_wraps_instance_ids,
             "message": outcome.message,
         }
 
@@ -1718,12 +1817,28 @@ def create_app() -> FastAPI:
             if op.op == "add_connection":
                 state.log.append_connection_added(outcome.connection, actor="user", ts=_TS)
             else:
-                state.log.append_connection_removed(outcome.connection_id, actor="user", ts=_TS)
+                # Same cascade-persistence gap as remove_instance above, one level down: apply_connection_op
+                # already computes `removed_join_annotation_ids` (JoinAnnotations that referenced this
+                # connection's id) and the JSON response below already reports them as removed — but until
+                # this fix, only the connection-removed event was ever appended, so the cascaded
+                # join_annotation removals never made it into the durable log. Since `_next_connection_id`
+                # reuses the lowest-free id (same hazard the remove_instance cascade comment describes), a
+                # future connection landing back on this freed id would silently inherit the stale
+                # JoinAnnotation on replay. `transaction()` for the same reason as remove_instance: these are
+                # one logical removal, so a crash mid-way must not leave a partial cascade durable.
+                with state.log.transaction():
+                    for join_id in outcome.removed_join_annotation_ids:
+                        state.log.append_join_annotation_removed(join_id, actor="user", ts=_TS)
+                    state.log.append_connection_removed(outcome.connection_id, actor="user", ts=_TS)
         return {
             "ok": outcome.changed,
             "status": outcome.status.value,
             "connection_id": outcome.connection_id,
             "connection": outcome.connection.model_dump(mode="json") if outcome.connection is not None else None,
+            # Same cascade-visibility fix as create_instance_op above: remove_connection ONLY (default
+            # `[]` for add_connection) — the JoinAnnotations cascade-removed because they referenced
+            # this connection's id.
+            "removed_join_annotation_ids": outcome.removed_join_annotation_ids,
             "message": outcome.message,
         }
 
@@ -1835,6 +1950,252 @@ def create_app() -> FastAPI:
             "region": outcome.region.model_dump(mode="json") if outcome.region is not None else None,
             "message": outcome.message,
         }
+
+    # --- /envelope_ops + /envelope/status (2026-08-06, gearbox-housing-generation initiative Phase 3)
+    # ---------------------------------------------------------------------------------------------
+    # wrap/unwrap/resync a HOUSING instance's `wraps` list (packages/ledger/schema.py::Instance.wraps,
+    # Phase 2) + trigger the REAL derived-dimension compute (packages/subsystems/envelope.py::
+    # compute_envelope — genuine multi-instance OCCT work: group_world_bbox/group_convex_hull) the SAME
+    # REDIS_URL-gated queued-vs-synchronous way /analyze already does (packages/truth_plane/jobs.py::
+    # run_envelope_derivation mirrors run_fs_analysis's exact actor shape).
+    #
+    # PERSISTENCE (2026-08-06 repair — R1 CONFIRMED, high): events.py originally shipped with no
+    # EventKind for an Instance.wraps change — apply_envelope_op's wrap_group/unwrap_group mutation was
+    # real (packages/ledger/apply.py) but nothing durably persisted it the way append_region_added/
+    # append_connection_added/... persist every OTHER *_ops route's own outcome, so it never survived a
+    # fresh ledger reload (a later request, OR the queued path's own worker-process reload below —
+    # which meant a queued derivation against a real wrap_group'd housing failed 100% of the time in
+    # this project's own docker-compose deployment, since the worker's `_load_project_ledger` folds the
+    # SAME durable log this route now writes to). Same shape of gap /region_ops itself originally
+    # shipped with — see tests/backend/test_region_transport.py's own module docstring — closed the
+    # same way: `EventKind.ENVELOPE_WRAPPED`/`ENVELOPE_UNWRAPPED` + `append_envelope_wrapped`/
+    # `append_envelope_unwrapped` (packages/ledger/events.py), called immediately below, right after
+    # `apply_envelope_op`, mirroring /region_ops's own call shape exactly. The DERIVED DIMENSIONS
+    # themselves were never affected by this gap either way — they are ordinary numeric instance
+    # params, written through the SAME already-durable PARAMETER_MUTATION path any hand-typed edit uses
+    # (packages/ledger/apply.py::apply_fit_op's own "loop result.values, apply each as an ordinary
+    # ParameterDelta, all-or-nothing" pattern, mirrored here one layer out) — exactly like a
+    # FitBinding's last-fitted connector dims stay valid even after a later unfit_connector
+    # ("unfitting doesn't revert geometry").
+
+    def _trigger_envelope_derivation(ledger: MasterParametricLedger, housing_instance_id: str) -> dict:
+        """REDIS_URL-gated queue-vs-synchronous-fallback for ONE housing's derived-envelope-dimension
+        compute — mirrors /analyze's own identical branch (this file, ~line 1995) exactly, one layer
+        out: `compute_envelope` is real, multi-instance OCCT work, so it must never run synchronously
+        inline on a request path any more than the FS solver may (CLAUDE.md's "three tiers" inversion).
+        Shared by /envelope_ops's own wrap_group post-apply hook and its resync_envelope branch ("the
+        same underlying compute, just re-triggered") — never duplicated.
+
+        `ledger` is the CALLER's own current in-request ledger (already reflecting a just-applied
+        wrap_group, for that caller; plain `state.ledger()`, for resync) — used directly by the
+        SYNCHRONOUS branch below. The QUEUED branch instead hands the WORKER process (a separate OS
+        process, packages/truth_plane/jobs.py) only `state.project_id` + `housing_instance_id`; it
+        reloads its own copy of the ledger from durable storage rather than receiving this Python
+        object (which cannot cross a process boundary) — see `run_envelope_derivation`'s own docstring
+        for the DATABASE_URL-gated Postgres/in-memory split that reload uses, and this section's own
+        PERSISTENCE note above for how `wraps` durably survives that reload today."""
+        housing = ledger.instances.get(housing_instance_id)
+        if housing is None:
+            return {"status": "error", "message": f"unknown instance {housing_instance_id!r}"}
+        # scoped by housing_instance_id, not just project_id (2026-08-06 repair — R3 CONFIRMED, medium):
+        # a project can hold more than one housing, and each wrap_group/resync_envelope is itself
+        # per-housing (the route's own `housing_instance_id` argument), so a single f"{project_id}:
+        # envelope" key would let two concurrent derivations (two different housings, or a retried
+        # wrap_group on the SAME housing) race on one shared status slot with last-write-wins — see
+        # GET /envelope/status's matching comment below for the read-side half of this fix.
+        job_id = f"{state.project_id}:envelope:{housing_instance_id}"
+        if os.environ.get("REDIS_URL"):  # durable queued path (worker + Postgres) — poll /envelope/status
+            # NOTE: no jobs.configure() here — the actor body runs in the SEPARATE worker process,
+            # which already configured its own store/status_store once at startup
+            # (packages/truth_plane/worker.py); calling configure() in THIS (web) process has no
+            # effect on it (same rationale as /analyze's identical comment above).
+            from packages.truth_plane import jobs
+            state.status_store.put_status(job_id, "queued")
+            jobs.run_envelope_derivation.send(job_id, state.project_id, housing_instance_id)
+            return {"status": "queued", "job_id": job_id}
+        # REDIS_URL isn't set — this request is about to block on real OCCT work INSTEAD of handing
+        # off to the durable Dramatiq/worker path above. Same honest, previously-silent-until-fixed
+        # posture /analyze's own identical branch already has.
+        logger.warning("envelope: REDIS_URL not configured — deriving envelope synchronously in-request "
+                       "for project_id=%s housing=%s (no durable async job queued)",
+                       state.project_id, housing_instance_id)
+        try:
+            result = _bounded_geometry_build(compute_envelope, ledger, housing_instance_id)
+        except Exception as e:
+            state.status_store.put_status(job_id, "failed", message=str(e))
+            return {"status": "error", "message": str(e), "sync_fallback": True}
+        if not result.ok:
+            state.status_store.put_status(job_id, "failed", message=result.reason)
+            return {"status": "error", "message": result.reason, "sync_fallback": True}
+        try:
+            model = get_subsystem_model(housing.subsystem_type)
+        except KeyError:
+            msg = f"unknown subsystem type {housing.subsystem_type!r}"
+            state.status_store.put_status(job_id, "failed", message=msg)
+            return {"status": "error", "message": msg, "sync_fallback": True}
+        if model.envelope_socket is None:
+            msg = f"{housing.subsystem_type!r} declares no envelope_socket"
+            state.status_store.put_status(job_id, "failed", message=msg)
+            return {"status": "error", "message": msg, "sync_fallback": True}
+        working = ledger
+        deltas: list[ParameterDelta] = []
+        # R3 FIX (2026-08-06, medium): mirror apply_fit_op's `domain_checks` wiring (packages/ledger/
+        # apply.py:1321-1325) — the housing's OWN subsystem-level invariants (check_invariants, same
+        # ones the ordinary /mutate WS path already enforces at app.py:1144-1147) must gate an
+        # envelope-derived write exactly like a hand-typed one; skipping it would let a derived value
+        # silently bypass an invariant a typed edit to the SAME param would be REJECTED for.
+        domain_checks = lambda led: get_subsystem(housing.subsystem_type).check_invariants(  # noqa: E731
+            led, housing_instance_id)
+        for key, target_param in model.envelope_socket.dim_params.items():
+            if key not in result.values:
+                continue
+            d = ParameterDelta(target_node=f"instances.{housing_instance_id}.params.{target_param}",
+                               requested_value=result.values[key],
+                               rationale="derived from wrap_group envelope")
+            working, outcome = apply_delta(working, d, domain_checks=domain_checks)
+            if outcome.status in (ApplyStatus.REJECTED, ApplyStatus.CONFLICT):
+                msg = (f"{target_param}: {outcome.message} — envelope NOT applied "
+                       f"(all-or-nothing)")
+                state.status_store.put_status(job_id, "failed", message=msg)
+                return {"status": "error", "message": msg, "sync_fallback": True}
+            deltas.append(d)
+
+        # R5 FIX (2026-08-06, CONFIRMED, high — see packages/subsystems/envelope.py's own module
+        # docstring "Fix note", mirrored from run_envelope_derivation's identical fix): SIZE alone
+        # doesn't make a housing actually contain what it wraps if its POSITION is untethered from the
+        # wrapped group's own real world position. Align the housing's own Transform to the group's
+        # real world center, in the SAME all-or-nothing transaction as the size write above.
+        new_transform = housing_alignment_transform(working, housing_instance_id, result)
+        moved = False
+        if new_transform is not None:
+            current = working.instances[housing_instance_id].transform
+            moved = (current is None or abs(current.x_mm - new_transform.x_mm) > 1e-9
+                     or abs(current.y_mm - new_transform.y_mm) > 1e-9
+                     or abs(current.z_mm - new_transform.z_mm) > 1e-9)
+            if moved:
+                new_instances = dict(working.instances)
+                new_instances[housing_instance_id] = working.instances[housing_instance_id].model_copy(
+                    update={"transform": new_transform})
+                working = working.model_copy(update={"instances": new_instances})
+
+        with state.log.transaction():
+            for d in deltas:
+                state.log.append_mutation(d, actor="envelope_derivation", ts=_TS)
+            if moved:
+                state.log.append_instance_moved(housing_instance_id, new_transform,
+                                                actor="envelope_derivation", ts=_TS)
+        state.status_store.put_status(job_id, "done")
+        return {"status": "done", "applied_params": [d.target_node for d in deltas],
+                "values": result.values, "sync_fallback": True}
+
+    @router.post("/envelope_ops")
+    @_rest_error_guard
+    def create_envelope_op(op: EnvelopeOp):
+        # 2026-08-06: wire/unwire/resync a housing instance's `wraps` list, mirroring /region_ops's
+        # exact shape — plus the derivation trigger above, which no OTHER *_ops route needs (a Region/
+        # Connection/Coupling/Fit never kicks off a separate async compute of its own).
+        if op.op == "resync_envelope":
+            # apply_envelope_op's OWN resync_envelope branch is a PERMANENT REJECTED stub (Phase 2,
+            # packages/ledger/apply.py's own docstring: it deliberately never calls compute_envelope) —
+            # never touched here (out of this phase's file scope). Intercepted BEFORE apply_envelope_op
+            # is even called, re-triggering the SAME derivation wrap_group's own post-apply hook below
+            # runs — "the same underlying compute, just re-triggered" (this phase's own brief).
+            ledger = state.ledger()
+            housing = ledger.instances.get(op.housing_instance)
+            if housing is None:
+                return {"ok": False, "status": ApplyStatus.REJECTED.value,
+                        "housing_instance_id": op.housing_instance, "instance": None,
+                        "message": f"unknown instance {op.housing_instance!r}"}
+            if not housing.wraps:
+                return {"ok": False, "status": ApplyStatus.REJECTED.value,
+                        "housing_instance_id": op.housing_instance, "instance": None,
+                        "message": f"{op.housing_instance!r}'s wraps list is empty — wrap_group it "
+                                   f"first"}
+            derivation = _trigger_envelope_derivation(ledger, op.housing_instance)
+            ok = derivation.get("status") in ("queued", "done")
+            return {"ok": ok,
+                    "status": ApplyStatus.APPLIED.value if ok else ApplyStatus.REJECTED.value,
+                    "housing_instance_id": op.housing_instance,
+                    "instance": housing.model_dump(mode="json"),
+                    "message": "resync triggered" if ok else derivation.get("message", ""),
+                    "derivation": derivation}
+
+        new_ledger, outcome = apply_envelope_op(state.ledger(), op)
+        if outcome.changed:
+            # 2026-08-06 Phase 3 repair (R1 CONFIRMED, high): apply_envelope_op's wrap_group/
+            # unwrap_group mutation only ever lived on `new_ledger` in-memory -- nothing durably
+            # persisted it, so it never survived a fresh ledger reload (the very next request, or a
+            # queued job's own worker-process reload). Mirrors /region_ops's own append_region_added/
+            # append_region_removed call immediately below its own apply_region_op call.
+            assert outcome.instance is not None  # APPLIED always carries the post-change Instance
+            if op.op == "wrap_group":
+                state.log.append_envelope_wrapped(outcome.housing_instance_id, outcome.instance.wraps,
+                                                   actor="user", ts=_TS)
+            else:  # unwrap_group
+                state.log.append_envelope_unwrapped(outcome.housing_instance_id, actor="user", ts=_TS)
+        response = {
+            "ok": outcome.changed,
+            "status": outcome.status.value,
+            "housing_instance_id": outcome.housing_instance_id,
+            "instance": outcome.instance.model_dump(mode="json") if outcome.instance is not None else None,
+            "message": outcome.message,
+        }
+        if outcome.changed and op.op == "wrap_group":
+            # the ONLY op value that has anything new to derive — unwrap_group clears wraps (nothing
+            # left to wrap), and resync_envelope never reaches this branch (handled above).
+            derivation = _trigger_envelope_derivation(new_ledger, op.housing_instance)
+            response["derivation"] = derivation
+            # 2026-08-06 Phase 3 repair (R3 CONFIRMED, medium): the wraps-list mutation succeeding
+            # (outcome.changed / outcome.status above) is NOT the whole story for a caller that checks
+            # only the top-level `ok`/`status` fields — the natural thing to check. Fold the
+            # derivation's own status in exactly the way the resync_envelope branch above already does
+            # (`ok = derivation.get("status") in ("queued", "done")`), so a derivation-side failure
+            # (e.g. a mis-authored envelope_socket.dim_params target_param that doesn't actually exist
+            # among the housing's own params — apply_delta's ordinary "unknown or non-tunable node"
+            # REJECTED path, packages/ledger/apply.py's `_resolve`) is not masked by the wraps-list
+            # mutation's own unrelated success. Without this, a copilot loop or UI reading `ok: true`
+            # would believe the envelope was derived and applied when nothing was actually written.
+            if derivation.get("status") not in ("queued", "done"):
+                response["ok"] = False
+                response["status"] = ApplyStatus.REJECTED.value
+        return response
+
+    @router.get("/envelope/status")
+    @_rest_error_guard
+    def envelope_status(housing_instance_id: str | None = None):
+        # Mirrors GET /analyze/status's own shape exactly (state.status_store.get_status(...) plus a
+        # separately-read "current" value). "current" here is the housing's OWN currently-stored
+        # derived-dimension params — an ordinary, already-durable ledger read; no separate verdict-
+        # style store needed, since apply_delta already made these ordinary instance params (see this
+        # section's own PERSISTENCE note above).
+        #
+        # job_status is scoped by housing_instance_id (2026-08-06 repair — R3 CONFIRMED, medium): this
+        # route accepts (and presents itself as answering a question about) ONE housing_instance_id, so
+        # its job-status read must use the SAME per-housing key `_trigger_envelope_derivation` writes
+        # (see that function's matching comment) — a bare f"{project_id}:envelope" key would let this
+        # poll observe a DIFFERENT housing's job (e.g. two housings wrapped in quick succession, the
+        # faster one finishing first and overwriting the slower one's still-in-flight status), silently
+        # misattributing that job's status to the housing actually being asked about. With no
+        # housing_instance_id given at all, there is no per-housing job to report — job_status is None
+        # rather than guessing at some other housing's status.
+        job_id = f"{state.project_id}:envelope:{housing_instance_id}" if housing_instance_id is not None else None
+        job_status = state.status_store.get_status(job_id) if job_id is not None else None
+        current = None
+        if housing_instance_id is not None:
+            inst = state.ledger().instances.get(housing_instance_id)
+            if inst is not None:
+                try:
+                    model = get_subsystem_model(inst.subsystem_type)
+                except KeyError:
+                    model = None
+                if model is not None and model.envelope_socket is not None:
+                    current = {
+                        key: inst.params[target_param].value
+                        for key, target_param in model.envelope_socket.dim_params.items()
+                        if target_param in inst.params
+                    }
+        return {"current": current, "job_status": job_status.status if job_status else None,
+                "job_message": job_status.message if job_status else None}
 
     @router.post("/export/check")
     @_rest_error_guard
@@ -2256,6 +2617,7 @@ def create_app() -> FastAPI:
                                     "connection_ops": [co.model_dump(mode="json") for co in payload.connection_ops],
                                     "coupling_ops": [co.model_dump(mode="json") for co in payload.coupling_ops],
                                     "fit_ops": [fo.model_dump(mode="json") for fo in payload.fit_ops],
+                                    "envelope_ops": [eo.model_dump(mode="json") for eo in payload.envelope_ops],
                                     "join_annotation_ops": [jo.model_dump(mode="json") for jo in payload.join_annotation_ops],
                                     "region_ops": [ro.model_dump(mode="json") for ro in payload.region_ops],
                                     "scope_proposal": payload.scope_proposal.model_dump(mode="json") if payload.scope_proposal else None,

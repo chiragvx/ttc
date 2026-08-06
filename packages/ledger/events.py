@@ -36,6 +36,11 @@ class EventKind(str, Enum):
     INSTANCE_ADDED = "INSTANCE_ADDED"
     INSTANCE_REMOVED = "INSTANCE_REMOVED"
     INSTANCE_MOVED = "INSTANCE_MOVED"  # reposition/reorient an ALREADY-PLACED instance
+    INSTANCE_TRANSFORM_CLEARED = "INSTANCE_TRANSFORM_CLEARED"  # un-anchor an instance back to pure
+                                        # mate-/auto-layout-resolved positioning (clear_transform,
+                                        # 2026-08-05) — the FACT counterpart carries no Transform value
+                                        # (unlike INSTANCE_MOVED), since the whole point is that one no
+                                        # longer exists after it applies.
     FEATURE_OP = "FEATURE_OP"  # add/update/remove a hole/pocket/slot cut on an instance
     CONNECTION_ADDED = "CONNECTION_ADDED"      # a typed interface<->interface mate (Phase 1b)
     CONNECTION_REMOVED = "CONNECTION_REMOVED"
@@ -48,17 +53,25 @@ class EventKind(str, Enum):
     JOIN_ANNOTATION_REMOVED = "JOIN_ANNOTATION_REMOVED"
     REGION_ADDED = "REGION_ADDED"              # a typed keep-out/keep-in box on a host instance (2026-08-04)
     REGION_REMOVED = "REGION_REMOVED"
+    ENVELOPE_WRAPPED = "ENVELOPE_WRAPPED"      # a housing instance's `wraps` list was SET/REPLACED
+                                                # wholesale (EnvelopeOp.wrap_group, 2026-08-06 gearbox-
+                                                # housing-generation initiative Phase 3 repair -- closes
+                                                # the gap R1 flagged: see packages/ledger/schema.py::
+                                                # Instance.wraps, "same posture FitBinding already has")
+    ENVELOPE_UNWRAPPED = "ENVELOPE_UNWRAPPED"  # a housing instance's `wraps` list was CLEARED back to
+                                                # [] (EnvelopeOp.unwrap_group)
 
 
 FACT_KINDS = {
     EventKind.GENESIS, EventKind.PARAMETER_MUTATION, EventKind.REVIEW_SIGNOFF,
     EventKind.NL_INTENT, EventKind.USAGE, EventKind.INSTANCE_ADDED, EventKind.INSTANCE_REMOVED,
-    EventKind.INSTANCE_MOVED, EventKind.FEATURE_OP,
+    EventKind.INSTANCE_MOVED, EventKind.INSTANCE_TRANSFORM_CLEARED, EventKind.FEATURE_OP,
     EventKind.CONNECTION_ADDED, EventKind.CONNECTION_REMOVED,
     EventKind.COUPLING_ADDED, EventKind.COUPLING_REMOVED,
     EventKind.FIT_BOUND, EventKind.FIT_UNBOUND, EventKind.FIT_RESYNCED,
     EventKind.JOIN_ANNOTATION_ADDED, EventKind.JOIN_ANNOTATION_REMOVED,
     EventKind.REGION_ADDED, EventKind.REGION_REMOVED,
+    EventKind.ENVELOPE_WRAPPED, EventKind.ENVELOPE_UNWRAPPED,
 }
 
 # Facts that change the actual geometry/design — a prior ENGINEER_REVIEWED sign-off must not survive
@@ -67,10 +80,16 @@ FACT_KINDS = {
 # did change something worth re-reviewing — never appended for a REJECTED/CONFLICT attempt.
 GEOMETRY_CLASS_KINDS = {
     EventKind.PARAMETER_MUTATION, EventKind.INSTANCE_ADDED, EventKind.INSTANCE_REMOVED,
-    EventKind.INSTANCE_MOVED, EventKind.FEATURE_OP,
+    EventKind.INSTANCE_MOVED, EventKind.INSTANCE_TRANSFORM_CLEARED, EventKind.FEATURE_OP,
     EventKind.CONNECTION_ADDED, EventKind.CONNECTION_REMOVED,
     EventKind.COUPLING_ADDED, EventKind.COUPLING_REMOVED,
     EventKind.FIT_BOUND, EventKind.FIT_UNBOUND, EventKind.FIT_RESYNCED,
+    # `wraps` has "the SAME posture `FitBinding.connector_instance`/`host_instance` already have"
+    # (packages/ledger/schema.py::Instance.wraps' own docstring) -- unlike Region (a pure annotation
+    # that "derives nothing and nothing derives it"), a wrap_group/unwrap_group changes WHICH sibling
+    # geometry a housing's own derived shape is computed from, so it belongs here alongside FIT_BOUND/
+    # FIT_UNBOUND/FIT_RESYNCED, not alongside REGION_ADDED/REGION_REMOVED below.
+    EventKind.ENVELOPE_WRAPPED, EventKind.ENVELOPE_UNWRAPPED,
 }
 
 GENESIS_PREV = "0" * 64
@@ -178,6 +197,22 @@ def replay(
             # never itself an INSTANCE_ADDED fact; it only exists once `reconcile_all` runs). Silently
             # no-op rather than raise/assert; passing `reconcile` (see this function's docstring)
             # closes the gap for the ONE caller that needs it.
+        elif ev.kind is EventKind.INSTANCE_TRANSFORM_CLEARED:
+            assert ledger is not None
+            # The FACT counterpart to `apply_instance_op`'s clear_transform OUTCOME: reverts the
+            # instance's `transform` to None (pure mate-/auto-layout-resolved positioning). Unlike
+            # INSTANCE_MOVED, there is no new Transform value to store — the whole point of
+            # clear_transform is that one no longer exists after it applies — so the payload carries
+            # only the instance_id, same shape as INSTANCE_REMOVED's own payload.
+            instance_id = ev.payload["instance_id"]
+            if instance_id in ledger.instances:  # same tolerance as INSTANCE_MOVED's own else-branch
+                inst = ledger.instances[instance_id]
+                new_instances = dict(ledger.instances)
+                new_instances[instance_id] = inst.model_copy(update={"transform": None})
+                ledger = ledger.model_copy(update={"instances": new_instances})
+            # else: the target instance doesn't exist in the pure-FACT ledger at this point in the
+            # fold — same tolerance as INSTANCE_MOVED's own else-branch above (an assembly-template
+            # child is never itself an INSTANCE_ADDED fact). Silently no-op rather than raise/assert.
         elif ev.kind is EventKind.FEATURE_OP:
             assert ledger is not None
             # The fact stores the ALREADY-RESOLVED CutFeature (op="add_feature"/"update_feature" ->
@@ -282,6 +317,35 @@ def replay(
             region_id = ev.payload["region_id"]
             ledger = ledger.model_copy(update={
                 "regions": [r for r in ledger.regions if r.id != region_id]})
+        elif ev.kind is EventKind.ENVELOPE_WRAPPED:
+            assert ledger is not None
+            # FACT counterpart to `apply_envelope_op`'s wrap_group OUTCOME (2026-08-06, gearbox-
+            # housing-generation initiative Phase 3 repair -- closes R1's CONFIRMED gap): stores the
+            # housing instance_id + the ALREADY-RESOLVED new `wraps` list (exactly
+            # `outcome.instance.wraps` at apply time) -- a pure merge into `instance.wraps`, same
+            # "store the resolved fact, don't re-derive it" precedent as INSTANCE_MOVED storing the
+            # resolved Transform.
+            instance_id = ev.payload["housing_instance_id"]
+            if instance_id in ledger.instances:  # see note below for the else-branch
+                inst = ledger.instances[instance_id]
+                new_instances = dict(ledger.instances)
+                new_instances[instance_id] = inst.model_copy(update={"wraps": list(ev.payload["wraps"])})
+                ledger = ledger.model_copy(update={"instances": new_instances})
+            # else: the target instance doesn't exist in the pure-FACT ledger at this point in the
+            # fold -- same tolerance as INSTANCE_MOVED's own else-branch above. Silently no-op rather
+            # than raise/assert.
+        elif ev.kind is EventKind.ENVELOPE_UNWRAPPED:
+            assert ledger is not None
+            # FACT counterpart to `apply_envelope_op`'s unwrap_group OUTCOME -- clears `wraps` back to
+            # `[]`, same shape as INSTANCE_TRANSFORM_CLEARED clearing `transform` back to None (there is
+            # no new value to store -- the whole point is that the list is empty afterward).
+            instance_id = ev.payload["housing_instance_id"]
+            if instance_id in ledger.instances:  # same tolerance as INSTANCE_MOVED's own else-branch
+                inst = ledger.instances[instance_id]
+                new_instances = dict(ledger.instances)
+                new_instances[instance_id] = inst.model_copy(update={"wraps": []})
+                ledger = ledger.model_copy(update={"instances": new_instances})
+            # else: same tolerance as above.
         # NL_INTENT: recorded, no state change
         if (ledger is not None and ev.kind in GEOMETRY_CLASS_KINDS
                 and ledger.review.state is not ReviewState.AI_PROPOSED):
@@ -406,6 +470,14 @@ class BaseEventLog(ABC):
             actor, ts,
         )
 
+    def append_instance_transform_cleared(self, instance_id: str, actor: str, ts: str) -> Event:
+        """The FACT counterpart to `apply_instance_op`'s clear_transform OUTCOME
+        (packages/ledger/apply.py): stores just the instance_id — there is no new Transform value to
+        persist (the whole point of clear_transform is that one no longer exists after it runs),
+        unlike `append_instance_moved` which carries the resolved new Transform. Mirrors
+        `append_instance_removed`'s shape/style exactly."""
+        return self._append(EventKind.INSTANCE_TRANSFORM_CLEARED, {"instance_id": instance_id}, actor, ts)
+
     def append_feature_op(self, op: str, instance_id: str, feature: "CutFeature", actor: str, ts: str) -> Event:
         """The FACT counterpart to `apply_feature_op`'s OUTCOME (packages/ledger/apply.py): stores the
         ALREADY-RESOLVED `CutFeature` (op="remove_feature" -> the one that was removed), exactly the
@@ -464,6 +536,24 @@ class BaseEventLog(ABC):
 
     def append_region_removed(self, region_id: str, actor: str, ts: str) -> Event:
         return self._append(EventKind.REGION_REMOVED, {"region_id": region_id}, actor, ts)
+
+    def append_envelope_wrapped(self, housing_instance_id: str, wraps: list[str], actor: str, ts: str) -> Event:
+        """FACT counterpart to `apply_envelope_op`'s wrap_group outcome (packages/ledger/apply.py) --
+        stores the housing instance id + the ALREADY-RESOLVED new `wraps` list
+        (`outcome.instance.wraps` at apply time) -- mirrors `append_instance_moved`'s shape/style
+        exactly. 2026-08-06, gearbox-housing-generation initiative Phase 3 repair: closes the SAME
+        shape of gap `/region_ops` itself originally shipped with (no EventKind existed for an
+        Instance.wraps change, so it never survived a fresh ledger reload -- see
+        tests/backend/test_region_transport.py's own module docstring for that precedent)."""
+        return self._append(EventKind.ENVELOPE_WRAPPED,
+                            {"housing_instance_id": housing_instance_id, "wraps": list(wraps)}, actor, ts)
+
+    def append_envelope_unwrapped(self, housing_instance_id: str, actor: str, ts: str) -> Event:
+        """FACT counterpart to `apply_envelope_op`'s unwrap_group outcome -- there is no new `wraps`
+        value to persist (the whole point is that the list is empty afterward), unlike
+        `append_envelope_wrapped` which carries the resolved list -- mirrors
+        `append_instance_transform_cleared`'s shape/style exactly."""
+        return self._append(EventKind.ENVELOPE_UNWRAPPED, {"housing_instance_id": housing_instance_id}, actor, ts)
 
     def append_nl_intent(self, text: str, actor: str, ts: str) -> Event:
         return self._append(EventKind.NL_INTENT, {"text": text}, actor, ts)

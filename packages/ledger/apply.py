@@ -26,7 +26,7 @@ from typing import Callable, Optional
 
 from pydantic import ValidationError
 
-from packages.ledger.deltas import ConnectionOp, CouplingOp, FeatureOp, FitOp, InstanceOp, JoinAnnotationOp, ParameterDelta, RegionOp, is_forbidden_target
+from packages.ledger.deltas import ConnectionOp, CouplingOp, EnvelopeOp, FeatureOp, FitOp, InstanceOp, JoinAnnotationOp, ParameterDelta, RegionOp, is_forbidden_target
 from packages.ledger.parameter import LockState, ParameterDef, ParamSource
 from packages.ledger.schema import (
     Connection,
@@ -532,9 +532,9 @@ class InstanceOpOutcome:
 
     status: ApplyStatus
     instance_id: Optional[str]
-    instance: Optional[Instance] = None  # the added/removed/moved instance — for move_instance, its
-                                          # POST-move state (matches add_instance's "instance = the
-                                          # resulting state" convention)
+    instance: Optional[Instance] = None  # the added/removed/moved/cleared instance — for move_instance
+                                          # and clear_transform, its POST-change state (matches
+                                          # add_instance's "instance = the resulting state" convention)
     removed_connection_ids: list[str] = field(default_factory=list)  # remove_instance ONLY: ids of
                                           # connections cascade-removed because they referenced the
                                           # removed instance — the endpoint appends a CONNECTION_REMOVED
@@ -545,8 +545,49 @@ class InstanceOpOutcome:
                                           # from_instance (Phase 2b, 2026-07-19) — see apply_instance_op's
                                           # remove_instance branch for why the check is wider than
                                           # removed_connection_ids's.
-    previous_instance: Optional[Instance] = None  # move_instance ONLY: the PRE-move state, needed so
-                                                    # the frontend can Undo a move by moving it back.
+    removed_region_ids: list[str] = field(default_factory=list)  # remove_instance ONLY: ids of
+                                          # Regions cascade-removed because their `host_instance`
+                                          # referenced the removed instance (2026-08-05) — same id-reuse
+                                          # hazard as removed_connection_ids/removed_coupling_ids: a
+                                          # Region left pointing at a deleted instance id would silently
+                                          # re-attach to an unrelated NEW instance that later reuses that
+                                          # same id (instance ids are reused, lowest-free).
+    removed_fit_binding_ids: list[str] = field(default_factory=list)  # remove_instance ONLY: ids of
+                                          # FitBindings cascade-removed because either their
+                                          # `connector_instance` OR `host_instance` referenced the
+                                          # removed instance (2026-08-05) — WIDER check than
+                                          # removed_region_ids's, same id-reuse hazard: left behind, a
+                                          # stale binding would silently re-attach to whichever new
+                                          # instance later reuses the freed id, on either side of the fit.
+    removed_join_annotation_ids: list[str] = field(default_factory=list)  # remove_instance ONLY: ids of
+                                          # JoinAnnotations cascade-removed because they referenced a
+                                          # Connection this same call ALSO cascade-removed
+                                          # (removed_connection_ids) (2026-08-05) — same id-reuse hazard
+                                          # one level down: `_next_connection_id` reuses the lowest-free
+                                          # conn_N id, so a stale annotation left behind would silently
+                                          # attach its bolted/press_fit/... semantics to a brand new,
+                                          # unrelated Connection that later reuses that same freed id.
+    scrubbed_wraps_instance_ids: list[str] = field(default_factory=list)  # remove_instance ONLY: ids of
+                                          # housing Instances whose `wraps` list (packages/ledger/
+                                          # schema.py::Instance.wraps) had the removed instance id
+                                          # scrubbed out of it (2026-08-06). NOT a "removed_*_ids" list
+                                          # like its five siblings above — nothing is dropped from a
+                                          # ledger-level collection; `wraps` lives ON the housing
+                                          # Instance itself (mirroring apply_envelope_op's own
+                                          # wrap_group/unwrap_group mutation), so the cascade here
+                                          # rewrites each affected housing's `wraps` in place instead of
+                                          # removing a whole record. Same id-reuse hazard as the five
+                                          # cascades above: `wraps` is the ONLY thing anchoring a
+                                          # housing to its wrapped members, and instance ids are reused
+                                          # (lowest-free, see `_next_instance_id`) — a `wraps` entry left
+                                          # pointing at a deleted id would silently re-attach to an
+                                          # unrelated NEW instance built later under that same id.
+                                          # `compute_envelope`'s own dangling check
+                                          # (packages/subsystems/envelope.py) only catches a truly-
+                                          # ABSENT id, not this reused-id case.
+    previous_instance: Optional[Instance] = None  # move_instance/clear_transform ONLY: the PRE-change
+                                                    # state, needed so the frontend can Undo a move (move
+                                                    # back) or a clear (restore the prior transform).
                                                     # add_instance/remove_instance leave this None.
     message: str = ""
 
@@ -637,6 +678,51 @@ def apply_instance_op(
             if c.target_instance == instance_id
             or any(ci.from_instance == instance_id for ci in c.inputs.values())
         ]
+        # CASCADE-remove Regions hosted on the removed instance — same id-reuse hazard as the
+        # connection/coupling cascades above (2026-08-05 review): `host_instance` is the ONLY thing
+        # anchoring a Region to a real part, and because instance ids are reused (lowest-free, see
+        # _next_instance_id), a Region left pointing at a deleted instance id would silently re-attach
+        # itself to an unrelated NEW instance built later with the same id — a keep-out/keep-in box
+        # that was never actually authored for that part, appearing to "always belong there".
+        removed_region_ids = [r.id for r in ledger.regions if r.host_instance == instance_id]
+        # CASCADE-remove FitBindings referencing the removed instance — WIDER check than the Region
+        # cascade above: a FitBinding can reference the removed instance either as its
+        # `connector_instance` OR its `host_instance`. Same id-reuse hazard (2026-08-05 review): left
+        # behind, a stale binding would silently re-attach to whichever new instance later reuses the
+        # freed id, on EITHER side of the fit, fabricating a fitted-dimension relationship that was
+        # never actually wired for the new part.
+        removed_fit_binding_ids = [
+            f.id for f in ledger.fit_bindings
+            if f.connector_instance == instance_id or f.host_instance == instance_id
+        ]
+        # CASCADE-remove JoinAnnotations attached to any Connection this same call is ALSO
+        # cascade-removing (removed_conn_ids, computed above) — one hop further down the SAME id-reuse
+        # hazard chain: `_next_connection_id` reuses the lowest-free `conn_N` id, so a JoinAnnotation
+        # left pointing at a connection id that's about to be freed would silently attach its
+        # bolted/press_fit/welded/... semantics to a brand new, unrelated Connection that later reuses
+        # that same id (2026-08-05 review).
+        removed_join_annotation_ids = [
+            j.id for j in ledger.join_annotations if j.connection_id in set(removed_conn_ids)
+        ]
+        # CASCADE-SCRUB `wraps` on any housing instance that lists the removed instance as a member
+        # (2026-08-06 review) — the one cascade gap left after the five removal cascades above.
+        # `Instance.wraps` (packages/ledger/schema.py) is the ONLY thing anchoring a housing to its
+        # wrapped members, so this is the SAME id-reuse hazard as removed_region_ids/
+        # removed_fit_binding_ids above: left behind, a stale `wraps` entry would silently re-attach
+        # to whichever new instance later reuses the freed id, fabricating an envelope-membership
+        # relationship that was never actually wired for the new part. UNLIKE the five cascades
+        # above, nothing is removed from a top-level ledger list here — `wraps` lives directly ON the
+        # housing `Instance` (mirroring apply_envelope_op's own wrap_group/unwrap_group mutation
+        # below), so this rewrites each affected housing's `wraps` list IN PLACE (on `new_instances`,
+        # which already has the removed instance deleted) rather than dropping a whole record.
+        scrubbed_wraps_instance_ids = [
+            iid for iid, inst in ledger.instances.items()
+            if iid != instance_id and instance_id in inst.wraps
+        ]
+        for iid in scrubbed_wraps_instance_ids:
+            housing = new_instances[iid]
+            new_instances[iid] = housing.model_copy(
+                update={"wraps": [m for m in housing.wraps if m != instance_id]})
         update: dict = {"instances": new_instances}
         if removed_conn_ids:
             drop = set(removed_conn_ids)
@@ -644,10 +730,23 @@ def apply_instance_op(
         if removed_coupling_ids:
             drop_c = set(removed_coupling_ids)
             update["couplings"] = [c for c in ledger.couplings if c.id not in drop_c]
+        if removed_region_ids:
+            drop_r = set(removed_region_ids)
+            update["regions"] = [r for r in ledger.regions if r.id not in drop_r]
+        if removed_fit_binding_ids:
+            drop_f = set(removed_fit_binding_ids)
+            update["fit_bindings"] = [f for f in ledger.fit_bindings if f.id not in drop_f]
+        if removed_join_annotation_ids:
+            drop_j = set(removed_join_annotation_ids)
+            update["join_annotations"] = [j for j in ledger.join_annotations if j.id not in drop_j]
         new_ledger = ledger.model_copy(update=update)
         return new_ledger, InstanceOpOutcome(ApplyStatus.APPLIED, instance_id, instance=target,
                                              removed_connection_ids=removed_conn_ids,
                                              removed_coupling_ids=removed_coupling_ids,
+                                             removed_region_ids=removed_region_ids,
+                                             removed_fit_binding_ids=removed_fit_binding_ids,
+                                             removed_join_annotation_ids=removed_join_annotation_ids,
+                                             scrubbed_wraps_instance_ids=scrubbed_wraps_instance_ids,
                                              message=f"removed {instance_id}")
 
     if op.op == "move_instance":
@@ -693,6 +792,35 @@ def apply_instance_op(
         new_ledger = ledger.model_copy(update={"instances": new_instances})
         return new_ledger, InstanceOpOutcome(ApplyStatus.APPLIED, instance_id, instance=new_instance,
                                              previous_instance=target, message=f"moved {instance_id}")
+
+    if op.op == "clear_transform":
+        # The SAFE escape hatch from the self-check's own "v1 can only honor one connected-group
+        # member as the datum — remove the extra anchors" finding (2026-08-05): un-anchor an instance
+        # back to pure mate-/auto-layout-resolved positioning WITHOUT the destruction a delete+re-add
+        # would cause (every coupling/region/fit_binding/join_annotation wired to this instance, plus
+        # every param the LLM had carefully set). Semantically "move to no explicit position", NOT a
+        # new category of operation — so it behaves like move_instance in every way except accepting
+        # no position: same instance_id-required/unknown-id REJECTED validation, same
+        # `instance`=POST-change-state / `previous_instance`=PRE-change-state outcome shape. Unlike
+        # move_instance, no reconcile() call — move_instance itself never triggers one either (only
+        # add_instance does), and clearing a transform has no assembly-template-child implication.
+        instance_id = op.instance_id
+        if instance_id is None:
+            return ledger, InstanceOpOutcome(ApplyStatus.REJECTED, None,
+                                             message="clear_transform requires instance_id")
+        target = ledger.instances.get(instance_id)
+        if target is None:
+            return ledger, InstanceOpOutcome(ApplyStatus.REJECTED, instance_id,
+                                             message=f"unknown instance id {instance_id!r}")
+
+        new_instance = target.model_copy(update={"transform": None})
+        new_instances = dict(ledger.instances)
+        new_instances[instance_id] = new_instance
+        new_ledger = ledger.model_copy(update={"instances": new_instances})
+        return new_ledger, InstanceOpOutcome(
+            ApplyStatus.APPLIED, instance_id, instance=new_instance, previous_instance=target,
+            message=f"cleared {instance_id}'s explicit transform — reverted to mate/auto-layout-"
+                    f"resolved positioning")
 
     if op.op != "add_instance":
         return ledger, InstanceOpOutcome(ApplyStatus.REJECTED, op.instance_id,
@@ -780,6 +908,15 @@ class ConnectionOpOutcome:
     status: "ApplyStatus"
     connection_id: Optional[str]
     connection: Optional[Connection] = None
+    removed_join_annotation_ids: list[str] = field(default_factory=list)  # remove_connection ONLY:
+                                          # ids of JoinAnnotations cascade-removed because their
+                                          # `connection_id` referenced the removed connection
+                                          # (2026-08-05) — same id-reuse hazard as
+                                          # apply_instance_op's own cascades: `_next_connection_id`
+                                          # reuses the lowest-free `conn_N` id, so a stale annotation
+                                          # left behind would silently attach its bolted/press_fit/...
+                                          # semantics to a brand new, unrelated Connection that later
+                                          # reuses that same freed id.
     message: str = ""
 
     @property
@@ -815,8 +952,19 @@ def apply_connection_op(
         if match is None:
             return ledger, ConnectionOpOutcome(ApplyStatus.REJECTED, op.id,
                                                message=f"unknown connection id {op.id!r}")
-        new = ledger.model_copy(update={"connections": [c for c in ledger.connections if c.id != op.id]})
+        # CASCADE-remove any JoinAnnotation attached to this Connection — same id-reuse hazard as
+        # apply_instance_op's remove_instance cascade (see its own comments): `_next_connection_id`
+        # reuses the lowest-free `conn_N` id, so a stale annotation left pointing at a removed
+        # connection id would silently attach its bolted/press_fit/welded/... semantics to a brand
+        # new, unrelated Connection that later reuses that same freed id.
+        removed_join_annotation_ids = [j.id for j in ledger.join_annotations if j.connection_id == op.id]
+        update: dict = {"connections": [c for c in ledger.connections if c.id != op.id]}
+        if removed_join_annotation_ids:
+            drop = set(removed_join_annotation_ids)
+            update["join_annotations"] = [j for j in ledger.join_annotations if j.id not in drop]
+        new = ledger.model_copy(update=update)
         return new, ConnectionOpOutcome(ApplyStatus.APPLIED, op.id, connection=match,
+                                        removed_join_annotation_ids=removed_join_annotation_ids,
                                         message=f"removed connection {op.id}")
 
     if op.op != "add_connection":
@@ -1353,3 +1501,100 @@ def apply_region_op(
     new_ledger = ledger.model_copy(update={"regions": [*ledger.regions, region]})
     return new_ledger, RegionOpOutcome(ApplyStatus.APPLIED, region_id, region=region,
                                        message=f"added region {region_id} ({op.kind}) on {op.host_instance}")
+
+
+@dataclass
+class EnvelopeOpOutcome:
+    """EnvelopeOp's analog of RegionOpOutcome. Carries the resolved Instance (the housing whose
+    `wraps` just changed) rather than a typed edge record -- there is no separate "EnvelopeBinding"
+    model (unlike `FitBinding`): `wraps` lives directly on the housing `Instance`
+    (`packages/ledger/schema.py`), so the housing's own post-change Instance IS the record."""
+
+    status: ApplyStatus
+    housing_instance_id: Optional[str]
+    instance: Optional[Instance] = None  # the housing's POST-change state
+    message: str = ""
+
+    @property
+    def changed(self) -> bool:
+        return self.status is ApplyStatus.APPLIED
+
+
+def apply_envelope_op(
+    ledger: MasterParametricLedger,
+    op: EnvelopeOp,
+) -> tuple[MasterParametricLedger, EnvelopeOpOutcome]:
+    """Apply one EnvelopeOp (wrap/unwrap/resync a HOUSING instance's `wraps` list). Returns a NEW
+    ledger + outcome; original never mutated (same event-sourcing convention as apply_region_op).
+
+    No injected callables needed — like `apply_region_op`, this never touches the subsystem registry
+    or a part's own params; `housing_instance`/`member_instance_ids` are checked directly against
+    `ledger.instances`, already in scope in this registry-free package.
+
+    DELIBERATELY DOES NOT CALL `compute_envelope`
+    (`packages/subsystems/envelope.py`) — that is a real, multi-instance OCCT computation (via
+    `packages/subsystems/geometry_query.py`'s `group_world_bbox`/`group_convex_hull`), and this
+    codebase's architecture requires real kernel work to run as a durable async job, never
+    synchronously inline on an apply/request path (the same rule `packages/truth_plane/` FEA jobs
+    already follow — see CLAUDE.md's "three tiers" inversion). Wiring an actual async job that DOES
+    call `compute_envelope` and write its result through the housing's `envelope_socket` mapping is a
+    later phase's job; `wrap_group`/`unwrap_group` here only ever perform the cheap, ordinary ledger
+    mutation of setting/clearing `wraps` itself."""
+    if op.op == "unwrap_group":
+        housing = ledger.instances.get(op.housing_instance)
+        if housing is None:
+            return ledger, EnvelopeOpOutcome(
+                ApplyStatus.REJECTED, op.housing_instance,
+                message=f"unknown instance {op.housing_instance!r}")
+        if not housing.wraps:
+            return ledger, EnvelopeOpOutcome(
+                ApplyStatus.REJECTED, op.housing_instance,
+                message=f"{op.housing_instance!r} already has an empty wraps list")
+        new_instance = housing.model_copy(update={"wraps": []})
+        new_instances = dict(ledger.instances)
+        new_instances[op.housing_instance] = new_instance
+        new_ledger = ledger.model_copy(update={"instances": new_instances})
+        return new_ledger, EnvelopeOpOutcome(
+            ApplyStatus.APPLIED, op.housing_instance, instance=new_instance,
+            message=f"cleared {op.housing_instance}'s wraps list")
+
+    if op.op == "resync_envelope":
+        # Honest stub (see this function's own docstring): there is no async job yet to actually
+        # recompute an envelope against a wrapped member's current geometry, so this REJECTS rather
+        # than fake a synchronous compute — never a fabricated result (Inversion #1).
+        return ledger, EnvelopeOpOutcome(
+            ApplyStatus.REJECTED, op.housing_instance,
+            message="resync_envelope is not yet wired — Phase 3 (a real Dramatiq async job, mirroring "
+                    "/analyze's pattern) is what will make this functional; it deliberately never "
+                    "fakes a synchronous recompute in the meantime")
+
+    if op.op != "wrap_group":
+        return ledger, EnvelopeOpOutcome(
+            ApplyStatus.REJECTED, op.housing_instance, message=f"unknown op {op.op!r}")
+
+    housing = ledger.instances.get(op.housing_instance)
+    if housing is None:
+        return ledger, EnvelopeOpOutcome(
+            ApplyStatus.REJECTED, op.housing_instance,
+            message=f"unknown instance {op.housing_instance!r}")
+    if not op.member_instance_ids:
+        return ledger, EnvelopeOpOutcome(
+            ApplyStatus.REJECTED, op.housing_instance,
+            message="wrap_group requires a non-empty member_instance_ids")
+    missing = [iid for iid in op.member_instance_ids if iid not in ledger.instances]
+    if missing:
+        return ledger, EnvelopeOpOutcome(
+            ApplyStatus.REJECTED, op.housing_instance,
+            message=f"member_instance_ids references unknown instance id(s) {missing!r}")
+    if op.housing_instance in op.member_instance_ids:
+        return ledger, EnvelopeOpOutcome(
+            ApplyStatus.REJECTED, op.housing_instance,
+            message=f"{op.housing_instance!r} cannot wrap itself")
+
+    new_instance = housing.model_copy(update={"wraps": list(op.member_instance_ids)})
+    new_instances = dict(ledger.instances)
+    new_instances[op.housing_instance] = new_instance
+    new_ledger = ledger.model_copy(update={"instances": new_instances})
+    return new_ledger, EnvelopeOpOutcome(
+        ApplyStatus.APPLIED, op.housing_instance, instance=new_instance,
+        message=f"{op.housing_instance} now wraps {op.member_instance_ids}")

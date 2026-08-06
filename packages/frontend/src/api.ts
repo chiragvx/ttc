@@ -1,4 +1,4 @@
-import type { ChatContentPart, ChatEvent, ConnectionOp, CouplingOp, CutFeature, FeatureOp, FitOp, InstanceOp, InstanceSnapshot, LedgerGraphData, ManufacturingManifest, MeshData, PickableFeature, RegionOp, TelemetryDelta, ValidationResult } from "./types";
+import type { ChatContentPart, ChatEvent, ConnectionOp, CouplingOp, CutFeature, EnvelopeOp, FeatureOp, FitOp, InstanceOp, InstanceSnapshot, LedgerGraphData, ManufacturingManifest, MeshData, PickableFeature, RegionOp, TelemetryDelta, ValidationResult } from "./types";
 import { loadSettings, type LlmSettings } from "./settings";
 
 // REST + SSE calls to the FastAPI backend (proxied by Vite in dev).
@@ -127,6 +127,14 @@ export interface InstanceOpApplyResponse {
   // (non-null) ONLY on a successful move_instance — always null for add_instance/remove_instance,
   // and null on any REJECTED move_instance too.
   previous_instance: InstanceSnapshot | null;
+  // Cascade ids the model would otherwise never see (2026-08-05 — mirrors
+  // packages/transport/app.py::create_instance_op's response dict exactly). Populated only on a
+  // successful remove_instance; `[]` on every other op/outcome.
+  removed_connection_ids: string[];
+  removed_coupling_ids: string[];
+  removed_region_ids: string[];
+  removed_fit_binding_ids: string[];
+  removed_join_annotation_ids: string[];
   message: string;
 }
 export async function applyInstanceOp(op: InstanceOp): Promise<InstanceOpApplyResponse> {
@@ -142,6 +150,11 @@ export interface ConnectionOpApplyResponse {
   status: "APPLIED" | "REJECTED" | "CONFLICT";
   connection_id: string | null;
   connection: unknown | null;
+  // Cascade ids the model would otherwise never see (2026-08-05 — mirrors
+  // packages/transport/app.py::create_connection_op's response dict exactly): a remove_connection
+  // cascade-deletes any JoinAnnotation that referenced the now-gone connection id. `[]` on
+  // add_connection or a remove with nothing attached.
+  removed_join_annotation_ids: string[];
   message: string;
 }
 export async function applyConnectionOp(op: ConnectionOp): Promise<ConnectionOpApplyResponse> {
@@ -189,6 +202,28 @@ export async function applyFitOp(op: FitOp): Promise<FitOpApplyResponse> {
   // a backend without this route (older build) returns 404/HTML — surface a clear message instead of
   // a cryptic JSON-parse error (mirrors applyConnectionOp/applyCouplingOp's same-day fix)
   if (!res.ok) throw new Error(`fit endpoint unavailable (HTTP ${res.status})`);
+  return res.json();
+}
+
+// --- EnvelopeOp (2026-08-06, gearbox-housing-generation initiative): wire/unwire/resync a HOUSING
+// instance's `wraps` list. Posted VERBATIM as received in a "proposal" SSE event; mirrors
+// applyFitOp above. `instance`/`derivation` are typed loosely (`unknown`) same as `connection`/
+// `coupling`/`binding` above — the frontend never inspects their shape, just relays status/message.
+export interface EnvelopeOpApplyResponse {
+  ok: boolean;
+  status: "APPLIED" | "REJECTED" | "CONFLICT";
+  housing_instance_id: string | null;
+  instance: unknown | null;
+  message: string;
+  derivation?: unknown;
+}
+export async function applyEnvelopeOp(op: EnvelopeOp): Promise<EnvelopeOpApplyResponse> {
+  const res = await apiFetch("/envelope_ops", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(op),
+  });
+  // a backend without this route (older build) returns 404/HTML — surface a clear message instead of
+  // a cryptic JSON-parse error (mirrors applyConnectionOp/applyCouplingOp/applyFitOp's same-day fix)
+  if (!res.ok) throw new Error(`envelope endpoint unavailable (HTTP ${res.status})`);
   return res.json();
 }
 

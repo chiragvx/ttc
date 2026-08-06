@@ -96,11 +96,20 @@ class InstanceOp(BaseModel):
         This differs from `add_instance`, where a fresh instance has no "current" rotation to
         preserve; an existing instance being moved has a real current rotation that must not be
         silently zeroed just because the caller only wanted to change position.
+
+    `clear_transform` (2026-08-05) is the SAFE escape hatch from the self-check's own "v1 can only
+    honor one connected-group member as the datum — remove the extra anchors" finding. Requires ONLY
+    `instance_id` (a REAL existing id) — no `x_mm`/`y_mm`/`z_mm`, no rotation. It sets the instance's
+    `transform` back to `None`, reverting it to pure mate-/auto-layout-resolved positioning — the same
+    state a freshly-added instance with no explicit position starts in (see `add_instance`'s own
+    x_mm/y_mm/z_mm docs above). Unlike deleting and re-adding the instance (the only prior way to shed
+    an explicit transform), `clear_transform` leaves every coupling/region/fit_binding/join_annotation/
+    param wired to this instance completely untouched — only `transform` changes.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    op: Literal["add_instance", "remove_instance", "move_instance"]
+    op: Literal["add_instance", "remove_instance", "move_instance", "clear_transform"]
     subsystem_type: Optional[str] = None   # required for add_instance; must be a REAL registered name
     instance_id: Optional[str] = None      # required for remove_instance/move_instance; optional for
                                             # add_instance (auto-generated if omitted, mirroring
@@ -217,6 +226,36 @@ class FitOp(BaseModel):
     rationale: Optional[str] = None
 
 
+class EnvelopeOp(BaseModel):
+    """Wire/unwire/resync a HOUSING instance's `wraps` list (2026-08-05, gearbox-housing-generation
+    initiative Phase 2) -- which member instances a housing-family subsystem (one declaring
+    `envelope_socket`, `packages/subsystems/base.py::EnvelopeSocketSpec`) is declared to
+    wrap/contain (`packages/ledger/schema.py::Instance.wraps`). Same posture as `FitOp`: the LLM
+    WIRES which instances a housing wraps; it never computes the housing's own derived dimensions
+    itself (Inversion #1) -- that arithmetic lives in `packages.subsystems.envelope.compute_envelope`,
+    never here, and this phase's `apply_envelope_op` does not even call it yet (see that function's
+    own docstring for why: real multi-instance OCCT work must never run synchronously inline on an
+    apply path).
+
+    For `wrap_group`: `housing_instance` and `member_instance_ids` are REQUIRED -- SETS/REPLACES the
+    housing's entire `wraps` list wholesale (not an incremental add; re-issuing `wrap_group` with a
+    different list replaces the old one, it does not merge with it). For `unwrap_group`:
+    `housing_instance` is REQUIRED (`member_instance_ids` is ignored) -- clears `wraps` back to `[]`.
+    For `resync_envelope`: `housing_instance` is REQUIRED (`member_instance_ids` is ignored) -- intended
+    to re-derive the housing's dimensions after a wrapped member moved/resized, but there is no async
+    job to actually run that recompute yet (a later phase's job); it is a thin REJECTED stub in this
+    phase, present in the schema now so the LLM's tool surface doesn't need to change again once that
+    lands."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["wrap_group", "unwrap_group", "resync_envelope"]
+    housing_instance: str
+    member_instance_ids: Optional[list[str]] = None  # required for wrap_group; ignored for
+                                                       # unwrap_group/resync_envelope
+    rationale: Optional[str] = None
+
+
 class JoinAnnotationOp(BaseModel):
     """Add/remove a `JoinAnnotation` (2026-07-27) — records HOW two already-connected parts are
     joined (bolted/press_fit/welded/adhesive/custom), for the BOM/a human assembling the part. Purely
@@ -319,11 +358,15 @@ class DeltaProposal(BaseModel):
                     "claiming a part type can't have a cutout")
     instance_ops: list[InstanceOp] = Field(
         default_factory=list,
-        description="add/remove/move an instance of an EXISTING part type to compose a multi-part "
-                    "assembly — use add_instance when the user asks for something that isn't a single "
-                    "catalog part type (a satellite, a drone frame, a robot arm, ...): decompose it "
-                    "into several EXISTING subsystem types instead of refusing. Use move_instance to "
-                    "reposition an ALREADY-PLACED instance (e.g. 'put the pod on top of the wing')")
+        description="add/remove/move/clear_transform an instance of an EXISTING part type to compose "
+                    "a multi-part assembly — use add_instance when the user asks for something that "
+                    "isn't a single catalog part type (a satellite, a drone frame, a robot arm, ...): "
+                    "decompose it into several EXISTING subsystem types instead of refusing. Use "
+                    "move_instance to reposition an ALREADY-PLACED instance (e.g. 'put the pod on top "
+                    "of the wing'). Use clear_transform (instance_id only) to un-anchor an instance "
+                    "back to pure mate-resolved positioning WITHOUT destroying its couplings/regions/"
+                    "fit_bindings/params — the safe fix for a self-check's 'only one connected-group "
+                    "member may keep an explicit transform' finding, instead of remove+re-add")
     connection_ops: list[ConnectionOp] = Field(
         default_factory=list,
         description="MATE two parts by wiring their declared interfaces (e.g. wing_left.root <-> "
@@ -344,6 +387,17 @@ class DeltaProposal(BaseModel):
                     "part. resync_fit: re-derive after the host's dimensions changed. Only works "
                     "between a HOST that declares a cross-section and a CONNECTOR that declares a "
                     "matching socket (see the fit catalog below) — not every part pair qualifies")
+    envelope_ops: list[EnvelopeOp] = Field(
+        default_factory=list,
+        description="wrap_group: declare which ALREADY mate-connected instances a HOUSING-family part "
+                    "(one declaring envelope_socket) wraps/contains — sets housing_instance.wraps "
+                    "wholesale, then kicks off the async job that derives the housing's own outer "
+                    "dimensions from that group's real built geometry. Never guess a housing's outer "
+                    "size by hand; wrap_group + the derivation is the only grounded way to get it. "
+                    "unwrap_group: clear a housing's wraps back to empty. resync_envelope: re-derive "
+                    "after a wrapped member moved/resized. Only meaningful once the group being "
+                    "wrapped is a REAL, mate-connected cluster (connection_ops) — wrapping a guessed "
+                    "or ungrounded group defeats the point of this mechanism")
     join_annotation_ops: list[JoinAnnotationOp] = Field(
         default_factory=list,
         description="record HOW two already-CONNECTED parts are physically joined — bolted, "

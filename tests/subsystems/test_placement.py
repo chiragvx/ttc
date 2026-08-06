@@ -19,6 +19,7 @@ from packages.subsystems.placement import (
     connection_issues,
     resolve_mesh_mate,
     resolve_placements,
+    unanchored_components,
     world_frame_for_interface,
 )
 from packages.transport.app import make_demo_ledger
@@ -573,3 +574,102 @@ def test_resolve_placements_dispatches_a_mesh_connection_to_the_center_distance_
     assert placements["gb"].x_mm == pytest.approx(50.0)
     assert placements["gb"].y_mm == pytest.approx(0.0)
     assert placements["gb"].z_mm == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------------------------------
+# unanchored_components (2026-08-06, gearbox-housing-generation initiative, Phase 1) -- direct unit
+# coverage of the BFS/partition/anchored-exclusion/ordering logic itself. Prior to this, every test
+# touching this function went through tests/subsystems/test_assembly.py's 5 new tests, ALL gated
+# behind @pytest.mark.skipif(not HAS_B123D, ...) (they render real geometry via
+# geometry_query.group_world_bbox) -- so in any environment without build123d installed, this pure
+# closed-form function (no build123d import anywhere in its call path -- confirmed by reading it) had
+# ZERO test coverage. These tests call `unanchored_components` directly and never touch geometry, so
+# they run in every environment, build123d or not (R1 review finding, low severity, this phase).
+# ---------------------------------------------------------------------------------------------------
+
+def test_unanchored_components_returns_empty_list_when_nothing_is_connected():
+    led = add_instance(make_demo_ledger(), "round_post", "a")
+    assert unanchored_components(led) == []
+
+
+def test_unanchored_components_returns_the_single_component_when_unanchored():
+    led = make_demo_ledger()
+    led = add_instance(led, "round_post", "a")
+    led = add_instance(led, "round_post", "b")
+    led.connections = [
+        Connection(id="c1", a=InterfaceRef(instance_id="a", interface="bottom"),
+                   b=InterfaceRef(instance_id="b", interface="top")),
+    ]
+    assert unanchored_components(led) == [["a", "b"]]
+
+
+def test_unanchored_components_excludes_a_component_with_an_anchored_member():
+    # a component WITH an anchored member is deliberately excluded -- resolve_placements already seeds
+    # it at that anchor's own explicit transform, authoritative and not to be second-guessed here.
+    led = make_demo_ledger()
+    led = add_instance(led, "round_post", "a")
+    led = add_instance(led, "round_post", "b")
+    led.instances["a"].transform = Transform(x_mm=5.0)
+    led.connections = [
+        Connection(id="c1", a=InterfaceRef(instance_id="a", interface="bottom"),
+                   b=InterfaceRef(instance_id="b", interface="top")),
+    ]
+    assert unanchored_components(led) == []
+
+
+def test_unanchored_components_returns_multiple_disjoint_components_ordered_by_min_id():
+    # ordering mirrors resolve_placements's own component-processing order: repeatedly peel off
+    # min(remaining) -- so components come out sorted by each one's own minimum member id, and each
+    # component's own member list is sorted too.
+    led = make_demo_ledger()
+    for iid in ("z1", "z2", "a1", "a2"):
+        led = add_instance(led, "round_post", iid)
+    led.connections = [
+        Connection(id="c1", a=InterfaceRef(instance_id="z2", interface="bottom"),
+                   b=InterfaceRef(instance_id="z1", interface="top")),
+        Connection(id="c2", a=InterfaceRef(instance_id="a2", interface="bottom"),
+                   b=InterfaceRef(instance_id="a1", interface="top")),
+    ]
+    assert unanchored_components(led) == [["a1", "a2"], ["z1", "z2"]]
+
+
+def test_unanchored_components_returns_only_the_unanchored_components_when_mixed():
+    led = make_demo_ledger()
+    for iid in ("z1", "z2", "a1", "a2"):
+        led = add_instance(led, "round_post", iid)
+    led.instances["z1"].transform = Transform(x_mm=1.0)  # anchors the whole z1/z2 component
+    led.connections = [
+        Connection(id="c1", a=InterfaceRef(instance_id="z1", interface="bottom"),
+                   b=InterfaceRef(instance_id="z2", interface="top")),
+        Connection(id="c2", a=InterfaceRef(instance_id="a1", interface="bottom"),
+                   b=InterfaceRef(instance_id="a2", interface="top")),
+    ]
+    assert unanchored_components(led) == [["a1", "a2"]]
+
+
+def test_unanchored_components_reproduces_the_confirmed_collision_bug_scenario():
+    # THE scenario the confirmed bug describes (see placement.py's own docstring on this function): two
+    # SEPARATE mesh-connected gear pairs, NEITHER anchored -- resolve_placements alone would seed both
+    # components' datums at the identical world origin. This proves the pure partition logic correctly
+    # identifies them as TWO components needing their own auto-layout slot, without rendering any real
+    # geometry (unlike test_assembly.py's build123d-gated integration test of the same scenario).
+    led = make_demo_ledger()
+    for iid in ("g1a", "g1b", "g2a", "g2b"):
+        led = add_instance(led, "spur_gear", iid)
+    led.connections = [
+        Connection(id="stage1", a=InterfaceRef(instance_id="g1a", interface="mesh"),
+                   b=InterfaceRef(instance_id="g1b", interface="mesh")),
+        Connection(id="stage2", a=InterfaceRef(instance_id="g2a", interface="mesh"),
+                   b=InterfaceRef(instance_id="g2b", interface="mesh")),
+    ]
+    assert unanchored_components(led) == [["g1a", "g1b"], ["g2a", "g2b"]]
+
+
+def test_unanchored_components_self_loop_does_not_hang_or_crash():
+    # mirrors resolve_placements's own BFS-robustness test (test_cycle_and_self_loop_do_not_hang_or_crash)
+    # -- a meaningless self-mate must not send the BFS into an infinite loop.
+    led = add_instance(make_demo_ledger(), "wing_panel", "w")
+    _set(led, "w", "side_sign", 1, "sign", (-1.0, 1.0))
+    led.connections = [Connection(id="s", a=InterfaceRef(instance_id="w", interface="root"),
+                                  b=InterfaceRef(instance_id="w", interface="root"))]
+    assert unanchored_components(led) == [["w"]]

@@ -643,6 +643,64 @@ either. `label` is a short human-readable purpose string (e.g. "battery_pack_res
 "wiring_corridor") — free text, but should name WHAT the space is for, not just restate the `kind`.\
 """
 
+_CASCADE_RECOVERY_SECTION = """\
+## Fixing a self-check finding without losing ground — and without letting a clean check hide what's \
+still unanswered
+
+A self-check finding is a diagnosis, not a license to reach for whatever `instance_ops` verb is closest \
+at hand — getting back to `Self-check: ok` by deleting/duplicating your way there, or by letting a \
+question the user already asked quietly go unanswered again, is not a fix, it's a regression wearing a \
+green light. Three rules, all proven live on the SAME 2026-08-04 two-stage-gearbox build:
+
+**1. For the "v1 can only honor one connected-group member as the datum" finding, the fix is \
+`clear_transform` on every OTHER member of that group — nothing else.** `InstanceOp` \
+(packages/ledger/deltas.py) has a 4th op, `clear_transform` (`{op:"clear_transform", \
+instance_id:<the non-datum member>}`), that un-anchors an instance back to pure mate-resolved \
+positioning WITHOUT touching its couplings/regions/fit_bindings/params. Two other responses were tried \
+live and both failed:
+- **`move_instance` on every member of the conflicted group** — giving `stage1_gear` AND \
+`stage1_pinion` (etc.) fresh explicit coordinates just recreates the identical two-anchors-in-one-group \
+conflict with new numbers, since both STILL carry an explicit transform. Confirmed live: this was \
+tried, and the very next self-check reported the SAME finding for the SAME groups, unchanged — the \
+auto-correction loop's own note called it out explicitly ("the LAST correction attempt already tried \
+exactly this ... The issues above are STILL present ... do NOT repeat the same op(s) with the same \
+values again"). Never answer a multi-anchor finding by moving every member — only ONE member may keep \
+an explicit transform; every other member needs `clear_transform`, not a new position.
+- **`remove_instance` + `add_instance` to rebuild the conflicted instances from scratch** — this DID \
+reach `Self-check: ok`, but only by silently cascade-dropping all 4 of the build's gear-ratio couplings \
+(the only thing deriving output RPM/torque) and its wiring-harness keep-out region, neither ever \
+re-added or mentioned again. Never delete-and-recreate an instance just to clear an anchor conflict — \
+`clear_transform` exists specifically because this is strictly more destructive and throws away every \
+coupling/region/fit_binding wired to the instance, on top of every param the LLM had carefully set.
+
+**2. After ANY `remove_instance` or `remove_connection`, read that SAME call's own \
+`removed_coupling_ids`/`removed_region_ids`/`removed_fit_binding_ids`/`removed_join_annotation_ids`/ \
+`removed_connection_ids` before moving on — do not just check `ok`/`status`.** Each now lists exactly \
+what THAT call cascade-destroyed (empty if nothing did) — ids get reused, so a stale relation left \
+behind would otherwise silently resurrect onto an unrelated new part built later with the same id, \
+which is the entire reason the cascade exists. If any list is non-empty, in the SAME turn or the very \
+next one you must either re-wire the equivalent `coupling_ops`/`region_ops`/`fit_ops` for the \
+replacement instance, or say plainly in your reply, by name, that a previously-derived number no longer \
+exists and needs to be redone. Confirmed live cost of skipping this: the rebuild in point 1 \
+cascade-dropped `coupling_1`-`coupling_4` (both gear-ratio couplings on both stages) — had the \
+removed-ids list been read, that would have been visible immediately; instead nothing re-derived them \
+and nothing was said, making "give me the exact output RPM and torque," asked in the user's ORIGINAL \
+message, permanently unanswerable for the rest of that conversation.
+
+**3. Before your final reply on any turn that included a correction (auto or manual), reconfirm the \
+ORIGINAL request's explicit asks were actually satisfied — `Self-check: ok` alone does not mean they \
+were.** `ok` only means no CURRENT geometric conflict; it says nothing about whether a plain-language \
+numeric or safety question the user actually asked — an exact output value, "confirm the real FS on the \
+output shaft," "tell me it's safe to run at full torque" — was ever addressed. In the live build above, \
+those exact two asks from the FIRST message were never answered in any of the four replies that \
+followed, including the final one, which ended on a clean self-check with the request's own \
+numeric/safety questions still completely untouched. Before ending such a turn, explicitly check: did I \
+ever answer the specific number/confirmation this conversation was asked for? If the coupling/data \
+needed to answer it exists, answer it now; if not (as here, once the gear-ratio couplings were \
+cascade-dropped), say plainly, by name, what's still outstanding and why — never let a clean self-check \
+imply a question was answered when it wasn't.\
+"""
+
 _RESEARCH_TOOL_SECTION = """\
 ## Reference research — the `research_reference` tool (call it, don't wait for it)
 
@@ -923,6 +981,252 @@ def _airframe_pacing_section(ledger: MasterParametricLedger) -> str:
     )
 
 
+def _is_kinematic_mesh_part(model) -> bool:
+    """True iff `model` declares at least one `kind="mesh"` interface (packages/subsystems/base.py::
+    cylinder_axis_mesh_interface) — the one structural signal this catalog has today for "a gear-family
+    part meant to radially mesh with another" (`spur_gear` is the sole catalog adopter as of
+    2026-08-06). Never a hardcoded name list — mirrors this file's own `is_airframe_defining` precedent
+    (a declared flag/interface kind on the Subsystem, not a name guess)."""
+    return any(spec.kind == "mesh" for spec in model.interfaces)
+
+
+def _is_mate_connected(ledger: MasterParametricLedger, instance_id: str) -> bool:
+    """True iff `instance_id` is named by at least one `Connection` endpoint — a cheap, closed-form (no
+    OCCT, no `placement.resolve_placements`) proxy for "this part was joined via a real declared
+    interface, not a guessed x_mm/y_mm/z_mm transform." Deliberately lenient about whether the
+    connection actually RESOLVES (a dangling one still counts here) — this only paces what gets
+    PROPOSED next, it never gates anything; `connection_issues` (used below) is what actually catches a
+    broken graph."""
+    return any(c.a.instance_id == instance_id or c.b.instance_id == instance_id
+              for c in ledger.connections)
+
+
+def _envelope_dims_still_pending(model, inst) -> bool:
+    """True iff AT LEAST ONE of `inst`'s `envelope_socket`-mapped target params is still sitting at its
+    catalog-declared `ParamSpec` default — a cheap, closed-form proxy for "the Phase 3 async envelope-
+    derivation job hasn't landed yet (in full)" that needs no OCCT build. Only returns False once EVERY
+    mapped dim has moved off its default — a housing where just 1 of N derived dims has been touched
+    (e.g. a stray manual edit or delta landing before the async job finishes the rest) must still count
+    as pending; reporting "derived" the moment ANY ONE dim differs would steer the model into proposing
+    shell/DFM features grounded in the remaining ungrounded catalog-default placeholders, exactly the
+    "guessed-box housing" failure this phase exists to prevent. `compute_envelope` (packages/subsystems/
+    envelope.py) does real multi-instance OCCT work (group bbox + convex hull) — Inversion #2 forbids
+    calling that synchronously here: `build_system_prompt` runs on every conversational turn (the
+    human-timescale plane), never the debounced/async kernel-regen tier. A false negative is possible
+    (a hand-typed value that coincidentally matches the catalog default even after a real derivation)
+    but never a false BLOCK — this only paces a proposal, never gates one; `envelope_drift` (packages/
+    truth_plane/validate.py) is the authoritative, OCCT-grounded staleness check for anything that
+    actually needs to be correct."""
+    defaults = {p.name: p.value for p in model.params}
+    for target_param in model.envelope_socket.dim_params.values():
+        default = defaults.get(target_param)
+        pd = inst.params.get(target_param)
+        current = pd.value if pd is not None else None
+        if current is None or default is None or current == default:
+            return True
+    return False
+
+
+def _housing_pacing_section(ledger: MasterParametricLedger) -> str:
+    """Gearbox-housing-generation initiative pacing (2026-08-06, Phase 4) — teaches the 3-step sequence
+    Phases 0-3 actually built (mate-connect a kinematic cluster -> `wrap_group` it -> wait for the async
+    envelope derivation -> THEN propose the housing's own shell/DFM features) in the right ORDER.
+    Mirrors `_airframe_pacing_section` above EXACTLY in mechanism and posture: read straight off
+    `ledger.instances`/`ledger.connections` (never a separately-stored mode — nothing to get out of
+    sync if a part is later deleted/undone), and deliberately NOT a blocking gate (packages/agents/
+    CLAUDE.md's 2026-07-04 policy: every proposal auto-applies immediately, Undo is the safety net,
+    never a click-to-approve step) — this only paces what gets PROPOSED in one turn.
+
+    UNLIKE the ORIGINAL version of this section, which returned completely silent `""` whenever
+    NEITHER a housing-family nor a kinematic-mesh instance existed yet — REGARDLESS of whether the
+    ledger was empty or already held unrelated parts — this section now special-cases the genuinely
+    EMPTY ledger (R3-confirmed gap, fixed 2026-08-06): that old silence covered the exact FIRST turn of
+    a fresh housing/gearbox build — a user's opening message ("build me a 2-stage gearbox with a
+    housing") against an empty/new ledger has neither instance yet (nothing does, on turn one), so the
+    whole 3-step sequence below never got a chance to steer the model away from its
+    historically-observed failure: guessed x_mm/y_mm/z_mm gears PLUS a disconnected housing-shaped
+    part, both proposed in that same first response — by which point an ungrounded housing could
+    already be sitting in the ledger with an empty `wraps`. There is no ledger signal this function can
+    read to distinguish "the user's FIRST part will be a gearbox" from "the user's first part will be
+    an unrelated bracket" before any instance exists, and `build_system_prompt` never sees the user's
+    raw per-turn text (packages/agents/CLAUDE.md: the stable prefix must stay cacheable, so per-turn
+    conversational content can never enter it) — so, only for that one ambiguous empty-ledger turn,
+    mirror `_airframe_pacing_section`'s own answer to the identical problem: emit a fragment whose
+    applicability is hedged in the WORDING ("IF the user's request...") rather than gated in code, so a
+    non-gearbox first part reads past it as inapplicable. The MOMENT the ledger holds ANY instance
+    (housing/kinematic or not), this ambiguity is gone — a ledger already showing unrelated parts (a
+    bracket, an enclosure, ...) has already shown its hand as not a housing/gearbox build, and this
+    section goes back to its original, narrower silence for that case (see
+    `test_system_prompt_has_no_housing_pacing_fragment_without_any_housing_or_kinematic_part`, whose
+    ledger already carries an unrelated bracket instance and must keep seeing zero new prompt text).
+
+    Exactly ONE of six fragments, decided by ledger state, matching the sequence order:
+      0. the ledger is COMPLETELY empty (no instances of ANY type yet) -> emit the hedged "if this is a
+         gear train/gearbox build" fragment: propose ONLY the gear/shaft/bearing part(s),
+         mate-connected, and do NOT also add a housing this same turn.
+      1. the ledger already holds at least one instance, but NEITHER a housing-family nor a
+         kinematic-mesh instance is among them (an unrelated project, e.g. a lone bracket) -> stay
+         silent (`""`), exactly as before this fix — no signal here says this is a housing/gearbox
+         build.
+      1b. at least one of the two families exists somewhere in the ledger, but no kinematic-mesh
+         instance is mate-connected yet (none placed at all, or placed only via a guessed transform,
+         never a real connection) -> propose the gear/shaft/bearing part(s) FIRST, mate-connected via
+         `connection_ops` — never guessed x_mm/y_mm/z_mm.
+      2a. a mate-connected kinematic instance exists, `connection_issues` reports nothing wrong, and NO
+         housing-family instance exists in the ledger AT ALL (`housings == []`) -> do NOT propose
+         `wrap_group` — `apply_envelope_op` REJECTS it outright when `housing_instance` isn't already a
+         real ledger instance (2026-08-06, R2-caught gap: this used to share fragment 2b's text
+         verbatim, telling the model to "propose wrap_group" with nothing for `housing_instance` to
+         legally name — a guaranteed apply-time REJECTED, or worse, an invented/misused stand-in
+         instance). Tell it plainly a housing-family instance must be added FIRST (`instance_ops`, a
+         type that declares `envelope_socket`) if one is genuinely available to add, and never invent an
+         id or misuse an unrelated part type as a stand-in housing.
+      2b. a mate-connected kinematic instance exists, `connection_issues` reports nothing wrong, and AT
+         LEAST ONE housing-family instance already exists in the ledger but none wraps anything yet ->
+         propose `wrap_group` (Phase 2's EnvelopeOp) naming one of those REAL existing instance ids —
+         say plainly the real size follows once the async derivation (Phase 3) completes; never guess it
+         in the same turn.
+      3. some housing's `wraps` is set but its own envelope_socket-mapped params are still sitting at
+         their catalog defaults (`_envelope_dims_still_pending` — the derivation hasn't landed) -> wait,
+         do NOT propose the housing's shell/DFM features yet.
+      4. otherwise (every wrapped housing's derived dims look populated) -> propose the housing's own
+         shell/DFM features now, grounded in the real derived size.
+    A cluster that exists but whose self-check ISN'T clean (state 2a/2b's `connection_issues` gate)
+    falls through to no fragment at all for this turn — the ordinary self-check/auto-correct guidance
+    already owns telling the model to fix a broken connection graph; this section doesn't duplicate
+    that push."""
+    housings = []          # [(instance_id, Instance, Subsystem), ...] — declares envelope_socket
+    kinematic_ids: list[str] = []   # instance ids whose subsystem declares a kind="mesh" interface
+    for iid, inst in ledger.instances.items():
+        try:
+            model = get_subsystem_model(inst.subsystem_type)
+        except KeyError:
+            continue
+        if model.envelope_socket is not None:
+            housings.append((iid, inst, model))
+        if _is_kinematic_mesh_part(model):
+            kinematic_ids.append(iid)
+
+    if not housings and not kinematic_ids and not ledger.instances:
+        # R3-confirmed gap, fixed 2026-08-06: this used to `return ""` here unconditionally, which
+        # meant a user's very FIRST message building a housing/gearbox ("build me a 2-stage gearbox
+        # with a housing" against an empty ledger) got zero guidance -- the one turn this whole
+        # initiative exists to fix. Restricted to a genuinely EMPTY ledger (`not ledger.instances`),
+        # not merely "no housing/kinematic part yet" -- a ledger that already holds unrelated parts
+        # (a bracket, an enclosure, ...) has already shown its hand as NOT a housing/gearbox build, and
+        # must keep seeing ZERO new prompt text here, exactly as before (see
+        # test_system_prompt_has_no_housing_pacing_fragment_without_any_housing_or_kinematic_part,
+        # whose ledger already carries an unrelated bracket instance). Only the truly-empty first turn
+        # is genuinely ambiguous -- there, mirror `_airframe_pacing_section`'s own answer to the
+        # identical "can't tell intent from ledger state alone" problem: emit an always-on fragment
+        # whose applicability is hedged in the WORDING, not gated in code.
+        return (
+            "## Housing sequence — if this is a gear train / gearbox build, sequence it right\n"
+            "This file has no gear/shaft/bearing (kinematic-mesh) part and no housing-family part yet. "
+            "IF the user's request involves a multi-part kinematic assembly that will need a housing "
+            "later (a gear train, gearbox, gear reduction, or similar meshing gears/shafts/bearings) — "
+            "propose ONLY the gear/shaft/bearing part(s) THIS TURN, mate-connected via `connection_ops` "
+            "using their REAL declared interfaces (a gear's `mesh` interface for gear-to-gear meshing, "
+            "an ordinary mount interface for a shaft/bearing) — never a guessed `x_mm`/`y_mm`/`z_mm` "
+            "transform; the placement solver derives the correct position from the mate itself. Do NOT "
+            "also propose a housing-shaped part in this same turn: a housing can only ever legally "
+            "`wrap_group` a REAL, already-mate-connected cluster, and one doesn't exist yet — adding a "
+            "housing now would wrap nothing real, exactly the disconnected, ungrounded-box failure this "
+            "pacing exists to prevent. Say plainly that the housing follows once the kinematics are "
+            "placed and connected — do not silently decide the size or add it yourself yet.\n"
+            "If the user's request is NOT a gear-train/gearbox/housing build, this fragment does not "
+            "apply — ignore it, exactly like any other request that doesn't match.\n"
+            "This never blocks anything — it only paces what gets PROPOSED this turn."
+        )
+
+    if not housings and not kinematic_ids:
+        # The ledger already holds at least one instance (else the branch above would have caught it),
+        # but none of it is housing/kinematic-family -- an unrelated project (e.g. a lone bracket) has
+        # already shown its hand as NOT a housing/gearbox build. Preserve the ORIGINAL silent behavior
+        # here (unchanged by the R3 fix above, which only touched the genuinely-empty-ledger case).
+        return ""
+
+    if not any(_is_mate_connected(ledger, iid) for iid in kinematic_ids):
+        return (
+            "## Housing sequence — mate-connect the kinematic parts FIRST\n"
+            "This file needs a real, mate-connected kinematic cluster (gears/shafts/bearings) before "
+            "anything can wrap it. Propose the gear/shaft/bearing part(s) now, joined via "
+            "`connection_ops` using their REAL declared interfaces (a gear's `mesh` interface for "
+            "gear-to-gear meshing, an ordinary mount interface for a shaft/bearing) — never a guessed "
+            "`x_mm`/`y_mm`/`z_mm` transform; the placement solver derives the correct position from the "
+            "mate itself. A housing can only ever wrap a REAL, mate-connected group (`wrap_group`) — "
+            "proposing a housing before this cluster exists would wrap nothing real, exactly the "
+            "failure this pacing exists to prevent.\n"
+            "This never blocks anything — it only paces what gets PROPOSED this turn."
+        )
+
+    from packages.subsystems.placement import connection_issues
+    if not any(inst.wraps for _iid, inst, _model in housings):
+        if connection_issues(ledger):
+            return ""  # cluster exists but isn't clean yet -- let the ordinary self-check own this
+        if not housings:
+            # State 2a (R2-caught gap, 2026-08-06): NO housing-family instance exists in this ledger at
+            # all yet -- distinct from 2b below (a housing instance already exists but wraps nothing).
+            # `apply_envelope_op`'s wrap_group branch REJECTS unconditionally when
+            # `ledger.instances.get(op.housing_instance) is None` (packages/ledger/apply.py) -- there is
+            # no `housing_instance` this turn could legally name, so telling the model to "propose
+            # wrap_group" here (as this branch used to, sharing 2b's text verbatim) is unsatisfiable:
+            # it either gets REJECTED, or the model invents/misuses an unrelated instance as a stand-in
+            # housing -- exactly the shallow-stand-in failure ("a box guessed and called 'enclosure' is
+            # not a housing") this whole initiative exists to prevent.
+            return (
+                "## Housing sequence — no housing-family part exists yet, don't propose wrap_group\n"
+                "A real, mate-connected kinematic cluster now exists with a clean self-check, but this "
+                "file has no housing-family instance (a part whose subsystem declares "
+                "`envelope_socket`) yet — `wrap_group` has no real `housing_instance` to name, and "
+                "`apply_envelope_op` REJECTS it outright when that instance doesn't already exist. Do "
+                "NOT invent a housing_instance id, and do NOT misuse an unrelated part (e.g. a generic "
+                "enclosure) as a stand-in housing. If a housing-family part type is genuinely available "
+                "to add from the part-type menu, propose `instance_ops` to add it FIRST, by itself — "
+                "`wrap_group` can only legally follow once that instance is real (a later turn, or the "
+                "same proposal, since instance_ops always apply before envelope_ops). Otherwise say "
+                "plainly that no housing part type exists yet and wait.\n"
+                "This never blocks anything — it only paces what gets PROPOSED this turn."
+            )
+        # State 2b: at least one housing-family instance is already real in this ledger, just wraps
+        # nothing yet -- name it explicitly so the model has a REAL id to put in `housing_instance`
+        # instead of guessing one.
+        housings_without_wraps = [iid for iid, inst, _model in housings if not inst.wraps]
+        return (
+            "## Housing sequence — the kinematic cluster is ready, wrap it next\n"
+            f"A real, mate-connected kinematic cluster now exists with a clean self-check, and "
+            f"{', '.join(housings_without_wraps)} (already a real instance in this file) doesn't wrap "
+            f"anything yet. Propose `wrap_group` (Phase 2's EnvelopeOp) naming "
+            f"housing_instance={housings_without_wraps[0]!r} to declare which instances it wraps — do "
+            "NOT also propose the housing's own outer dimensions in this same turn: the real size is "
+            "derived from the group's actual built geometry by an async job (Phase 3) once "
+            "`wrap_group` applies, never guessed. Say plainly that the size follows once that "
+            "completes.\n"
+            "This never blocks anything — it only paces what gets PROPOSED this turn."
+        )
+
+    pending = [iid for iid, inst, model in housings if inst.wraps and _envelope_dims_still_pending(model, inst)]
+    if pending:
+        return (
+            "## Housing sequence — envelope derivation is still pending, wait\n"
+            f"{', '.join(pending)} already wraps a group, but its own outer dimensions haven't been "
+            "derived yet (still sitting at their catalog defaults) — the async envelope-derivation job "
+            "(Phase 3) hasn't landed. Do NOT propose the housing's shell/DFM features (wall thickness, "
+            "ribs, bosses, cutouts) this turn — those need the REAL derived size, not a guess. Wait for "
+            "the derivation, or say so plainly if asked what's next.\n"
+            "This never blocks anything — it only paces what gets PROPOSED this turn."
+        )
+
+    return (
+        "## Housing sequence — derived dimensions are in, the shell is next\n"
+        "The housing's outer envelope has been derived from its wrapped group's real geometry. Propose "
+        "the housing's own shell/DFM features (wall thickness, ribs, bosses, mounting bosses, cutouts) "
+        "freely now, grounded in those derived dimensions — do NOT re-ask about the shape or re-derive "
+        "it by hand.\n"
+        "This never blocks anything — it only paces what gets PROPOSED this turn."
+    )
+
+
 def _instances_section(ledger: MasterParametricLedger) -> str:
     """Compact instance-id listing so the copilot can pick a real `instance_id` for `feature_ops` (or
     any other instance-targeted delta) instead of guessing. Stable-ish content — the instance set
@@ -969,6 +1273,12 @@ def build_system_prompt(subsystem_ctx: SubsystemContext | None, ledger: MasterPa
     active_name = subsystem_ctx.name if subsystem_ctx is not None else None
     sections = [_BASE_RULES, _subsystems_section(active_name, ledger), _INSTANCE_OPS_SECTION,
                 _airframe_pacing_section(ledger)]
+    housing_pacing = _housing_pacing_section(ledger)
+    if housing_pacing:
+        # mirrors the `if disciplines:` conditional-append immediately below (2026-08-06) — unlike
+        # `_airframe_pacing_section` (always non-empty), this section is silent for the common
+        # no-housing-family-instance-at-all case and must not inject a stray blank `\n\n` separator.
+        sections.append(housing_pacing)
     # Every DISTINCT subsystem type actually instantiated in the file gets its own domain-knowledge
     # fragment (design-intent mapping, worked sizing examples, unit conventions — e.g.
     # longeron.py's own "stiffer -> increase height_mm (bending stiffness scales with height^3)"
@@ -1005,6 +1315,7 @@ def build_system_prompt(subsystem_ctx: SubsystemContext | None, ledger: MasterPa
     sections.append(_FIT_OPS_SECTION)
     sections.append(_JOIN_ANNOTATION_OPS_SECTION)
     sections.append(_REGION_OPS_SECTION)
+    sections.append(_CASCADE_RECOVERY_SECTION)
     if research_provider_configured():
         # No point describing a tool the model isn't actually being offered this run (stream_chat
         # only adds `research_reference` to `tools` under the same gate) — an always-present section

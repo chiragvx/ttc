@@ -95,24 +95,19 @@ def _identity_transform() -> "Transform":
     return Transform()
 
 
-def resolve_placements(ledger: "MasterParametricLedger") -> dict[str, "Transform"]:
-    """`{instance_id: world Transform}` for every instance reached by a connection. An instance with NO
-    connection is absent (the caller's existing auto-layout handles it). Within a connected component the
-    datum is an instance carrying an explicit `transform` (an anchor), else the ledger root if present,
-    else the lowest id — and it keeps its own transform (or identity). Others are mated to it, BFS,
-    first-reached-wins (a second connection into an already-placed part is ignored here and surfaced by
-    `connection_issues`)."""
-    from packages.ledger.schema import Transform
-
-    adj = _adjacency(ledger)
+def _connected_components(adj: dict[str, list]) -> list[list[str]]:
+    """Connected components of the graph `_adjacency` describes, as (sorted) member-id lists, ordered by
+    each component's own minimum id (repeatedly peel off `min(remaining)`, then BFS/stack out via
+    adjacency). The SINGLE shared implementation for `resolve_placements`'s per-component datum/BFS setup
+    and `unanchored_components`'s own component scan — previously each carried its own textually-identical
+    copy of this BFS/stack loop, a DRY hazard the reviewer confirmed: a future change to component-
+    detection semantics (e.g. how `_adjacency` neighbors are walked) made in only one copy could make the
+    mate solver and the collision-avoidance packer partition the same connection graph differently."""
     connected = {iid for iid, nbrs in adj.items() if nbrs}
-    placed: dict[str, Transform] = {}
-
     remaining = set(connected)
+    out: list[list[str]] = []
     while remaining:
-        # choose a datum for this component: an anchored (explicit-transform) instance, else root, else min id
         comp_seed = min(remaining)
-        # gather the component via BFS on adjacency
         comp: set[str] = set()
         stack = [comp_seed]
         while stack:
@@ -123,6 +118,28 @@ def resolve_placements(ledger: "MasterParametricLedger") -> dict[str, "Transform
             for nb, *_ in adj[cur]:
                 if nb not in comp:
                     stack.append(nb)
+        remaining -= comp
+        out.append(sorted(comp))
+    return out
+
+
+def resolve_placements(ledger: "MasterParametricLedger") -> dict[str, "Transform"]:
+    """`{instance_id: world Transform}` for every instance reached by a connection. An instance with NO
+    connection is absent (the caller's existing auto-layout handles it). Within a connected component the
+    datum is an instance carrying an explicit `transform` (an anchor), else the ledger root if present,
+    else the lowest id — and it keeps its own transform (or identity). Others are mated to it, BFS,
+    first-reached-wins (a second connection into an already-placed part is ignored here and surfaced by
+    `connection_issues`)."""
+    from packages.ledger.schema import Transform
+
+    adj = _adjacency(ledger)
+    placed: dict[str, Transform] = {}
+
+    # component discovery/ordering is `_connected_components`'s job (shared with `unanchored_components`);
+    # this loop keeps only what's unique to placement: datum selection + mate-propagation BFS per component.
+    for comp_list in _connected_components(adj):
+        comp = set(comp_list)
+        # choose a datum for this component: an anchored (explicit-transform) instance, else root, else min id
         anchored = [i for i in comp if ledger.instances[i].transform is not None]
         if anchored:
             datum = min(anchored)
@@ -168,9 +185,32 @@ def resolve_placements(ledger: "MasterParametricLedger") -> dict[str, "Transform
                 placed[nb] = Transform(x_mm=tx, y_mm=ty, z_mm=tz)
                 queue.append(nb)
 
-        remaining -= comp
-
     return placed
+
+
+def unanchored_components(ledger: "MasterParametricLedger") -> list[list[str]]:
+    """Every connected component of the connection graph that has NO anchored (explicit-`transform`)
+    member, as a list of (sorted) member-id lists, ordered by each component's own minimum id --
+    shares `_connected_components`'s discovery/ordering with `resolve_placements` (see that helper's
+    docstring), so the two can never partition the same connection graph differently.
+
+    2026-08-06 (gearbox-housing-generation initiative, Phase 1): `resolve_placements` above seeds a
+    component with no anchored member at `_identity_transform()` (world origin) purely for lack of one
+    -- fine for exactly ONE such component, but EVERY unanchored component seeds at that SAME shared
+    origin independently, so a second one collides with the first (the confirmed bug: two unrelated
+    mesh-connected gear pairs, neither anchored, land exactly on top of each other -- verified live,
+    their resolved world bboxes come out literally identical). `assembly.py::instance_world_offsets`
+    uses this list to give each such component its own auto-layout slot -- exactly like an ordinary
+    unconnected instance gets one via its own lane-cursor mechanism today, just keyed by CONNECTED
+    COMPONENT instead of single instance id.
+
+    A component WITH an anchored member is deliberately EXCLUDED here -- `resolve_placements` already
+    seeds it at that anchor's own explicit transform, which is authoritative and must not be
+    second-guessed by auto-layout (unchanged from today's behavior; see that function's own
+    datum-selection rule)."""
+    adj = _adjacency(ledger)
+    return [comp for comp in _connected_components(adj)
+            if not any(ledger.instances[i].transform is not None for i in comp)]
 
 
 def _world_frame(ledger, placements, instance_id: str, interface: str) -> Optional[Frame]:

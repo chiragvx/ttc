@@ -140,6 +140,19 @@ class Instance(_Strict):
     transform: Optional[Transform] = None
     parent_id: Optional[str] = None   # None == root
     cut_features: list[CutFeature] = Field(default_factory=list)
+    # 2026-08-05 (gearbox-housing-generation initiative, Phase 2) -- which instance ids THIS instance
+    # (when it's a housing-family subsystem declaring `envelope_socket`, see
+    # packages/subsystems/base.py::EnvelopeSocketSpec/Subsystem.envelope_socket) is declared to
+    # WRAP/CONTAIN. Same precedent as `cut_features` above: a universal field on every Instance,
+    # meaningful only for the subset of subsystems that actually use it -- meaningless/ignored for any
+    # subsystem that doesn't declare `envelope_socket` (no housing-family subsystem exists in the
+    # catalog yet; a later phase is the first real consumer). Backward compatible: every existing
+    # Instance gets an empty list by default, zero behavior change anywhere else in the ledger. Written
+    # ONLY through `EnvelopeOp.wrap_group`/`unwrap_group` (packages/ledger/apply.py::
+    # apply_envelope_op) -- never derived, never a live-recomputed value itself (contrast `derived.*`,
+    # which the LLM can never write at all; `wraps` is ordinary wiring data, the SAME posture
+    # `FitBinding.connector_instance`/`host_instance` already have).
+    wraps: list[str] = Field(default_factory=list)
 
 
 class DerivedSafety(_Strict):

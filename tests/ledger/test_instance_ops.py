@@ -12,7 +12,17 @@ import pytest
 
 from packages.ledger.apply import ApplyStatus, apply_instance_op
 from packages.ledger.deltas import InstanceOp, parameter_delta_tool_schema
-from packages.ledger.schema import Instance
+from packages.ledger.schema import (
+    Connection,
+    Coupling,
+    CouplingInput,
+    FitBinding,
+    FitInput,
+    Instance,
+    InterfaceRef,
+    JoinAnnotation,
+    Region,
+)
 
 from packages.subsystems import SUBSYSTEM_REGISTRY, get_subsystem_model
 from packages.subsystems.assembly_template import reconcile_children
@@ -40,7 +50,8 @@ def test_instance_ops_present_in_tool_schema():
     instance_op_schema = defs[ref]
     assert "op" in instance_op_schema["properties"]
     op_enum = instance_op_schema["properties"]["op"]
-    assert set(op_enum.get("enum", [])) == {"add_instance", "remove_instance", "move_instance"}
+    assert set(op_enum.get("enum", [])) == {
+        "add_instance", "remove_instance", "move_instance", "clear_transform"}
     # extra="forbid" must survive into the wire schema (strict tool-use — no smuggled fields)
     assert instance_op_schema.get("additionalProperties") is False
 
@@ -425,3 +436,248 @@ def test_move_instance_with_rotation_given_uses_new_rotation(base_ledger):
     assert moved.transform.rx_deg == pytest.approx(45.0)
     assert moved.transform.ry_deg == pytest.approx(90.0)
     assert moved.transform.rz_deg == pytest.approx(0.0)
+
+
+# --- clear_transform (2026-08-05) -------------------------------------------------------------
+#
+# THE CONFIRMED GAP this covers: the self-check's own "v1 can only honor one connected-group member
+# as the datum — remove the extra anchors" finding had no safe fix. The only way to un-anchor an
+# instance was delete + re-add, which (a) cascade-destroys every connection/coupling/region/
+# fit_binding wired to it (see the cascade-completeness section below) and (b) throws away every
+# param the LLM had carefully set. clear_transform sets `transform` back to None (pure mate-/
+# auto-layout-resolved positioning) and touches NOTHING else.
+
+
+def test_clear_transform_success_reverts_transform_to_none(base_ledger):
+    led, add_out = _add(base_ledger, x_mm=10.0, y_mm=20.0, z_mm=30.0, rx_deg=5.0, ry_deg=6.0, rz_deg=7.0)
+    assert add_out.status is ApplyStatus.APPLIED
+    assert led.instances["standoff_1"].transform is not None
+
+    op = InstanceOp(op="clear_transform", instance_id="standoff_1")
+    new, out = apply_instance_op(led, op, KNOWN, seed_defaults=_seed_defaults)
+
+    assert out.status is ApplyStatus.APPLIED
+    assert out.instance_id == "standoff_1"
+    assert out.instance is not None and out.instance.transform is None
+    # `previous_instance` carries the PRE-clear state, mirroring move_instance's own Undo shape
+    assert out.previous_instance is not None
+    assert out.previous_instance.transform is not None
+    assert out.previous_instance.transform.x_mm == pytest.approx(10.0)
+    assert new.instances["standoff_1"].transform is None
+    assert led.instances["standoff_1"].transform is not None  # prior ledger untouched
+
+
+def test_clear_transform_missing_instance_id_rejected(base_ledger):
+    op = InstanceOp(op="clear_transform")
+    new, out = apply_instance_op(base_ledger, op, KNOWN, seed_defaults=_seed_defaults)
+    assert out.status is ApplyStatus.REJECTED
+    assert "instance_id" in out.message
+    assert new is base_ledger
+
+
+def test_clear_transform_unknown_instance_id_rejected(base_ledger):
+    op = InstanceOp(op="clear_transform", instance_id="ghost")
+    new, out = apply_instance_op(base_ledger, op, KNOWN, seed_defaults=_seed_defaults)
+    assert out.status is ApplyStatus.REJECTED
+    assert "ghost" in out.message
+    assert new is base_ledger
+
+
+def test_clear_transform_on_instance_with_no_prior_transform_is_still_applied(base_ledger):
+    """An instance auto-layout-placed (no explicit transform) has nothing to clear, but the op is
+    still a valid no-op APPLIED — not a REJECTED "nothing to do", since the end state (transform is
+    None) is exactly what was asked for."""
+    led, add_out = _add(base_ledger)  # no x/y/z -> transform stays None
+    assert add_out.status is ApplyStatus.APPLIED
+    assert led.instances["standoff_1"].transform is None
+
+    op = InstanceOp(op="clear_transform", instance_id="standoff_1")
+    new, out = apply_instance_op(led, op, KNOWN, seed_defaults=_seed_defaults)
+    assert out.status is ApplyStatus.APPLIED
+    assert new.instances["standoff_1"].transform is None
+
+
+def test_clear_transform_does_not_touch_couplings_regions_fit_bindings_or_params(base_ledger):
+    """THE WHOLE POINT of preferring clear_transform over remove+re-add: every OTHER thing wired to
+    this instance survives byte-for-byte, and its own params are untouched — only `transform` moves."""
+    led, add_out = _add(base_ledger, x_mm=1.0, y_mm=2.0, z_mm=3.0)
+    assert add_out.status is ApplyStatus.APPLIED
+    original_params = dict(led.instances["standoff_1"].params)
+
+    region = Region(id="region_1", host_instance="standoff_1", kind="keep_out", label="l",
+                    x_mm=0.0, y_mm=0.0, z_mm=0.0, dx_mm=1.0, dy_mm=1.0, dz_mm=1.0)
+    fit = FitBinding(id="fit_1", connector_instance="standoff_1", host_instance="root", kind="round",
+                     inputs=[FitInput(host_param="hole_diameter_mm", connector_param="hole_diameter_mm")])
+    coupling = Coupling(id="coupling_1", target_instance="standoff_1", relation="force_from_pressure_area",
+                        inputs={"pressure_pa": CouplingInput(value=100.0)})
+    led = led.model_copy(update={"regions": [region], "fit_bindings": [fit], "couplings": [coupling]})
+
+    op = InstanceOp(op="clear_transform", instance_id="standoff_1")
+    new, out = apply_instance_op(led, op, KNOWN, seed_defaults=_seed_defaults)
+
+    assert out.status is ApplyStatus.APPLIED
+    assert new.instances["standoff_1"].transform is None
+    # everything else, byte-for-byte unchanged
+    assert new.regions == [region]
+    assert new.fit_bindings == [fit]
+    assert new.couplings == [coupling]
+    assert new.instances["standoff_1"].params == original_params
+
+
+# --- remove_instance cascade-completeness: regions / fit_bindings / join_annotations (2026-08-05) -
+#
+# THE CONFIRMED BUG this covers (live repro against the running backend, see the ledger-fix brief):
+# remove_instance already cascaded away connections/couplings referencing the removed instance, but
+# NOT Regions (host_instance) or FitBindings (connector_instance/host_instance) or JoinAnnotations
+# (one hop through a cascade-removed Connection). Because instance/connection ids are REUSED
+# (lowest-free), a stale record left behind silently resurrects onto an unrelated NEW instance/
+# connection built later with the same id — each test below proves BOTH halves: the cascade removal
+# itself, AND that a reused id does not inherit the old record.
+
+
+def test_remove_instance_cascades_region_and_reused_id_does_not_inherit_it(base_ledger):
+    led, add_out = _add(base_ledger)  # standoff_1
+    assert add_out.status is ApplyStatus.APPLIED
+    region = Region(id="region_1", host_instance="standoff_1", kind="keep_out", label="l",
+                    x_mm=0.0, y_mm=0.0, z_mm=0.0, dx_mm=1.0, dy_mm=1.0, dz_mm=1.0)
+    led = led.model_copy(update={"regions": [region]})
+
+    rm_op = InstanceOp(op="remove_instance", instance_id="standoff_1")
+    new, out = apply_instance_op(led, rm_op, KNOWN, seed_defaults=_seed_defaults)
+    assert out.status is ApplyStatus.APPLIED
+    assert out.removed_region_ids == ["region_1"]
+    assert new.regions == []
+
+    # THE ID-REUSE REGRESSION: re-adding "standoff_1" (the exact id just freed) must NOT silently
+    # resurrect the cascade-removed region onto this new, unrelated instance.
+    led2, add_out2 = _add(new)
+    assert add_out2.status is ApplyStatus.APPLIED
+    assert add_out2.instance_id == "standoff_1"
+    assert led2.regions == []
+
+
+@pytest.mark.parametrize("role", ["connector_instance", "host_instance"])
+def test_remove_instance_cascades_fit_binding_and_reused_id_does_not_inherit_it(base_ledger, role):
+    led, out1 = _add(base_ledger, instance_id="standoff_1")
+    assert out1.status is ApplyStatus.APPLIED
+    other_op = InstanceOp(op="add_instance", subsystem_type="standoff", instance_id="standoff_other")
+    led, out2 = apply_instance_op(led, other_op, KNOWN, seed_defaults=_seed_defaults)
+    assert out2.status is ApplyStatus.APPLIED
+
+    fit_kwargs = dict(id="fit_1", kind="round",
+                      inputs=[FitInput(host_param="hole_diameter_mm", connector_param="hole_diameter_mm")])
+    fit_kwargs["connector_instance"] = "standoff_1" if role == "connector_instance" else "standoff_other"
+    fit_kwargs["host_instance"] = "standoff_other" if role == "connector_instance" else "standoff_1"
+    fit = FitBinding(**fit_kwargs)
+    led = led.model_copy(update={"fit_bindings": [fit]})
+
+    rm_op = InstanceOp(op="remove_instance", instance_id="standoff_1")
+    new, out = apply_instance_op(led, rm_op, KNOWN, seed_defaults=_seed_defaults)
+    assert out.status is ApplyStatus.APPLIED
+    assert out.removed_fit_binding_ids == ["fit_1"]
+    assert new.fit_bindings == []
+
+    # THE ID-REUSE REGRESSION
+    led2, add_out2 = _add(new, instance_id="standoff_1")
+    assert add_out2.status is ApplyStatus.APPLIED
+    assert led2.fit_bindings == []
+
+
+def test_remove_instance_cascades_join_annotation_via_cascaded_connection(base_ledger):
+    """A JoinAnnotation never references an instance directly — it references a Connection. Removing
+    the instance cascades away the Connection (pre-existing behavior); THIS test proves it also
+    cascades one hop further, away the JoinAnnotation attached to that now-removed Connection."""
+    led, out1 = _add(base_ledger, instance_id="standoff_1")
+    assert out1.status is ApplyStatus.APPLIED
+    other_op = InstanceOp(op="add_instance", subsystem_type="standoff", instance_id="standoff_other")
+    led, out2 = apply_instance_op(led, other_op, KNOWN, seed_defaults=_seed_defaults)
+    assert out2.status is ApplyStatus.APPLIED
+
+    conn = Connection(id="conn_1", a=InterfaceRef(instance_id="standoff_1", interface="top"),
+                      b=InterfaceRef(instance_id="standoff_other", interface="bottom"))
+    annotation = JoinAnnotation(id="join_1", connection_id="conn_1", method="bolted")
+    led = led.model_copy(update={"connections": [conn], "join_annotations": [annotation]})
+
+    rm_op = InstanceOp(op="remove_instance", instance_id="standoff_1")
+    new, out = apply_instance_op(led, rm_op, KNOWN, seed_defaults=_seed_defaults)
+    assert out.status is ApplyStatus.APPLIED
+    assert out.removed_connection_ids == ["conn_1"]
+    assert out.removed_join_annotation_ids == ["join_1"]
+    assert new.connections == []
+    assert new.join_annotations == []
+
+    # THE ID-REUSE REGRESSION, one hop further than the connection itself: re-add BOTH instances so
+    # a fresh connection can legitimately reuse "conn_1" (the exact id just freed), and confirm it
+    # does NOT silently inherit the cascade-removed join annotation.
+    led2, add_out2 = _add(new, instance_id="standoff_1")
+    assert add_out2.status is ApplyStatus.APPLIED
+    new_conn = Connection(id="conn_1", a=InterfaceRef(instance_id="standoff_1", interface="top"),
+                          b=InterfaceRef(instance_id="standoff_other", interface="bottom"))
+    led3 = led2.model_copy(update={"connections": [new_conn]})
+    assert led3.join_annotations == []
+
+
+def test_remove_instance_scrubs_wraps_and_reused_id_does_not_reattach(base_ledger):
+    """THE CONFIRMED BUG this covers (2026-08-06 review): remove_instance already cascaded away
+    connections/couplings/regions/fit_bindings/join_annotations that referenced the removed instance,
+    but left a housing's `wraps` list (packages/ledger/schema.py::Instance.wraps) dangling — unlike
+    its five siblings, `wraps` lives ON the housing Instance itself rather than in a top-level ledger
+    collection. Because instance ids are reused (lowest-free), a stale `wraps` entry left behind would
+    silently re-attach to whichever new instance later reuses the freed id. This proves both halves:
+    the scrub itself, and that a reused id does not inherit the old membership."""
+    led, out1 = _add(base_ledger, instance_id="standoff_1")
+    assert out1.status is ApplyStatus.APPLIED
+    housing_op = InstanceOp(op="add_instance", subsystem_type="standoff", instance_id="housing_1")
+    led, out2 = apply_instance_op(led, housing_op, KNOWN, seed_defaults=_seed_defaults)
+    assert out2.status is ApplyStatus.APPLIED
+
+    # No housing-family subsystem exists in the catalog yet (2026-08-05 note in schema.py) — `wraps`
+    # is a universal field on every Instance, same precedent as `cut_features`, so setting it directly
+    # on an ordinary "standoff" instance is the correct way to test the cascade in isolation.
+    housing = led.instances["housing_1"].model_copy(update={"wraps": ["standoff_1"]})
+    led = led.model_copy(update={"instances": {**led.instances, "housing_1": housing}})
+    assert led.instances["housing_1"].wraps == ["standoff_1"]
+
+    rm_op = InstanceOp(op="remove_instance", instance_id="standoff_1")
+    new, out = apply_instance_op(led, rm_op, KNOWN, seed_defaults=_seed_defaults)
+    assert out.status is ApplyStatus.APPLIED
+    assert out.scrubbed_wraps_instance_ids == ["housing_1"]
+    assert new.instances["housing_1"].wraps == []
+
+    # THE ID-REUSE REGRESSION: re-adding "standoff_1" (the exact id just freed) must NOT silently
+    # resurrect it into housing_1's wraps list.
+    led2, add_out2 = _add(new, instance_id="standoff_1")
+    assert add_out2.status is ApplyStatus.APPLIED
+    assert led2.instances["housing_1"].wraps == []
+
+
+def test_remove_instance_scrubs_wraps_only_the_removed_member_leaves_siblings(base_ledger):
+    """A housing can wrap MULTIPLE members — removing one must scrub only that one id out of
+    `wraps`, leaving every other member (and any OTHER housing not referencing the removed instance
+    at all) untouched."""
+    led, out1 = _add(base_ledger, instance_id="standoff_1")
+    assert out1.status is ApplyStatus.APPLIED
+    led, out2 = apply_instance_op(
+        led, InstanceOp(op="add_instance", subsystem_type="standoff", instance_id="standoff_2"),
+        KNOWN, seed_defaults=_seed_defaults)
+    assert out2.status is ApplyStatus.APPLIED
+    led, out3 = apply_instance_op(
+        led, InstanceOp(op="add_instance", subsystem_type="standoff", instance_id="housing_1"),
+        KNOWN, seed_defaults=_seed_defaults)
+    assert out3.status is ApplyStatus.APPLIED
+    led, out4 = apply_instance_op(
+        led, InstanceOp(op="add_instance", subsystem_type="standoff", instance_id="housing_2"),
+        KNOWN, seed_defaults=_seed_defaults)
+    assert out4.status is ApplyStatus.APPLIED
+
+    housing1 = led.instances["housing_1"].model_copy(update={"wraps": ["standoff_1", "standoff_2"]})
+    housing2 = led.instances["housing_2"].model_copy(update={"wraps": ["standoff_2"]})
+    led = led.model_copy(update={"instances": {**led.instances, "housing_1": housing1,
+                                               "housing_2": housing2}})
+
+    rm_op = InstanceOp(op="remove_instance", instance_id="standoff_1")
+    new, out = apply_instance_op(led, rm_op, KNOWN, seed_defaults=_seed_defaults)
+    assert out.status is ApplyStatus.APPLIED
+    assert out.scrubbed_wraps_instance_ids == ["housing_1"]
+    assert new.instances["housing_1"].wraps == ["standoff_2"]  # scrubbed, sibling member kept
+    assert new.instances["housing_2"].wraps == ["standoff_2"]  # untouched — never referenced standoff_1

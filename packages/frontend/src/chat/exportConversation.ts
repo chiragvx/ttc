@@ -41,6 +41,11 @@ function messageOpsSection(m: ChatMessage): string[] {
     lines.push(statusLine(`fit_op ${op.op}`, outcome?.status ?? "pending",
       outcome?.fitId ?? null, outcome?.message));
   });
+  m.envelopeOps?.forEach((op, i) => {
+    const outcome = m.envelopeOpOutcomes?.[i];
+    lines.push(statusLine(`envelope_op ${op.op}`, outcome?.status ?? "pending",
+      outcome?.housingInstanceId ?? op.housing_instance ?? null, outcome?.message));
+  });
   m.joinAnnotationOps?.forEach((op, i) => {
     const outcome = m.joinAnnotationOpOutcomes?.[i];
     lines.push(statusLine(`join_annotation_op ${op.op}`, outcome?.status ?? "pending",

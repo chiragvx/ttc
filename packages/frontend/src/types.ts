@@ -168,8 +168,15 @@ export interface InstanceSnapshot {
 //     rejection.
 //   - `rx_deg`/`ry_deg`/`rz_deg` are OPTIONAL, all-or-nothing. Omitted -> the instance KEEPS its
 //     current rotation (never silently zeroed).
+//
+// `clear_transform` (2026-08-05) — mirrors packages/ledger/deltas.py::InstanceOp — is the SAFE
+// escape hatch from the self-check's "two mated instances both carry an explicit transform" trap:
+// un-anchors an instance back to pure mate-/auto-layout-resolved positioning WITHOUT the
+// destruction a remove_instance + re-add would cause (every coupling/region/fit_binding/
+// join_annotation/param wired to the instance is left untouched). Only `instance_id` is used (same
+// required/unknown-id validation as move_instance); no position fields apply.
 export interface InstanceOp {
-  op: "add_instance" | "remove_instance" | "move_instance";
+  op: "add_instance" | "remove_instance" | "move_instance" | "clear_transform";
   subsystem_type?: string | null;   // add_instance only
   instance_id?: string | null;      // required for remove_instance AND move_instance; optional/
                                      // auto-generated for add_instance
@@ -204,6 +211,11 @@ export interface ConnectionOpOutcome {
   status: "APPLIED" | "REJECTED" | "CONFLICT";
   connectionId: string | null;
   message?: string;
+  // Cascade cleanup (2026-08-05) — a remove_connection cascade-deletes any JoinAnnotation that
+  // referenced the now-gone connection_id (join_annotation ids get REUSED, so a stale reference left
+  // behind would silently resurrect onto an unrelated new connection later). Optional/empty on every
+  // outcome that didn't cascade-remove anything (add_connection, or a remove with no annotations).
+  removedJoinAnnotationIds?: string[];
 }
 
 // Wire a part's load to be derived from another part's condition (Phase 2b) — mirrors
@@ -247,6 +259,25 @@ export interface FitOpOutcome {
   op: FitOp;
   status: "APPLIED" | "REJECTED" | "CONFLICT";
   fitId: string | null;
+  message?: string;
+}
+
+// Wire/unwire/resync a HOUSING instance's `wraps` list (2026-08-06, gearbox-housing-generation
+// initiative) — which member instances a housing-family subsystem (declares envelope_socket) is
+// declared to wrap/contain. Posted to POST /envelope_ops on accept, same "propose then explicit
+// accept" boundary as FitOp/RegionOp above. Mirrors packages/ledger/deltas.py::EnvelopeOp.
+// `wrap_group` SETS/REPLACES `member_instance_ids` wholesale (not an incremental add). `resync_envelope`
+// re-triggers the derivation job without touching `wraps`.
+export interface EnvelopeOp {
+  op: "wrap_group" | "unwrap_group" | "resync_envelope";
+  housing_instance: string;
+  member_instance_ids?: string[] | null;   // required for wrap_group; ignored otherwise
+  rationale?: string | null;
+}
+export interface EnvelopeOpOutcome {
+  op: EnvelopeOp;
+  status: "APPLIED" | "REJECTED" | "CONFLICT";
+  housingInstanceId: string | null;
   message?: string;
 }
 
@@ -359,6 +390,17 @@ export interface InstanceOpOutcome {
   // remove_instance, and null on a REJECTED move_instance too.
   previousInstance?: InstanceSnapshot | null;
   reason?: string;
+  // Cascade cleanup (2026-08-05) — a remove_instance cascade-deletes any connections/couplings/
+  // regions/fit_bindings/join_annotations that referenced the now-gone instance_id (all of these ids
+  // get REUSED, lowest-free, so a stale reference left behind would silently resurrect onto an
+  // unrelated new instance built later with the same id — see packages/ledger/apply.py's
+  // remove_instance branch). Each is optional/empty on every outcome that didn't cascade-remove
+  // anything of that kind (add_instance, move_instance, or a remove with nothing attached).
+  removedConnectionIds?: string[];
+  removedCouplingIds?: string[];
+  removedRegionIds?: string[];
+  removedFitBindingIds?: string[];
+  removedJoinAnnotationIds?: string[];
 }
 
 export interface ProposeResponse {
@@ -489,7 +531,7 @@ export interface ChatContentPart {
 
 export type ChatEvent =
   | { type: "token"; text: string }
-  | { type: "proposal"; deltas: ParameterDelta[]; feature_ops: FeatureOp[]; instance_ops: InstanceOp[]; connection_ops: ConnectionOp[]; coupling_ops: CouplingOp[]; fit_ops: FitOp[]; join_annotation_ops: JoinAnnotationOp[]; region_ops: RegionOp[]; scope_proposal: ScopeProposal | null; clarification: string | null; suggestions: string[] }
+  | { type: "proposal"; deltas: ParameterDelta[]; feature_ops: FeatureOp[]; instance_ops: InstanceOp[]; connection_ops: ConnectionOp[]; coupling_ops: CouplingOp[]; fit_ops: FitOp[]; envelope_ops: EnvelopeOp[]; join_annotation_ops: JoinAnnotationOp[]; region_ops: RegionOp[]; scope_proposal: ScopeProposal | null; clarification: string | null; suggestions: string[] }
   // Fired BEFORE any token/proposal events, at most once per turn, only when a research vendor is
   // actually configured server-side (see packages/transport/app.py's /chat handler) — most turns
   // never see this event at all. The fields are ResearchFinding's own, flattened onto the event.
@@ -532,6 +574,8 @@ export interface ChatMessage {
   couplingOpOutcomes?: (CouplingOpOutcome | undefined)[];
   fitOps?: FitOp[];                       // AI-proposed fitted-dimension bindings (2026-07-27) — auto-applied
   fitOpOutcomes?: (FitOpOutcome | undefined)[];
+  envelopeOps?: EnvelopeOp[];             // AI-proposed wrap/unwrap/resync of a housing's `wraps` (2026-08-06) — auto-applied
+  envelopeOpOutcomes?: (EnvelopeOpOutcome | undefined)[];
   joinAnnotationOps?: JoinAnnotationOp[]; // AI-proposed semantic join annotations (2026-07-27) — auto-applied, never touches geometry
   joinAnnotationOpOutcomes?: (JoinAnnotationOpOutcome | undefined)[];
   regionOps?: RegionOp[];                 // AI-proposed keep-out/keep-in boxes (2026-08-04) — auto-applied, checked by the geometric self-check's "region" issue below

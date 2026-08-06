@@ -1,11 +1,16 @@
-"""Spur Gear -- REAL involute spur gear geometry (actual meshing teeth), via py_gearworks
+"""Spur Gear -- REAL involute gear geometry (actual meshing teeth), via py_gearworks
 (github.com/GarryBGoode/py_gearworks, build123d-native, pinned in constraints/kernel-linux.txt).
+Despite the file/subsystem name (kept for continuity -- "spur_gear" is the registered name a lot of
+other code/prompts already reference), this ALSO covers genuinely helical (inclined-tooth) gears via
+`helix_angle_deg` (added 2026-08-05, see that section below) -- straight teeth are simply the
+helix_angle_deg=0 case of the same part.
 
 Unlike `gear_blank`/`pinion_blank`/`sprocket_blank` (a plain toothless cylindrical envelope --
 "structural/mounting geometry only", their own docstrings say so explicitly), this subsystem builds
-the actual involute tooth profile via `py_gearworks.SpurGear`, and is meant for a part whose real
-function is to MESH with another gear (a gear train, not just a disc/hub). Do NOT touch/replace
-gear_blank.py -- this is a new, additive subsystem for the case that actually needs real teeth.
+the actual involute tooth profile via `py_gearworks.SpurGear`/`py_gearworks.HelicalGear`, and is meant
+for a part whose real function is to MESH with another gear (a gear train, not just a disc/hub). Do NOT
+touch/replace gear_blank.py -- this is a new, additive subsystem for the case that actually needs real
+teeth.
 
 ### Cited formulas / standards (Inversion #1 -- physics/citation human wall)
 - Pitch diameter: D = m * N (module m times number_of_teeth N) -- the defining relation of the metric
@@ -27,6 +32,50 @@ gear_blank.py -- this is a new, additive subsystem for the case that actually ne
 - Face width rule of thumb: F in [3p, 5p] where p = circular pitch = pi * module (Shigley's Mechanical
   Engineering Design, spur-gear proportion guidance) -- face_width_mm's bounds below cover this typical
   band across the whole module_mm range.
+
+### Helical teeth (helix_angle_deg, added 2026-08-05) -- REAL, verified against py_gearworks' installed
+source, not assumed. py_gearworks (pinned commit, see constraints/kernel-linux.txt) ships a genuine
+`HelicalGear` class (packages/../site-packages/py_gearworks/wrapper.py, class HelicalGear(InvoluteGear),
+~line 1051) alongside `SpurGear` -- both are thin parameter presets over the same shared `InvoluteGear`
+engine (`SpurGear` = `InvoluteGear(helix_angle=0, ...)`; `HelicalGear` = `InvoluteGear(helix_angle=beta,
+...)` with a few angle-dependent corrections, see below). Confirmed LIVE this session (not from memory):
+building an `InvoluteGear`-family part at helix_angle=0 vs a `SpurGear` with identical params produces
+BYTE-IDENTICAL volume (5558.759774168115 mm^3 both ways, diff=0.0), and a `HelicalGear` at
+helix_angle=20deg produces a genuinely TWISTED tooth (its internal `shape_recipe(z).transform.angle`
+differs by ~10.45 deg between the top and bottom face, vs exactly 0 deg for the spur gear) -- this is a
+real geometric effect, not a relabeled param.
+
+**CRITICAL: normal-vs-transverse module distinction (verified by reading `HelicalGear.__init__` directly,
+`wrapper.py` ~line 1139-1182).** py_gearworks' helical gear geometry is generated in the NORMAL system
+(its own docstring: "pressure angle and pitch are calculated in the normal direction to the tooth
+surface"), and `HelicalGear.__init__` passes `module=module / cos(helix_angle)` to its `InvoluteGear`
+superclass -- i.e. the `module_mm` this catalog exposes is the NORMAL module, but the gear's actual
+TRANSVERSE (in-plane-of-rotation) module -- the one that sets the real pitch diameter -- is LARGER by a
+factor of `1 / cos(helix_angle_deg)`. Verified empirically: `HelicalGear(number_of_teeth=20, module=1.5,
+helix_angle=20deg).pitch_radius` reports 15.9627 mm, NOT the naive spur formula's 15.0 mm
+(`module_mm * tooth_count / 2`). **This means `pitch_dia_mm` (used for BOTH the `_volume` print-mass
+approximation and the `kind="mesh"` interface's `radius`, in turn consumed by
+`placement.py::resolve_mesh_mate`'s `radius_a + radius_b` center-distance solve) MUST use the
+TRANSVERSE-corrected formula `module_mm * tooth_count / cos(helix_angle_deg)`, not the plain spur
+`module_mm * tooth_count`, whenever helix_angle_deg != 0** -- see `_pitch_dia_mm` below, the single
+place this correction is applied (both `_build`/`_volume`/`_mesh_frame` call it, so there is exactly one
+formula to keep right). At helix_angle_deg=0, cos(0)=1 and this is IDENTICAL to the pre-helical formula
+-- zero behavior change for every existing spur_gear instance. This does NOT touch
+`placement.py::resolve_mesh_mate`'s own `radius_a + radius_b` arithmetic (still correct, unaffected --
+it only ever consumes whatever `radius` an interface reports); the fix lives entirely in THIS file's own
+derivation of that radius.
+
+**What is honestly NOT modeled (v1 scope, stated plainly, not glossed over):** py_gearworks' own
+`HelicalGear.mesh_to()` applies a shaft-axis ROTATION correction based on the two gears' helix-angle
+SIGNS (`angle_axis = self.beta + other.beta` -- opposite-signed helix angles keep both axes parallel;
+same-signed angles tilt one axis relative to the other, for a crossed-helical pair).
+`placement.py::resolve_mesh_mate` NEVER calls that -- its v1 solver is a pure same-Z-axis translation
+(see its own docstring) that does not reason about handedness/orientation AT ALL, for spur gears OR
+helical ones. So handedness (which sign to give the mating gear) is left as the SAME kind of
+user-responsibility fact `pressure_angle_deg`'s own fragment text already discloses ("must match the
+mating gear's..." -- nothing here cross-validates it); this catalog does not claim to auto-orient a
+matched helical pair. `helix_angle_deg`'s bound below is therefore a MAGNITUDE (0-45 deg, no sign) --
+consistent with that limitation, not a workaround for it.
 
 ### fea_eligible -- explicitly False, and WHY (do not flip this without a human FEA sign-off)
 gear_blank/pinion_blank/sprocket_blank set `fea_eligible=True` because they ARE the validated
@@ -55,37 +104,62 @@ from packages.subsystems.base import InterfaceSpec, Namespace, cylinder_axis_mes
 
 _FRAGMENT = """\
 ## Subsystem: Spur Gear
-A real involute spur gear -- actual meshing teeth (py_gearworks), not a toothless blank. Use this when
-the part must actually MESH with another gear in a gear train; use `gear_blank` for a disc/hub that
-just needs the right envelope (mount holes, a shaft bore) with no real teeth.
-- **module_mm** -- tooth size (pitch diameter = module_mm x tooth_count). ISO 54 preferred values:
-  0.3, 0.4, 0.5, 0.8, 1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10 mm.
+A real involute gear -- actual meshing teeth (py_gearworks), not a toothless blank. Supports BOTH
+straight (spur) teeth and genuinely inclined (helical) teeth via **helix_angle_deg**. Use this when the
+part must actually MESH with another gear in a gear train; use `gear_blank` for a disc/hub that just
+needs the right envelope (mount holes, a shaft bore) with no real teeth.
+- **module_mm** -- tooth size in the NORMAL system (pitch diameter = module_mm x tooth_count when
+  helix_angle_deg=0; for a helical tooth the TRUE pitch diameter is larger by 1/cos(helix_angle_deg) --
+  see helix_angle_deg below). ISO 54 preferred values: 0.3, 0.4, 0.5, 0.8, 1, 1.25, 1.5, 2, 2.5, 3, 4, 5,
+  6, 8, 10 mm.
 - **tooth_count** -- number of teeth. Below ~17-18 teeth at the default 20 deg pressure angle the tooth
   root shows undercut (Shigley's minimum-teeth formula) -- py_gearworks still generates a real, valid
   (if undercut) profile, this is disclosed, not blocked.
 - **pressure_angle_deg** -- 14.5 / 20 / 25 deg are the AGMA/ISO standard values; 20 deg is the modern
   default. Must match the mating gear's pressure angle for correct meshing.
 - **face_width_mm** -- axial tooth length. Typical rule of thumb: 3-5x the circular pitch (pi x module).
+- **helix_angle_deg** -- 0 (default) = straight (spur) tooth, byte-identical to a plain spur gear.
+  Non-zero (0-45 deg) = a genuinely helical (inclined) tooth via py_gearworks' `HelicalGear` -- smoother/
+  quieter meshing under load than a spur gear (why real industrial gearboxes, e.g. 2-stage reduction
+  units, typically use helical gears). A HIGHER magnitude tips the tooth MORE. This is a MAGNITUDE only
+  -- no sign/handedness: this catalog's mate solver (`placement.py::resolve_mesh_mate`) does not auto-
+  orient a mating helical pair's shaft axes (same v1 translation-only limitation pressure_angle_deg's
+  matching requirement already discloses), so which physical gear is "left-hand"/"right-hand" in a real
+  meshing pair is the user's own responsibility, same as matching pressure_angle_deg is today.
 - **rpm** / **torque_nmm** -- stated operating point (duty condition), NOT solved against by anything
   yet -- record only, never treat as a safety input.
 
 ### Intent mapping
 - "gear" / "pinion" / "spur gear" / "meshing gear" -> this part (real teeth). A plain "gear blank"/
   "toothless disc" request -> `gear_blank` instead.
+- "helical gear" / "angled teeth" / "inclined teeth" / "quieter gear" / "smoother meshing gear" ->
+  this part with a non-zero **helix_angle_deg** (try 15-30 deg, the common industrial range).
+  "straight-cut gear" / "spur gear" explicitly -> helix_angle_deg=0 (the default).
 - "finer teeth" / "smaller teeth" -> decrease **module_mm**; "coarser/bigger teeth" -> increase it.
 - "more teeth" (same module -> bigger gear, same pitch) -> increase **tooth_count**.
 - "wider gear" / "thicker teeth (axially)" -> increase **face_width_mm**.
 - factor_of_safety for this part is always "unknown" -- no FEA methodology exists yet for tooth-root
-  stress (see `packages/subsystems/spur_gear.py`'s module docstring). Never state a numeric FS for it.\
+  stress, straight OR helical (see `packages/subsystems/spur_gear.py`'s module docstring). Never state a
+  numeric FS for it.\
 """
 
 
+def _pitch_dia_mm(p) -> float:
+    """The ONE place `pitch_dia_mm` is derived -- `_build`, `_volume`, and `_mesh_frame` all call this,
+    so the transverse-module correction (see module docstring's "Helical teeth" section) can never drift
+    out of sync between the three. D = m_n * N / cos(helix_angle_deg), where m_n = module_mm is the
+    NORMAL-system module py_gearworks' `HelicalGear` takes. At helix_angle_deg=0, cos(0)=1 and this is
+    ALGEBRAICALLY IDENTICAL to the pre-helical formula `module_mm * tooth_count` -- zero behavior change
+    for every existing (straight-tooth) spur_gear instance."""
+    return p.module_mm * p.tooth_count / math.cos(math.radians(p.helix_angle_deg))
+
+
 def _build(p):
-    from py_gearworks import SpurGear  # lazy: build123d/py_gearworks live only in the Linux kernel image
+    # lazy: build123d/py_gearworks live only in the Linux kernel image
     from packages.truth_plane.regen.templated import TaggedPart
 
     n_teeth = int(round(p.tooth_count))
-    gear = SpurGear(
+    common = dict(
         number_of_teeth=n_teeth,
         module=p.module_mm,
         height=p.face_width_mm,
@@ -96,8 +170,20 @@ def _build(p):
         # OWN default (z_anchor=0) instead anchors the bottom face at local Z=0, which would NOT match.
         z_anchor=0.5,
     )
+    if p.helix_angle_deg == 0.0:
+        # Deliberately still the EXACT SAME class/call as before helical support was added -- verified
+        # live this session that py_gearworks' HelicalGear(helix_angle=0) produces byte-identical
+        # geometry to SpurGear (diff=0.0 volume), but keeping this branch on the untouched SpurGear path
+        # means the straight-tooth case has ZERO new code in its execution path, not just equal output.
+        from py_gearworks import SpurGear
+        gear = SpurGear(**common)
+    else:
+        # 0 < helix_angle_deg <= 45 (ParamSpec bound) -- see module docstring's "Helical teeth" section
+        # for the normal-vs-transverse module citation/verification this branch depends on.
+        from py_gearworks import HelicalGear
+        gear = HelicalGear(helix_angle=math.radians(p.helix_angle_deg), **common)
     part = gear.build_part()
-    pitch_dia_mm = p.module_mm * p.tooth_count  # D = m * N -- see module docstring citation
+    pitch_dia_mm = _pitch_dia_mm(p)
     return TaggedPart(part, {
         "gear.body": {
             "kind": "solid",
@@ -105,6 +191,7 @@ def _build(p):
             "teeth": n_teeth,
             "pressure_angle_deg": p.pressure_angle_deg,
             "face_width_mm": p.face_width_mm,
+            "helix_angle_deg": p.helix_angle_deg,
             "pitch_dia_mm": pitch_dia_mm,
         }
     })
@@ -116,8 +203,12 @@ def _volume(p) -> float:
     # standard-proportion involute gear, the addendum material added above the pitch line and the
     # dedendum material removed by the tooth gaps below it roughly offset, which is why a pitch-circle
     # cylinder is the conventional first-pass mass estimate for a gear blank. Used for print-time/mass
-    # telemetry only -- never a structural claim (see fea_eligible=False above).
-    pitch_radius_mm = (p.module_mm * p.tooth_count) / 2.0
+    # telemetry only -- never a structural claim (see fea_eligible=False above). Uses `_pitch_dia_mm`
+    # (transverse-corrected for a helical tooth) so this approximation stays a reasonable band around the
+    # REAL solid's volume even when helix_angle_deg != 0 -- verified live this session: at
+    # module_mm=1.5/tooth_count=20/face_width_mm=8/helix_angle_deg=20, the transverse-corrected estimate
+    # is within ~1.4% of the real built solid's volume (well inside the existing 25% sanity band below).
+    pitch_radius_mm = _pitch_dia_mm(p) / 2.0
     return math.pi * pitch_radius_mm ** 2 * p.face_width_mm
 
 
@@ -130,23 +221,39 @@ def _check(p) -> list[str]:
     # and undercut is a legitimate (if suboptimal) design choice, not a broken one.
     if p.face_width_mm < 0.8:
         return [f"face_width {p.face_width_mm:.2f} mm < min wall 0.8 mm"]
+    # helix_angle_deg >= 90 (or negative) drives cos(helix_angle_deg) to <= 0 in `_pitch_dia_mm`, so
+    # pitch_dia_mm diverges to infinity or flips NEGATIVE -- a genuine mathematical breakdown, not just
+    # "past the recommended 0-45 deg practical range" (the ParamSpec's own advisory bound already covers
+    # that, same as every other param in this catalog). HARD reject here, unlike the undercut advisory
+    # above: there is no valid geometry on the other side of a sign flip / divide-toward-zero, matching
+    # the "reject a physically nonsensical value outright" posture packages/ledger/apply.py's own
+    # box-extents-must-be-positive check uses elsewhere (never a silent clamp, never a fabricated part).
+    if not (0.0 <= p.helix_angle_deg < 90.0):
+        return [f"helix_angle_deg {p.helix_angle_deg:.1f} deg out of valid range [0, 90) -- "
+                f"cos(helix_angle_deg) must stay positive for a finite, physically valid pitch diameter"]
     return []
 
 
 # 2026-08-04 -- cylinder_axis_mesh_interface (packages/subsystems/base.py) expects a single STORED
 # diameter ParamSpec name (it reads `getattr(p, dia_param)` off the resolved Namespace). This gear's
-# pitch diameter is D = module_mm * tooth_count -- DERIVED from TWO independent params, not a param of
-# its own. Storing it as a third, independently-settable ParamSpec would let it drift out of sync with
-# module_mm/tooth_count -- exactly the fabricated/duplicated-authoritative-value pattern CLAUDE.md's
-# Inversion #1 forbids. So: reuse the helper's own origin/normal/radius arithmetic (no parallel helper
-# written) by handing it a tiny one-field Namespace holding the pitch diameter computed FRESH on every
-# call and never written back to the ledger -- read-time/display-only, same posture as every other new
-# derived value this session.
+# pitch diameter is D = module_mm * tooth_count / cos(helix_angle_deg) (see `_pitch_dia_mm` and the
+# module docstring's "Helical teeth" section) -- DERIVED from THREE independent params, not a param of
+# its own. Storing it as a fourth, independently-settable ParamSpec would let it drift out of sync with
+# module_mm/tooth_count/helix_angle_deg -- exactly the fabricated/duplicated-authoritative-value pattern
+# CLAUDE.md's Inversion #1 forbids. So: reuse the helper's own origin/normal/radius arithmetic (no
+# parallel helper written) by handing it a tiny one-field Namespace holding the pitch diameter computed
+# FRESH on every call and never written back to the ledger -- read-time/display-only, same posture as
+# every other new derived value this session.
 _MESH_PROTO = cylinder_axis_mesh_interface("pitch_dia_mm")
 
 
 def _mesh_frame(p: "Namespace"):
-    pitch_dia_mm = p.module_mm * p.tooth_count  # D = m * N -- see module docstring citation
+    # 2026-08-05: was `p.module_mm * p.tooth_count` (byte-identical to that at helix_angle_deg=0, since
+    # cos(0)=1) -- now routes through `_pitch_dia_mm` so a helical gear's mesh interface reports the
+    # TRUE (transverse-corrected) pitch radius. Getting this wrong would silently place two meshing
+    # helical gears too close together (interpenetrating teeth) via
+    # placement.py::resolve_mesh_mate's `radius_a + radius_b` -- see module docstring for the citation.
+    pitch_dia_mm = _pitch_dia_mm(p)
     aug = Namespace({"pitch_dia_mm": ParameterDef(value=pitch_dia_mm, unit="mm", bounds=(0.0, 1.0e6))})
     return _MESH_PROTO.frame(aug)
 
@@ -158,7 +265,7 @@ _GEAR_MESH_INTERFACE = InterfaceSpec(
 
 SPUR_GEAR = register_subsystem(Subsystem(
     name="spur_gear",
-    description="Real involute spur gear (py_gearworks) -- actual meshing teeth, not a toothless blank",
+    description="Real involute gear (py_gearworks) -- actual meshing teeth, straight (spur) or helical, not a toothless blank",
     fragment=_FRAGMENT,
     disciplines=("structures", "manufacturing", "thermal"),
     params=[
@@ -174,6 +281,14 @@ SPUR_GEAR = register_subsystem(Subsystem(
         # Shigley's rule of thumb: F in [3p, 5p], p = pi * module -- at module 0.3..6 mm that's roughly
         # 2.8..94 mm; bounded a bit past that top end for user flexibility.
         ParamSpec("face_width_mm", value=8.0, min=2.0, max=100.0, unit="mm"),
+        # 2026-08-05: default 0.0 = straight (spur) tooth -- BACKWARD COMPATIBLE, every existing
+        # spur_gear instance/test is completely unaffected (see `_build`'s SpurGear-class-unchanged
+        # branch and `_pitch_dia_mm`'s cos(0)=1 identity). Magnitude only, 0-45 deg -- real industrial
+        # helical gears typically run 15-30 deg; bounded well short of py_gearworks' own hard breakdown
+        # at 90 deg (see `_check`) for user flexibility beyond the "typical" range, same "advisory, not
+        # hard-clamped" bounds discipline as every other param here. See module docstring's "Helical
+        # teeth" section for the normal-vs-transverse module citation/verification this param depends on.
+        ParamSpec("helix_angle_deg", value=0.0, min=0.0, max=45.0, unit="deg"),
         # Duty-condition inputs (see module docstring) -- plain stated values, not derived/solved.
         ParamSpec("rpm", value=3000.0, min=0.0, max=20000.0, unit="rpm"),
         ParamSpec("torque_nmm", value=500.0, min=0.0, max=50000.0, unit="N*mm"),
@@ -183,11 +298,12 @@ SPUR_GEAR = register_subsystem(Subsystem(
     invariants=_check,
     # False, deliberately -- see the module docstring's "fea_eligible" section. A real gear's tooth-root
     # stress concentration is NOT the validated plain-cylinder/cantilever methodology gear_blank opts
-    # into; no FEA engineer has signed off a tooth-root methodology, so factor_of_safety stays
-    # "unknown" for this part, never a fabricated green light (Inversion #1).
+    # into; no FEA engineer has signed off a tooth-root methodology (straight OR helical), so
+    # factor_of_safety stays "unknown" for this part, never a fabricated green light (Inversion #1).
     fea_eligible=False,
-    # Driven by the gear's own pitch diameter (module_mm x tooth_count) -- see the derivation note
-    # above _MESH_PROTO. Only the mesh interface is declared here (no axial mount interfaces) --
-    # matching exactly what was asked; a bore/shaft-mount interface is a separate, un-requested feature.
+    # Driven by the gear's own (transverse-corrected) pitch diameter -- see `_pitch_dia_mm` and the
+    # derivation note above _MESH_PROTO. Only the mesh interface is declared here (no axial mount
+    # interfaces) -- matching exactly what was asked; a bore/shaft-mount interface is a separate,
+    # un-requested feature.
     interfaces=[_GEAR_MESH_INTERFACE],
 ))

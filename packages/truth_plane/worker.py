@@ -21,3 +21,4 @@ apply_to_live_app()
 # re-export so `dramatiq packages.truth_plane.worker` discovers the actors
 run_fs_analysis = jobs.run_fs_analysis
 run_optimization = jobs.run_optimization
+run_envelope_derivation = jobs.run_envelope_derivation

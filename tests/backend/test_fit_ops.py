@@ -187,13 +187,32 @@ def test_unfit_connector_rejects_an_unknown_id():
     assert not r["ok"] and r["status"] == "REJECTED"
 
 
-def test_fit_gate_findings_blocks_export_when_the_host_is_deleted():
-    c = _client()
-    post_id, sleeve_id = _post_and_sleeve(c)
-    c.post("/fit_ops", json={"op": "fit_connector", "connector_instance": sleeve_id, "host_instance": post_id})
-    c.post("/instance_ops", json={"op": "remove_instance", "instance_id": post_id})
-    res = c.post("/export/check").json()
-    assert any("fit" in r and sleeve_id in r for r in res["reasons"])
+def test_fit_gate_findings_blocks_export_when_the_host_is_dangling(base_ledger):
+    # 2026-08-05: this used to reach the dangling state by wiring a fit then deleting the host via
+    # `/instance_ops remove_instance` -- but remove_instance now correctly CASCADE-REMOVES any
+    # FitBinding referencing the removed instance (this session's cascade-completeness fix, R3-test-
+    # honesty), so that REST path can no longer produce a dangling binding at all (proved by
+    # test_instance_op_remove_cascade_fit_binding_is_durably_persisted_and_does_not_resurrect_on_id_reuse
+    # in tests/backend/test_app.py). Exercised directly against `_all_gate_findings` + a hand-built
+    # ledger instead, mirroring tests/backend/test_region_transport.py's own
+    # `test_orphaned_region_folded_into_all_gate_findings_blocks_export` for the exact same reason —
+    # `_all_gate_findings` is the literal function `/export/check` wires in as `extra_findings` (see
+    # `_export_gate`), so this still proves the real gate behavior, now for the only way a dangling
+    # binding could still occur (a ledger persisted before this fix, or a future code path that removes
+    # an instance without going through the cascade) rather than for a REST call that no longer exists.
+    from packages.ledger.schema import FitBinding, FitInput, Instance
+    from packages.transport.app import _all_gate_findings
+
+    sleeve = Instance(id="sleeve1", subsystem_type="spar_joiner_sleeve", parent_id="root")
+    binding = FitBinding(id="fit_1", kind="round", connector_instance="sleeve1", host_instance="ghost_post",
+                         inputs=[FitInput(host_param="dia_mm", connector_param="inner_dia_mm")])
+    led = base_ledger.model_copy(update={
+        "instances": {**base_ledger.instances, "sleeve1": sleeve},
+        "fit_bindings": [binding],
+    })
+    reasons, unknowns = _all_gate_findings(led)
+    assert any("fit" in r and "sleeve1" in r for r in reasons)
+    assert "fit:fit_1" in unknowns
 
 
 def test_fit_drift_is_a_validate_warning_not_an_export_block():

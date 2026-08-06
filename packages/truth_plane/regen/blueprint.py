@@ -22,9 +22,6 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Optional
 
-from packages.subsystems import get_subsystem
-from packages.subsystems.assembly import instance_world_offsets
-
 if TYPE_CHECKING:
     from packages.ledger.schema import MasterParametricLedger
 
@@ -50,29 +47,31 @@ _TESSELLATION_MM = 1.5  # coarse — a silhouette outline needs no fine facets, 
 
 def _placed_triangles(ledger: "MasterParametricLedger"):
     """Yield `(instance_id, subsystem_type, ndarray[n,3,3])` — each instance's world-placed geometry
-    as triangle vertex coordinates. World placement replicates `assembly.render_assembly`: the
-    instance's `instance_world_offsets` translation plus its own `Transform` rotation, so the blueprint
-    is the SAME scene the viewport shows."""
-    import build123d as bd
+    as triangle vertex coordinates. World placement (2026-08-05: via
+    `geometry_query.placed_solid`, which replicates `assembly.render_assembly`'s own build -> rotate
+    -> translate sequence — same `instance_world_offsets` translation plus each instance's own
+    `Transform` rotation) is the SAME scene the viewport shows. `placed_solid` never raises (already
+    logs + returns `None` on any build/rotate/translate failure); this function's own try/except below
+    only needs to cover its OWN remaining step, tessellation.
+
+    `instance_world_offsets(ledger)` is computed ONCE here, up front, and passed to every
+    `placed_solid` call via its `offsets` parameter -- matching this function's own pre-`geometry_
+    query` behaviour (offsets computed once, reused across the whole loop). Without this, each
+    `placed_solid` call recomputed offsets for the WHOLE ledger internally (itself O(N) real-kernel
+    work, one auto-layout build per sibling), turning this endpoint's O(N) per-instance loop into
+    O(N^2) real OCCT builds on every `GET /blueprint` call -- confirmed live (5 instances -> 30
+    builds, 10 -> 110, 20 -> 420, matching N^2+N)."""
     import numpy as np
+
+    from packages.subsystems.assembly import instance_world_offsets
+    from packages.subsystems.geometry_query import placed_solid
 
     offsets = instance_world_offsets(ledger)
     for iid, inst in ledger.instances.items():
+        solid = placed_solid(ledger, iid, offsets=offsets)
+        if solid is None:
+            continue
         try:
-            builder = get_subsystem(inst.subsystem_type).geometry_builder
-            if builder is None:
-                continue
-            part = builder(ledger, iid)
-            if part is None:
-                continue
-            solid = part.solid
-            rx = ry = rz = 0.0
-            if inst.transform is not None:
-                rx, ry, rz = inst.transform.rx_deg, inst.transform.ry_deg, inst.transform.rz_deg
-            if rx or ry or rz:
-                solid = bd.Rotation(rx, ry, rz) * solid
-            ox, oy, oz = offsets.get(iid, (0.0, 0.0, 0.0))
-            solid = bd.Pos(ox, oy, oz) * solid
             verts, tris = solid.tessellate(_TESSELLATION_MM)
             if not tris:
                 continue
@@ -80,7 +79,7 @@ def _placed_triangles(ledger: "MasterParametricLedger"):
             T = np.array(tris)
             yield iid, inst.subsystem_type, V[T]
         except Exception:
-            _logger.exception("blueprint: instance %s (%s) failed to build; skipping", iid, inst.subsystem_type)
+            _logger.exception("blueprint: instance %s (%s) failed to tessellate; skipping", iid, inst.subsystem_type)
 
 
 def render_blueprint(ledger: "MasterParametricLedger", title: str = "Design blueprint") -> bytes:

@@ -22,9 +22,11 @@ from typing import TYPE_CHECKING, Optional
 
 from pydantic import BaseModel, ConfigDict
 
-from packages.subsystems import get_subsystem, get_subsystem_model, resolve_namespace
+from packages.subsystems import get_subsystem_model, resolve_namespace
 from packages.subsystems.assembly import instance_world_offsets
+from packages.subsystems.envelope import compute_envelope
 from packages.subsystems.fit import fit_drift_findings
+from packages.subsystems.geometry_query import BBox
 from packages.subsystems.placement import connection_issues, world_frame_for_interface
 
 if TYPE_CHECKING:
@@ -65,7 +67,7 @@ _DFM_DRAFT_MIN_DEG = 0.5   # "minimum 0.5 deg on all vertical faces" (Protolabs)
 
 class ValidationIssue(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    check: str                 # "degeneracy" | "connections" | "connectivity" | "embedding" | "interference" | "keepout" | "fit" | "dfm" | "region"
+    check: str                 # "degeneracy" | "connections" | "connectivity" | "embedding" | "interference" | "keepout" | "fit" | "dfm" | "region" | "envelope_missing" | "envelope_drift"
     severity: str              # "error" | "warning" | "info"
     message: str
     instances: list[str]       # the instance ids involved
@@ -76,9 +78,6 @@ class ValidationReport(BaseModel):
     ok: bool                   # no error-severity issues (warnings don't flip this)
     issues: list[ValidationIssue]
     summary: str
-
-
-BBox = tuple[tuple[float, float, float], tuple[float, float, float]]  # (min xyz, max xyz)
 
 
 def _connection_resolves(ledger: "MasterParametricLedger", c) -> bool:
@@ -106,17 +105,23 @@ def _placed(ledger: "MasterParametricLedger") -> dict[str, dict]:
     """Each instance -> {bbox, volume, valid, subsystem} of its WORLD-placed solid, or {error,...}."""
     import build123d as bd
 
+    from packages.subsystems.geometry_query import raw_build
+
     offsets = instance_world_offsets(ledger)
     out: dict[str, dict] = {}
     for iid, inst in ledger.instances.items():
         try:
-            builder = get_subsystem(inst.subsystem_type).geometry_builder
-            if builder is None:
+            # geometry_query.raw_build (2026-08-05, gearbox-housing Phase 0) shares the get-builder/
+            # build/defend-against-None step with assembly.py/blueprint.py. Deliberately NOT
+            # geometry_query.placed_solid/world_bbox here: both SWALLOW a build that raises (log +
+            # return None), which would make a genuinely broken part invisible to this function
+            # instead of the reported `degeneracy` error the `except` below (unchanged) produces --
+            # collapsing that into the same silent "nothing to build here" skip a subsystem with no
+            # geometry_builder legitimately gets (e.g. an assembly-template master node) would hide a
+            # real defect instead of reporting it. See raw_build's own docstring.
+            solid = raw_build(ledger, iid)
+            if solid is None:
                 continue
-            part = builder(ledger, iid)
-            if part is None:
-                continue
-            solid = part.solid
             rx = ry = rz = 0.0
             if inst.transform is not None:
                 rx, ry, rz = inst.transform.rx_deg, inst.transform.ry_deg, inst.transform.rz_deg
@@ -241,6 +246,97 @@ def _region_world_bbox(ledger: "MasterParametricLedger", region: "Region") -> Op
     box = bd.Pos(ox, oy, oz) * box
     bb = box.bounding_box()
     return ((bb.min.X, bb.min.Y, bb.min.Z), (bb.max.X, bb.max.Y, bb.max.Z))
+
+
+def envelope_missing_findings(
+    ledger: "MasterParametricLedger", instance_id: Optional[str] = None,
+) -> list[tuple[str, str]]:
+    """`(housing_instance_id, message)` for every housing-family instance (a subsystem declaring
+    `envelope_socket` — Phase 2, packages/subsystems/base.py::EnvelopeSocketSpec) whose `wraps` is
+    EMPTY or names an instance id that no longer exists in the ledger (2026-08-06, gearbox-housing-
+    generation initiative Phase 4). This is the user's own named failure mode made concrete: "a
+    housing was added before the group it's supposed to wrap was even placed" — not just incomplete,
+    UNGROUNDED, exactly the "missing safety/construction input blocks export" posture Inversion #1
+    already establishes elsewhere (CLAUDE.md). Same severity class as `packages/subsystems/fit.py::
+    fit_gate_findings`'s own dangling/unresolvable case — export-BLOCKING, never merely advisory.
+
+    Deliberately NOT `_`-prefixed: `packages/transport/app.py::_envelope_gate_findings` imports this
+    SAME function to feed the real export gate (`evaluate_export_gates`'s `extra_findings`), so the
+    self-check UI (`validate_geometry` below, which turns this into an `envelope_missing`
+    `ValidationIssue`) and the actual export block are always looking at the identical detection —
+    never two independently-drifting implementations of "what counts as missing."
+
+    DRIFT (every member resolves, but the housing's stored dims no longer match a fresh
+    `compute_envelope`) is deliberately NOT checked here — that's `_envelope_drift_findings` below,
+    advisory-only, mirroring `fit_gate_findings`/`fit_drift_findings`'s own dangling-vs-drift split.
+
+    `instance_id` (default None -> every housing) scopes to ONE housing, mirroring every other
+    gate-finding function in this codebase's own per-instance scoping (foundations-audit H3)."""
+    out: list[tuple[str, str]] = []
+    for iid, inst in ledger.instances.items():
+        if instance_id is not None and iid != instance_id:
+            continue
+        try:
+            model = get_subsystem_model(inst.subsystem_type)
+        except KeyError:
+            continue
+        if model.envelope_socket is None:
+            continue
+        if not inst.wraps:
+            out.append((iid, (
+                f"{iid} ({inst.subsystem_type}) is a housing (declares envelope_socket) but its wraps "
+                f"list is empty — nothing is wired for it to derive an envelope from. Run wrap_group "
+                f"before proposing its shell/DFM features.")))
+            continue
+        missing = [m for m in inst.wraps if m not in ledger.instances]
+        if missing:
+            out.append((iid, (
+                f"{iid} ({inst.subsystem_type}) wraps unknown instance id(s) {missing!r} — every "
+                f"member of wraps must be a real instance still present in the ledger.")))
+    return out
+
+
+def _envelope_drift_findings(ledger: "MasterParametricLedger") -> list[str]:
+    """Every housing-family instance whose `wraps` fully resolves (an `envelope_missing_findings`
+    subject is skipped here — dangling is that function's territory, not drift's) but whose OWN
+    CURRENTLY-STORED `envelope_socket`-mapped dims no longer match what a FRESH `compute_envelope` call
+    would produce right now — the wrapped group moved/resized since the housing was last derived.
+    Advisory only: a real, actionable finding (drives the self-check loop's `resync_envelope`
+    suggestion), never a fabricated pass, but NOT export-blocking on its own — mirrors `packages/
+    subsystems/fit.py::fit_drift_findings`'s own dangling-vs-drift severity split exactly, one layer
+    out (a housing whose dims are merely stale is not "missing," it's just out of date).
+
+    A housing whose `compute_envelope` call fails for a reason OTHER than dangling members (e.g. no
+    wraps member produced buildable geometry) is silently skipped here — out of THIS check's scope;
+    only the empty/dangling-`wraps` case is a defined finding in this phase (`envelope_missing_findings`
+    above), matching that function's own explicitly narrow definition."""
+    findings: list[str] = []
+    for iid, inst in ledger.instances.items():
+        try:
+            model = get_subsystem_model(inst.subsystem_type)
+        except KeyError:
+            continue
+        if model.envelope_socket is None or not inst.wraps:
+            continue
+        if any(m not in ledger.instances for m in inst.wraps):
+            continue  # dangling -- envelope_missing_findings' territory, not drift's
+        result = compute_envelope(ledger, iid)
+        if not result.ok:
+            continue  # a different, out-of-scope failure (e.g. no buildable geometry in the group)
+        for key, target_param in model.envelope_socket.dim_params.items():
+            if key not in result.values:
+                continue
+            expected = result.values[key]
+            pd = inst.params.get(target_param)
+            current = pd.value if pd is not None else None
+            if current is None or abs(current - expected) > 1e-6:
+                findings.append(
+                    f"envelope {iid}: {iid}.{target_param} is "
+                    f"{current if current is not None else 'missing'}, but its wrapped group "
+                    f"({', '.join(inst.wraps)}) now implies {expected:.3f} — the group moved/resized "
+                    f"since this envelope was derived; run resync_envelope on {iid} to update it")
+                break  # one finding per housing is enough signal -- mirrors fit_drift_findings
+    return findings
 
 
 def validate_geometry(ledger: "MasterParametricLedger") -> ValidationReport:
@@ -522,6 +618,23 @@ def validate_geometry(ledger: "MasterParametricLedger") -> ValidationReport:
     # instead, mirroring coupling_gate_findings' own dangling-vs-drift split. ---
     for msg in fit_drift_findings(ledger):
         issues.append(ValidationIssue(check="fit", severity="warning", message=msg, instances=[]))
+
+    # --- envelope_missing: a housing-family instance (declares envelope_socket, Phase 2) whose
+    # `wraps` is empty or dangling -- UNGROUNDED, not just incomplete (see envelope_missing_findings's
+    # own docstring for the exact failure mode this catches). ERROR severity — the same "genuinely
+    # broken/ungrounded reference blocks, doesn't silently pass" class `degeneracy` above already holds
+    # in this file, and the same one `packages/transport/app.py::_envelope_gate_findings` (which reuses
+    # THIS SAME `envelope_missing_findings` function) enforces at the real export gate. ---
+    for iid, msg in envelope_missing_findings(ledger):
+        issues.append(ValidationIssue(check="envelope_missing", severity="error", message=msg, instances=[iid]))
+
+    # --- envelope_drift: a housing whose wraps fully resolves but whose OWN stored dims no longer
+    # match a fresh compute_envelope (the wrapped group moved/resized since it was derived) --
+    # `_envelope_drift_findings`'s own docstring for the fit_drift_findings-mirrored dangling-vs-drift
+    # split. Warning, drives the auto-correct loop's resync_envelope suggestion — deliberately NOT
+    # export-blocking (that's envelope_missing's job, above). ---
+    for msg in _envelope_drift_findings(ledger):
+        issues.append(ValidationIssue(check="envelope_drift", severity="warning", message=msg, instances=[]))
 
     errors = [i for i in issues if i.severity == "error"]
     warnings = [i for i in issues if i.severity == "warning"]

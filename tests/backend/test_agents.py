@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 
 import pytest
@@ -12,9 +13,10 @@ from packages.agents.runtime import CoModelingSession
 from packages.ledger.deltas import DeltaProposal
 from packages.ledger.events import EventLog
 from packages.ledger.nodes import BUILD_ORIENTATION, OPERATING_TEMP, POWER_DISSIPATION, SKIN, SLIP_FIT
-from packages.ledger.parameter import LockState
-from packages.ledger.schema import ReviewState
-from packages.subsystems import SUBSYSTEM_REGISTRY, add_instance, get_subsystem
+from packages.ledger.parameter import LockState, ParameterDef
+from packages.ledger.schema import Connection, InterfaceRef, ReviewState
+from packages.subsystems import SUBSYSTEM_MODELS, SUBSYSTEM_REGISTRY, ParamSpec, add_instance, get_subsystem, get_subsystem_model
+from packages.subsystems.base import EnvelopeSocketSpec
 from packages.transport.app import make_demo_ledger
 
 TS = "2026-06-28T00:00:00Z"
@@ -222,6 +224,173 @@ def test_system_prompt_lifts_pacing_once_an_airframe_part_exists():
     prompt = build_system_prompt(get_subsystem("naca_wing"), led)
     assert "Airframe already established" in prompt
     assert "Airframe-first pacing" not in prompt
+
+
+# --- housing (gearbox-housing-generation initiative) pacing (2026-08-06, Phase 4) --------------------
+# Mirrors the airframe-pacing tests immediately above: same "read the ledger, assert the right fragment
+# for the right state" shape, one layer out (a 4-state housing sequence instead of a 2-state
+# established/not-established switch). No real catalog subsystem declares `envelope_socket` yet (Phase
+# 2's own scope is additive, zero real adopters — see tests/subsystems/test_envelope.py's own module
+# docstring), so `housing_model` below monkeypatches a throwaway registry entry the same way that file
+# does. `spur_gear` (registered, 2026-08-05) is the one real catalog subsystem with a `kind="mesh"`
+# interface, so it stands in for "a kinematic part" without needing a monkeypatch of its own.
+
+_HOUSING_TYPE = "_test_housing_pacing"
+
+
+@pytest.fixture
+def housing_model(monkeypatch):
+    """Registers a throwaway `_test_housing_pacing` Subsystem (a `flat_bar`-shaped copy with
+    `envelope_socket` set, PLUS three outer_* params for `_envelope_dims_still_pending` to compare
+    against their own catalog defaults) — mirrors tests/backend/test_envelope_ops_transport.py's own
+    `housing_model` fixture exactly."""
+    base_model = get_subsystem_model("flat_bar")
+    housing = dataclasses.replace(
+        base_model, name=_HOUSING_TYPE,
+        params=[
+            *base_model.params,
+            ParamSpec("outer_width_mm", value=1.0, min=0.1, max=2000.0, unit="mm"),
+            ParamSpec("outer_depth_mm", value=1.0, min=0.1, max=2000.0, unit="mm"),
+            ParamSpec("outer_height_mm", value=1.0, min=0.1, max=2000.0, unit="mm"),
+        ],
+        envelope_socket=EnvelopeSocketSpec(dim_params={
+            "hull_bbox_x_mm": "outer_width_mm",
+            "hull_bbox_y_mm": "outer_depth_mm",
+            "hull_bbox_z_mm": "outer_height_mm",
+        }),
+    )
+    monkeypatch.setitem(SUBSYSTEM_MODELS, _HOUSING_TYPE, housing)
+    housing_ctx = dataclasses.replace(get_subsystem("flat_bar"), name=_HOUSING_TYPE)
+    monkeypatch.setitem(SUBSYSTEM_REGISTRY, _HOUSING_TYPE, housing_ctx)
+    return housing
+
+
+def _mesh_connected_gear_pair(led):
+    led = add_instance(led, "spur_gear", "gear1")
+    led = add_instance(led, "spur_gear", "gear2")
+    conn = Connection(id="mesh1", a=InterfaceRef(instance_id="gear1", interface="mesh"),
+                      b=InterfaceRef(instance_id="gear2", interface="mesh"))
+    return led.model_copy(update={"connections": [*led.connections, conn]})
+
+
+def test_system_prompt_has_no_housing_pacing_fragment_without_any_housing_or_kinematic_part(base_ledger):
+    # the common case (an ordinary project with no housing-family instance AND no kinematic-mesh
+    # instance at all — base_ledger's root is a plain bracket, i.e. a NON-empty ledger that has
+    # already shown its hand as unrelated) must see ZERO new prompt text.
+    prompt = build_system_prompt(get_subsystem("bracket"), base_ledger)
+    assert "Housing sequence" not in prompt
+
+
+def test_system_prompt_hedges_housing_pacing_on_the_very_first_turn_of_an_empty_ledger():
+    # R3-confirmed gap (2026-08-06): the section used to `return ""` unconditionally whenever neither a
+    # housing-family nor a kinematic-mesh instance existed yet -- including a genuinely EMPTY ledger,
+    # silencing it on the exact turn the reviewer's own worked example targets: a user's FIRST message
+    # ("build me a 2-stage gearbox with a housing") against a fresh/empty ledger. Unlike the
+    # already-unrelated-project case above (a non-empty ledger that already shows a bracket), an EMPTY
+    # ledger is genuinely ambiguous, so this must now emit a hedged fragment mirroring
+    # `_airframe_pacing_section`'s own always-on, wording-hedged posture.
+    empty_ledger = make_demo_ledger()
+    assert not empty_ledger.instances
+    prompt = build_system_prompt(None, empty_ledger)
+    assert "Housing sequence" in prompt
+    assert "IF the user's request involves a multi-part kinematic assembly" in prompt
+    assert "Do NOT also propose a housing-shaped part in this same turn" in prompt
+
+
+def test_system_prompt_paces_toward_mate_connecting_kinematic_parts_before_any_housing(base_ledger):
+    # a lone, unconnected spur_gear -- "no eligible kinematic parts placed yet ... via real
+    # Connection/mesh interfaces" -- must propose mate-connecting it, never a housing yet.
+    led = add_instance(base_ledger, "spur_gear", "gear1")
+    prompt = build_system_prompt(get_subsystem("bracket"), led)
+    assert "mate-connect the kinematic parts FIRST" in prompt
+    assert "the kinematic cluster is ready, wrap it next" not in prompt
+    assert "envelope derivation is still pending" not in prompt
+    assert "derived dimensions are in, the shell is next" not in prompt
+
+
+def test_system_prompt_paces_against_wrap_group_when_no_housing_family_instance_exists(base_ledger):
+    # two spur_gears mesh-connected via a real connection_ops-shaped Connection, but NO housing-family
+    # instance exists anywhere in the ledger yet (housings == []) -- the real-catalog state TODAY,
+    # since no subsystem file declares `envelope_socket` (see this file's own module comment above).
+    # R2 (2026-08-06): this state used to be mis-paced identically to "a housing already exists, just
+    # wrap it" (below) -- telling the model to "propose wrap_group" with nothing real for
+    # `housing_instance` to name, which `apply_envelope_op` REJECTS outright. Must instead say plainly
+    # not to propose wrap_group yet, and must NOT say "wrap it next" (that's state 2b's fragment, for
+    # when a housing instance actually already exists).
+    led = _mesh_connected_gear_pair(base_ledger)
+    prompt = build_system_prompt(get_subsystem("bracket"), led)
+    assert "no housing-family part exists yet, don't propose wrap_group" in prompt
+    assert "Do NOT invent a housing_instance id" in prompt
+    assert "the kinematic cluster is ready, wrap it next" not in prompt
+    assert "mate-connect the kinematic parts FIRST" not in prompt
+    assert "envelope derivation is still pending" not in prompt
+    assert "derived dimensions are in, the shell is next" not in prompt
+
+
+def test_system_prompt_paces_toward_wrap_group_once_an_unwrapped_housing_instance_exists(base_ledger, housing_model):
+    # two spur_gears mesh-connected, PLUS a REAL housing-family instance already in the ledger whose
+    # `wraps` is still empty -- the state the old (buggy) test above actually meant to cover. Must
+    # propose wrap_group next, naming the real existing housing instance id -- never the "no
+    # housing-family part exists yet" fragment, since one genuinely does.
+    led = _mesh_connected_gear_pair(base_ledger)
+    led = add_instance(led, _HOUSING_TYPE, "housing1")
+    prompt = build_system_prompt(get_subsystem("bracket"), led)
+    assert "the kinematic cluster is ready, wrap it next" in prompt
+    assert "wrap_group" in prompt
+    assert "housing_instance='housing1'" in prompt
+    assert "no housing-family part exists yet" not in prompt
+    assert "mate-connect the kinematic parts FIRST" not in prompt
+    assert "envelope derivation is still pending" not in prompt
+    assert "derived dimensions are in, the shell is next" not in prompt
+
+
+def test_system_prompt_paces_to_wait_while_envelope_dims_are_still_pending(base_ledger, housing_model):
+    # housing1 already wraps the clean cluster, but its own outer_*_mm params are still sitting at
+    # their catalog defaults -- the async derivation (Phase 3) hasn't landed -- must say wait, not
+    # propose shell/DFM features.
+    led = _mesh_connected_gear_pair(base_ledger)
+    led = add_instance(led, _HOUSING_TYPE, "housing1")
+    led.instances["housing1"].wraps = ["gear1", "gear2"]
+    prompt = build_system_prompt(get_subsystem("bracket"), led)
+    assert "envelope derivation is still pending" in prompt
+    assert "the kinematic cluster is ready, wrap it next" not in prompt
+    assert "mate-connect the kinematic parts FIRST" not in prompt
+    assert "derived dimensions are in, the shell is next" not in prompt
+
+
+def test_system_prompt_still_paces_to_wait_when_only_some_envelope_dims_are_populated(base_ledger, housing_model):
+    # R1-precedent-fidelity (2026-08-06): housing1 wraps the clean cluster and ONLY outer_width_mm has
+    # moved off its catalog default (e.g. a stray manual edit/delta landing before the Phase 3 async
+    # derivation job finishes) -- outer_depth_mm/outer_height_mm are still literally 1.0, never derived.
+    # `_envelope_dims_still_pending` must require EVERY mapped dim to differ from its default before
+    # reporting "derived" -- one populated dim out of three must still say wait, never "the shell is
+    # next" (which would steer the model into proposing shell/DFM features against two ungrounded
+    # catalog-default placeholders, the exact "guessed-box housing" failure this phase exists to catch).
+    led = _mesh_connected_gear_pair(base_ledger)
+    led = add_instance(led, _HOUSING_TYPE, "housing1")
+    led.instances["housing1"].wraps = ["gear1", "gear2"]
+    led.instances["housing1"].params["outer_width_mm"] = ParameterDef(value=50.0, unit="mm", bounds=(0.1, 2000.0))
+    prompt = build_system_prompt(get_subsystem("bracket"), led)
+    assert "envelope derivation is still pending" in prompt
+    assert "derived dimensions are in, the shell is next" not in prompt
+    assert "the kinematic cluster is ready, wrap it next" not in prompt
+    assert "mate-connect the kinematic parts FIRST" not in prompt
+
+
+def test_system_prompt_paces_toward_housing_shell_once_envelope_dims_are_populated(base_ledger, housing_model):
+    # same wrapped housing, but its outer_*_mm params now differ from their catalog defaults --
+    # standing in for "the Phase 3 derivation already landed" -- must propose shell/DFM features now.
+    led = _mesh_connected_gear_pair(base_ledger)
+    led = add_instance(led, _HOUSING_TYPE, "housing1")
+    led.instances["housing1"].wraps = ["gear1", "gear2"]
+    led.instances["housing1"].params["outer_width_mm"] = ParameterDef(value=50.0, unit="mm", bounds=(0.1, 2000.0))
+    led.instances["housing1"].params["outer_depth_mm"] = ParameterDef(value=20.0, unit="mm", bounds=(0.1, 2000.0))
+    led.instances["housing1"].params["outer_height_mm"] = ParameterDef(value=10.0, unit="mm", bounds=(0.1, 2000.0))
+    prompt = build_system_prompt(get_subsystem("bracket"), led)
+    assert "derived dimensions are in, the shell is next" in prompt
+    assert "envelope derivation is still pending" not in prompt
+    assert "the kinematic cluster is ready, wrap it next" not in prompt
+    assert "mate-connect the kinematic parts FIRST" not in prompt
 
 
 def test_system_prompt_includes_every_instantiated_types_fragment_not_just_one():

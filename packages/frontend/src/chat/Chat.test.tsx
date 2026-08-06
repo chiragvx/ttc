@@ -8,6 +8,7 @@ import type {
   ConnectionOpOutcome,
   CouplingOpOutcome,
   DeltaOutcome,
+  EnvelopeOpOutcome,
   FeatureOpOutcome,
   FitOpOutcome,
   InstanceOpOutcome,
@@ -49,6 +50,7 @@ function proposalEvent(deltas: ParameterDelta[] = []): ChatEvent {
     connection_ops: [],
     coupling_ops: [],
     fit_ops: [],
+    envelope_ops: [],
     join_annotation_ops: [],
     region_ops: [],
     scope_proposal: null,
@@ -94,6 +96,7 @@ function baseProps() {
     onApplyConnectionOp: vi.fn().mockResolvedValue({} as ConnectionOpOutcome),
     onApplyCouplingOp: vi.fn().mockResolvedValue({} as CouplingOpOutcome),
     onApplyFitOp: vi.fn().mockResolvedValue({} as FitOpOutcome),
+    onApplyEnvelopeOp: vi.fn().mockResolvedValue({} as EnvelopeOpOutcome),
     onApplyJoinAnnotationOp: vi.fn().mockResolvedValue({} as JoinAnnotationOpOutcome),
     onApplyRegionOp: vi.fn().mockResolvedValue({} as RegionOpOutcome),
     onUndoFeatureOp: vi.fn().mockResolvedValue({} as FeatureOpOutcome),
@@ -237,5 +240,64 @@ describe("Chat — auto-correction turn image attachment", () => {
     expect(secondHistory).toHaveLength(3); // user1, assistant1 (with blueprintImage), user2
     expect(typeof secondHistory[2].content).toBe("string");
     expect(secondHistory[2].content).toContain("now make it green");
+  });
+});
+
+describe("Chat — self-check re-run on a no-op turn (2026-08-05 root-cause #4)", () => {
+  it("re-runs onValidate on a turn that applies zero ops when the prior turn's report was unresolved (ok: false)", async () => {
+    vi.mocked(fetchModelVisionCapable).mockResolvedValue(false);
+    vi.mocked(fetchBlueprintDataUrl).mockResolvedValue(BLUEPRINT_URL);
+    const onValidate = vi.fn().mockResolvedValue(CORRECTABLE_REPORT); // ok: false, every call
+
+    let call = 0;
+    vi.mocked(streamChat).mockImplementation(async (_messages, _settings, onEvent) => {
+      call += 1;
+      if (call === 1) {
+        await onEvent(proposalEvent([{ target_node: "root.thickness_mm", requested_value: 5 }]));
+      } else {
+        // round 2: a pure-prose reply that resolves a scope/clarification question in prose only --
+        // zero ops proposed, so appliedGeometry stays false for this turn.
+        await onEvent({ type: "token", text: "noted, still working on it" });
+      }
+      await onEvent({ type: "done" });
+    });
+
+    // No apiKey -- suppresses the BUILT-IN auto-correct queue (shouldAutoCorrect(report) && ... &&
+    // settings.apiKey), isolating exactly the behavior under test: a manually-sent, zero-applied-ops
+    // turn still re-running the self-check because the PRIOR report was unresolved -- not because the
+    // auto-correct loop itself queued this turn.
+    render(<Chat {...baseProps()} settings={{ ...settings, apiKey: "" }} onValidate={onValidate} />);
+    sendMessage("make it 5mm thick");
+    await waitFor(() => expect(onValidate).toHaveBeenCalledTimes(1));
+
+    sendMessage("what's the status on that?");
+    await waitFor(() => expect(onValidate).toHaveBeenCalledTimes(2));
+  });
+
+  it("does not call onValidate again on a turn that applies zero ops when the prior report was already ok: true", async () => {
+    vi.mocked(fetchModelVisionCapable).mockResolvedValue(false);
+    vi.mocked(fetchBlueprintDataUrl).mockResolvedValue(BLUEPRINT_URL);
+    const onValidate = vi.fn().mockResolvedValue(makeReport()); // ok: true, every call
+
+    let call = 0;
+    vi.mocked(streamChat).mockImplementation(async (_messages, _settings, onEvent) => {
+      call += 1;
+      if (call === 1) {
+        await onEvent(proposalEvent([{ target_node: "root.thickness_mm", requested_value: 5 }]));
+      } else {
+        await onEvent({ type: "token", text: "noted" });
+      }
+      await onEvent({ type: "done" });
+    });
+
+    render(<Chat {...baseProps()} onValidate={onValidate} />);
+    sendMessage("make it 5mm thick");
+    await waitFor(() => expect(onValidate).toHaveBeenCalledTimes(1));
+
+    sendMessage("what's the status on that?");
+    await waitFor(() => expect(screen.getByText(/noted/)).toBeInTheDocument());
+    // existing, correct common-case behavior must stay unchanged: a zero-applied-ops turn following an
+    // already-resolved (ok: true) report must NOT re-trigger the self-check.
+    expect(onValidate).toHaveBeenCalledTimes(1);
   });
 });

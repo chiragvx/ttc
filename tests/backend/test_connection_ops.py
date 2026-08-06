@@ -132,6 +132,48 @@ def test_remove_connection():
     assert c.get("/ledger").json()["connections"] == []
 
 
+def test_add_and_remove_connection_responses_carry_the_join_annotation_cascade_id_list():
+    # 2026-08-05 cascade-visibility fix: ConnectionOpOutcome gains removed_join_annotation_ids
+    # (remove_connection ONLY) — surfaced here so the model can notice a remove_connection call
+    # cascade-dropped a JoinAnnotation. `[]`, not omitted, when nothing was cascade-removed.
+    c = _client()
+    body, wr = _bwb_and_wing(c)
+    added = c.post("/connection_ops", json={"op": "add_connection", "a_instance": wr, "a_interface": "root",
+                                             "b_instance": body, "b_interface": "tip_right"}).json()
+    assert added["removed_join_annotation_ids"] == []
+    removed = c.post("/connection_ops", json={"op": "remove_connection", "id": added["connection_id"]}).json()
+    assert removed["ok"]
+    assert removed["removed_join_annotation_ids"] == []
+
+
+def test_remove_connection_cascade_removed_join_annotation_is_durably_persisted():
+    # R1 (2026-08-05, HIGH, live-reproduced): create_connection_op's remove_connection branch called
+    # apply_connection_op (which correctly computes removed_join_annotation_ids and the REST response
+    # above already reported them) but only ever appended CONNECTION_REMOVED to the event log — never
+    # JOIN_ANNOTATION_REMOVED for the cascaded ids. Since state.ledger() is always the replayed log,
+    # the JoinAnnotation silently survived a GET /ledger even though the response claimed it was gone.
+    # Because `_next_connection_id` reuses the lowest-free id, a later connection re-landing on the
+    # freed id would silently inherit a 'bolted' annotation never re-authored for it.
+    c = _client()
+    body, wr = _bwb_and_wing(c)
+    cid = c.post("/connection_ops", json={"op": "add_connection", "a_instance": wr, "a_interface": "root",
+                                          "b_instance": body, "b_interface": "tip_right"}).json()["connection_id"]
+    jid = c.post("/join_annotation_ops", json={"op": "add_join_annotation", "connection_id": cid,
+                                               "method": "bolted"}).json()["join_id"]
+    assert any(j["id"] == jid for j in c.get("/ledger").json()["join_annotations"])
+
+    removed = c.post("/connection_ops", json={"op": "remove_connection", "id": cid}).json()
+    assert removed["ok"]
+    assert removed["removed_join_annotation_ids"] == [jid]
+
+    led = c.get("/ledger").json()
+    assert led["connections"] == []
+    assert led["join_annotations"] == [], (
+        "cascaded JoinAnnotation must be durably removed from the replayed ledger, "
+        "not just reported in the response"
+    )
+
+
 def test_removing_an_instance_cascade_removes_its_connections_and_survives_replay():
     # 2026-07-19 review (MEDIUM): a dangling connection whose part was removed would silently
     # resurrect onto an id-reused new part (wrong geometry + false 'joined'). Removing an instance

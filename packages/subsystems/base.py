@@ -125,6 +125,32 @@ class FitSocketSpec:
     dim_params: dict[str, str]
 
 
+@dataclass(frozen=True)
+class EnvelopeSocketSpec:
+    """A HOUSING subsystem's declaration of which derived-dimension keys `compute_envelope`
+    (packages/subsystems/envelope.py) can produce, and where each one WOULD land among this
+    subsystem's OWN `ParamSpec`s (2026-08-05, gearbox-housing-generation initiative Phase 2) --
+    mirrors `FitSocketSpec` exactly in shape and doc style, one layer further out: a fit derives a
+    CONNECTOR's dimension from a single HOST's own cross-section; an envelope derives a HOUSING's own
+    outer dimensions from the convex hull of a whole GROUP of wrapped member instances
+    (`Instance.wraps`, packages/ledger/schema.py).
+
+    `dim_params` maps each derived-dimension KEY `EnvelopeComputeResult.values` can return (e.g.
+    `"hull_bbox_x_mm"`/`"hull_bbox_y_mm"`/`"hull_bbox_z_mm"` -- see `compute_envelope`'s own docstring
+    for the full key set) to this housing's OWN `ParamSpec` name that would receive it -- e.g.
+    `{"hull_bbox_x_mm": "outer_width_mm", "hull_bbox_y_mm": "outer_depth_mm", "hull_bbox_z_mm":
+    "outer_height_mm"}`. UNLIKE `FitSocketSpec.dim_params`, nothing writes through this mapping yet in
+    this phase -- `apply_envelope_op` (packages/ledger/apply.py) only ever writes `Instance.wraps` (a
+    cheap, ordinary ledger mutation); wiring a `compute_envelope` result through this socket into real
+    ParamSpec values is real multi-instance OCCT work, deliberately deferred (never run synchronously
+    inline on an apply/request path, per this initiative's own async-job rule -- see
+    `compute_envelope`'s own module docstring). This field exists now so that later wiring has a
+    typed, catalog-declared place to plug into -- the same "declare now, consume later" precedent
+    `FitSocketSpec` itself set when it first landed."""
+
+    dim_params: dict[str, str]
+
+
 def cylinder_end_interfaces(height_param: str, names: tuple[str, str] = ("bottom", "top")) -> list[InterfaceSpec]:
     """Two mount interfaces at the +/- ends of a subsystem's own local Z axis (2026-07-27) — the
     missing complement to `bar_end_interfaces` above, for the CYLINDER shape family instead of the
@@ -360,6 +386,20 @@ class Subsystem:
     disciplines: tuple[str, ...]               # applicable discipline lenses
     params: list[ParamSpec] = field(default_factory=list)
     build: Optional[Callable[[Namespace], object]] = None      # (p) -> TaggedPart
+    # 2026-08-06 (gearbox-housing-generation initiative Phase 5 / Stage 2) -- an ADDITIVE, LEDGER-AWARE
+    # build hook alongside `build` above. None (default) = every existing subsystem (all ~270 of them)
+    # is completely unaffected -- `register_subsystem`'s own `_build` closure
+    # (packages/subsystems/__init__.py) tries THIS first (when set) and only falls back to the ordinary
+    # `build(namespace)` call otherwise. Signature carries the full ledger + this instance's own
+    # resolved id (not just the Namespace) because a housing's Stage-2 features (bearing bosses/oil-
+    # seal grooves at a wrapped member's REAL WORLD position) need `Instance.wraps` + a way to read
+    # another instance's own world position -- see `derived_housing.py`'s own module docstring for the
+    # concrete motivating case, INCLUDING a real recursion hazard (this subsystem's own build calling
+    # back into whole-ledger auto-layout, which can call back into this subsystem's own build) that a
+    # careful implementer of this hook must design around. A subsystem that sets this should still keep
+    # `build` too, as a ledger-free fallback (used by e.g. `compose.py::call()`), unless it genuinely
+    # has none to offer.
+    build_with_ledger: Optional[Callable[["MasterParametricLedger", str, Namespace], object]] = None
     volume: Optional[Callable[[Namespace], float]] = None      # (p) -> float mm^3
     invariants: Callable[[Namespace], list[str]] = field(default=_empty_invariants)
     # 2026-07-03 (FEA coverage expansion): True only for single-solid, plate/bar-shaped parts where
@@ -412,6 +452,12 @@ class Subsystem:
     # 2026-07-27 — CONNECTOR side: this part's declared socket, naming which of ITS OWN params
     # receive a wired fit's computed dimensions. None (default) = this part has no fittable socket.
     fit_socket: Optional["FitSocketSpec"] = None
+    # 2026-08-05 (gearbox-housing-generation initiative Phase 2) -- HOUSING side: which derived-
+    # dimension keys a `compute_envelope` result can feed into this subsystem's OWN params, and under
+    # what names (see `EnvelopeSocketSpec` above). None (default) = this part is not a housing-family
+    # subsystem -- `Instance.wraps` (packages/ledger/schema.py) is meaningless/ignored for it. No
+    # subsystem in the catalog declares this yet; a later phase is the first real consumer.
+    envelope_socket: Optional["EnvelopeSocketSpec"] = None
 
     def defaults(self) -> dict[str, ParameterDef]:
         """Materialised ParameterDefs keyed by name — used to seed the ledger's geometry bag."""

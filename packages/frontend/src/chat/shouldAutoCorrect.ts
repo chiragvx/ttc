@@ -55,11 +55,23 @@ export function shouldAutoCorrect(report: ValidationResult): boolean {
   // gap this file was originally built to close, just from being too broad instead of too narrow.
   // Gating on severity === "warning" keeps this exactly as narrow as the confident/actionable group
   // above: FS < 1.0, and nothing else.
+  //
+  // "envelope_drift" (2026-08-06, validate.py::_envelope_drift_findings) -- a housing-family
+  // instance (declares envelope_socket) whose `wraps` fully resolves but whose OWN stored dims no
+  // longer match what a FRESH compute_envelope call implies -- the wrapped group moved/resized since
+  // the housing was last derived. Always hardcoded severity="warning" in validate.py (never gated
+  // further here, unlike "structural" above), a confident quantified mismatch with a single
+  // well-defined fix (resync_envelope), same class as "fit"'s own resync_fit precedent -- both
+  // function docstrings and packages/transport/app.py's own docstring already assert this finding
+  // "drives the auto-correct loop's resync_envelope suggestion"; leaving it out of this set here
+  // would make that claim false and repeat the exact keepout_mm dead-plumbing lesson cited above --
+  // a mechanism the copilot never learns to invoke because nothing in this file ever fires on it.
   return issues.some((i) =>
     i.check === "connectivity" ||
     i.check === "connections" ||
     i.check === "interference" ||
     i.check === "fit" ||
+    i.check === "envelope_drift" ||
     (i.check === "structural" && i.severity === "warning"),
   );
 }

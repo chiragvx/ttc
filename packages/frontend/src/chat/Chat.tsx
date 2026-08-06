@@ -15,7 +15,7 @@ import { shouldAutoCorrect } from "./shouldAutoCorrect";
 import { summarizeOutcomes } from "./summarizeOutcomes";
 import { fetchBlueprintDataUrl, fetchDesignReport, fetchModelVisionCapable, streamChat } from "../api";
 import type { LlmSettings } from "../settings";
-import type { ChatEvent, ChatMessage, ConnectionOp, ConnectionOpOutcome, CouplingOp, CouplingOpOutcome, DeltaOutcome, FeatureOp, FeatureOpOutcome, FitOp, FitOpOutcome, InstanceOp, InstanceOpOutcome, JoinAnnotationOp, JoinAnnotationOpOutcome, ParameterDelta, RegionOp, RegionOpOutcome, ValidationResult } from "../types";
+import type { ChatEvent, ChatMessage, ConnectionOp, ConnectionOpOutcome, CouplingOp, CouplingOpOutcome, DeltaOutcome, EnvelopeOp, EnvelopeOpOutcome, FeatureOp, FeatureOpOutcome, FitOp, FitOpOutcome, InstanceOp, InstanceOpOutcome, JoinAnnotationOp, JoinAnnotationOpOutcome, ParameterDelta, RegionOp, RegionOpOutcome, ValidationResult } from "../types";
 
 interface Props {
   settings: LlmSettings;
@@ -26,6 +26,7 @@ interface Props {
   onApplyConnectionOp: (op: ConnectionOp) => Promise<ConnectionOpOutcome>;  // Phase 1b mate
   onApplyCouplingOp: (op: CouplingOp) => Promise<CouplingOpOutcome>;  // Phase 2b load coupling
   onApplyFitOp: (op: FitOp) => Promise<FitOpOutcome>;  // 2026-07-27 fitted-dimension binding
+  onApplyEnvelopeOp: (op: EnvelopeOp) => Promise<EnvelopeOpOutcome>;  // 2026-08-06 housing wrap/unwrap/resync (gearbox-housing-generation initiative)
   onApplyJoinAnnotationOp: (op: JoinAnnotationOp) => Promise<JoinAnnotationOpOutcome>;  // 2026-07-27 semantic join annotation (BOM-only, never touches geometry)
   onApplyRegionOp: (op: RegionOp) => Promise<RegionOpOutcome>;  // 2026-08-04 keep-out/keep-in region annotation, checked by the geometric self-check
   onUndoFeatureOp: (outcome: FeatureOpOutcome) => Promise<FeatureOpOutcome>;
@@ -48,7 +49,7 @@ const uid = () => (crypto?.randomUUID?.() ?? String(Math.random()));
 // cap so a design it can't satisfy never loops forever (or burns tokens indefinitely).
 const MAX_AUTO_ROUNDS = 2;
 
-export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInstanceOp, onApplyConnectionOp, onApplyCouplingOp, onApplyFitOp, onApplyJoinAnnotationOp, onApplyRegionOp, onUndoFeatureOp, onUndoInstanceOp, onOpsApplied, onValidate, onOpenSettings, onUserMessage, onHoverInstance }: Props) {
+export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInstanceOp, onApplyConnectionOp, onApplyCouplingOp, onApplyFitOp, onApplyEnvelopeOp, onApplyJoinAnnotationOp, onApplyRegionOp, onUndoFeatureOp, onUndoInstanceOp, onOpsApplied, onValidate, onOpenSettings, onUserMessage, onHoverInstance }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [undone, setUndone] = useState<Record<string, boolean>>({});
@@ -68,6 +69,14 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
   // effect, NOT re-entrantly inside send — the same decoupling the viewport-regen fix taught).
   const autoRoundRef = useRef(0);
   const lastIntentRef = useRef("");
+  // Whether the MOST RECENT self-check report came back unresolved (`ok === false`) — set at the
+  // bottom of the self-check block below, right after `onValidate` resolves. A pure-prose turn (a
+  // scope/clarification reply that applies zero ops) leaves `appliedGeometry` false, which used to
+  // mean the self-check silently never re-ran and any issues the PREVIOUS report already found were
+  // never resurfaced — the conversation just went quiet on a design that was still broken (2026-08-05
+  // root-cause #4). Read alongside `appliedGeometry` at the self-check trigger below so a known-
+  // unresolved state keeps getting re-checked even on a turn that changed no geometry.
+  const lastReportUnresolvedRef = useRef(false);
   const [pendingCorrection, setPendingCorrection] = useState<string | null>(null);
   const sendRef = useRef<((text: string, isAuto?: boolean) => Promise<void>) | null>(null);
   // SYNCHRONOUS in-flight guard. The `streaming` STATE is a closure value inside send's useCallback,
@@ -197,6 +206,24 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
             if (connOutcomes.some((o) => o?.status === "APPLIED")) appliedGeometry = true;
             await onOpsApplied();
           }
+          if (e.envelope_ops?.length) {
+            // AFTER instance_ops/connection_ops (2026-08-06): wrap_group needs the housing instance
+            // to already exist and the group it wraps to be a REAL, mate-connected cluster — see
+            // packages/agents/prompt_builder.py::_housing_pacing_section, the mechanism this closes
+            // the loop for. Sets appliedGeometry: wrap_group mutates the housing's own `wraps` list
+            // AND (via the backend's post-apply derivation hook) can write the housing's derived
+            // dimensions as ordinary ParameterDeltas in the SAME request when no async queue is
+            // configured — either way the self-check (envelope_missing/envelope_drift,
+            // packages/truth_plane/validate.py) needs to re-run against the new state.
+            const envelopeOutcomes: (EnvelopeOpOutcome | undefined)[] = new Array(e.envelope_ops.length).fill(undefined);
+            patch(aid, (m) => ({ ...m, envelopeOps: e.envelope_ops, envelopeOpOutcomes: [...envelopeOutcomes] }));
+            for (let i = 0; i < e.envelope_ops.length; i++) {
+              envelopeOutcomes[i] = await onApplyEnvelopeOp(e.envelope_ops[i]);
+              patch(aid, (m) => ({ ...m, envelopeOpOutcomes: [...envelopeOutcomes] }));
+            }
+            if (envelopeOutcomes.some((o) => o?.status === "APPLIED")) appliedGeometry = true;
+            await onOpsApplied();
+          }
           if (e.region_ops?.length) {
             // AFTER instance_ops (the host must exist). A Region is a pure geometric ANNOTATION (it
             // derives nothing and nothing derives it, packages/ledger/schema.py::Region) — but UNLIKE
@@ -305,6 +332,7 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
               !m.connectionOps?.length &&
               !m.couplingOps?.length &&
               !m.fitOps?.length &&
+              !m.envelopeOps?.length &&
               !m.joinAnnotationOps?.length &&
               !m.regionOps?.length &&
               !m.scopeProposal &&
@@ -332,11 +360,18 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
       // so parked the SSE reader for the whole /validate round trip — the slow vision call especially —
       // so 'done' never processed and the turn hung, un-cancellable; 2026-07-19 review, HIGH). By here
       // streaming is already false, so the geometry is applied and the UI is responsive while this runs
-      // in the background; the card fills in when it returns. Only when geometry actually APPLIED.
-      if (appliedGeometry) {
+      // in the background; the card fills in when it returns. Runs when THIS turn applied geometry, OR
+      // (2026-08-05 root-cause #4) when the MOST RECENT self-check report was still unresolved -- a
+      // pure-prose turn (e.g. a scope/clarification reply that applies zero ops) must not let a
+      // previously-reported, still-outstanding issue go quiet just because nothing new was applied.
+      // Re-running here checks the CURRENT ledger state either way: the issues are still there and get
+      // resurfaced/auto-corrected again up to the existing MAX_AUTO_ROUNDS cap below, or they're
+      // coincidentally already fixed and the report now comes back clean.
+      if (appliedGeometry || lastReportUnresolvedRef.current) {
         try {
           const report = await onValidate(lastIntentRef.current);
           patch(aid, (m) => ({ ...m, validation: report }));
+          lastReportUnresolvedRef.current = !report.ok;
 
           // Render-in-the-loop visibility (2026-08-05): attach the SAME blueprint image the
           // self-check just judged to THIS assistant message, for EVERY geometry-changing turn --
@@ -574,6 +609,29 @@ export function Chat({ settings, onApply, onUndo, onApplyFeatureOp, onApplyInsta
                 : op.op === "resync_fit"
                 ? `resync ${op.id}`
                 : `unfit ${op.id}`;
+              return (
+                <div key={i} style={{ fontSize: 11, color: "#c9d1d9" }}>
+                  <span style={{ color }}>{o == null ? "…" : ok ? "✓" : "✕"}</span> {label}
+                  {o && !ok && o.message ? <span style={{ color: "#f85149" }}> — {o.message}</span> : null}
+                </div>
+              );
+            })}
+          </div>
+        ),
+      });
+    }
+    if (m.envelopeOps && m.envelopeOps.length > 0) {
+      sections.push({
+        label: "Housing",
+        content: (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {m.envelopeOps.map((op, i) => {
+              const o = m.envelopeOpOutcomes?.[i];
+              const ok = o?.status === "APPLIED";
+              const color = o == null ? "#8b949e" : ok ? "#3fb950" : "#f85149";
+              const label = op.op === "wrap_group"
+                ? `${op.housing_instance} wraps [${(op.member_instance_ids ?? []).join(", ")}]`
+                : `${op.op} ${op.housing_instance}`;
               return (
                 <div key={i} style={{ fontSize: 11, color: "#c9d1d9" }}>
                   <span style={{ color }}>{o == null ? "…" : ok ? "✓" : "✕"}</span> {label}

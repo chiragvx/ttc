@@ -23,6 +23,9 @@ function describe(op: InstanceOp): string {
       ? ` to (${op.x_mm}, ${op.y_mm}, ${op.z_mm})` : "";
     return `move ${op.instance_id ?? "?"}${pos}`;
   }
+  if (op.op === "clear_transform") {
+    return `clear transform on ${op.instance_id ?? "?"} (revert to auto-layout)`;
+  }
   const named = op.instance_id ? ` (as '${op.instance_id}')` : "";
   return `add ${op.subsystem_type ?? "?"}${named}`;
 }
@@ -61,7 +64,9 @@ export function InstanceOpCard({
         return (
           <div key={i} style={rowLine}
                onMouseEnter={() => onHover?.(hoverTarget(op, outcome))} onMouseLeave={() => onHover?.(null)}>
-            <span style={icon}>{op.op === "remove_instance" ? "−" : op.op === "move_instance" ? "→" : "+"}</span>
+            <span style={icon}>
+              {op.op === "remove_instance" ? "−" : op.op === "move_instance" ? "→" : op.op === "clear_transform" ? "⟲" : "+"}
+            </span>
             <span style={{ color: "#c9d1d9", flex: 1 }}>{describe(op)}</span>
             {outcome ? (
               <span style={{ color: COLORS[outcome.status] ?? "#8b949e", fontWeight: 600, fontSize: 11 }}>

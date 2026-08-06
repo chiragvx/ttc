@@ -60,6 +60,16 @@ describe("shouldAutoCorrect", () => {
     expect(shouldAutoCorrect(r)).toBe(true);
   });
 
+  it("fires on an envelope_drift issue even when report.ok is true", () => {
+    // 2026-08-06: a housing's stored envelope dims no longer match a fresh compute_envelope of its
+    // wraps group -- always hardcoded severity=warning in validate.py, same confident/actionable
+    // class as fit's resync_fit precedent above (resync_envelope is the fix here). R3-confirmed gap:
+    // this finding's own docstring (and app.py's) claims it "drives the auto-correct loop's
+    // resync_envelope suggestion" -- this test is what makes that claim true.
+    const r = report({ ok: true, geometricIssues: [issue("envelope_drift", "warning")] });
+    expect(shouldAutoCorrect(r)).toBe(true);
+  });
+
   it("fires on a structural issue with severity warning (FS < 1.0) even when report.ok is true", () => {
     // 2026-08-03: _coarse_structural_summary marks a coupled instance's crude FS estimate
     // severity="warning" ONLY when it reads FS < 1.0 -- the one safety-shaped signal the self-check

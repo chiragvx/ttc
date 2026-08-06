@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { activateInstance, addInstance, analyze, analyzeStatus, applyFeatureOp as postFeatureOp, applyConnectionOp as postConnectionOp, applyCouplingOp as postCouplingOp, applyFitOp as postFitOp, applyJoinAnnotationOp as postJoinAnnotationOp, applyRegionOp as postRegionOp, applyInstanceOp as postInstanceOp, createFile, exportCheck, fetchTelemetry, getLedger, getManufacturingManifest, getParams, getRequirements, getSubsystems, listFiles, listInstances, openFile, optimize, optimizeStatus, removeInstance, runValidate, setGoal, signoff, type FileRow, type InstanceRow, type ParamSpec, type RequirementsData, type SubsystemInfo } from "./api";
+import { activateInstance, addInstance, analyze, analyzeStatus, applyFeatureOp as postFeatureOp, applyConnectionOp as postConnectionOp, applyCouplingOp as postCouplingOp, applyEnvelopeOp as postEnvelopeOp, applyFitOp as postFitOp, applyJoinAnnotationOp as postJoinAnnotationOp, applyRegionOp as postRegionOp, applyInstanceOp as postInstanceOp, createFile, exportCheck, fetchTelemetry, getLedger, getManufacturingManifest, getParams, getRequirements, getSubsystems, listFiles, listInstances, openFile, optimize, optimizeStatus, removeInstance, runValidate, setGoal, signoff, type FileRow, type InstanceRow, type ParamSpec, type RequirementsData, type SubsystemInfo } from "./api";
 import { AnalysisBar, type AnalysisState } from "./AnalysisBar";
 import { OptimizeResult, type OptimizeResultData } from "./OptimizeResult";
 import { Chat } from "./chat/Chat";
@@ -11,7 +11,7 @@ import { SettingsModal } from "./SettingsModal";
 import { Viewport } from "./Viewport";
 import { loadSettings, type LlmSettings } from "./settings";
 import { useCadSocket } from "./useCadSocket";
-import { type ConnectionOp, type ConnectionOpOutcome, type CouplingOp, type CouplingOpOutcome, type DeltaOutcome, type FeatureOp, type FeatureOpOutcome, type FitOp, type FitOpOutcome, type InstanceOp, type InstanceOpOutcome, type JoinAnnotationOp, type JoinAnnotationOpOutcome, type LedgerGraphData, type ManufacturingManifest, type ParameterDelta, type RegionOp, type RegionOpOutcome, type ServerMessage, type ValidationResult } from "./types";
+import { type ConnectionOp, type ConnectionOpOutcome, type CouplingOp, type CouplingOpOutcome, type DeltaOutcome, type EnvelopeOp, type EnvelopeOpOutcome, type FeatureOp, type FeatureOpOutcome, type FitOp, type FitOpOutcome, type InstanceOp, type InstanceOpOutcome, type JoinAnnotationOp, type JoinAnnotationOpOutcome, type LedgerGraphData, type ManufacturingManifest, type ParameterDelta, type RegionOp, type RegionOpOutcome, type ServerMessage, type ValidationResult } from "./types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -316,6 +316,16 @@ export default function App() {
         op, status: resp.status, instanceId: resp.instance_id,
         subsystemType: resp.instance?.subsystem_type ?? null, instance: resp.instance,
         previousInstance: resp.previous_instance, reason: resp.message,
+        // Surface remove_instance's cascade cleanup to the model (2026-08-05 fix — these used to be
+        // computed by the backend and included in `resp`, but silently dropped right here: the outcome
+        // object built for Chat.tsx/summarizeOutcomes.ts never carried them past this function, so the
+        // "(cascade also removed: ...)" nudge never fired in the real app despite the backend, types,
+        // and summarizeOutcomes logic all being wired up).
+        removedConnectionIds: resp.removed_connection_ids,
+        removedCouplingIds: resp.removed_coupling_ids,
+        removedRegionIds: resp.removed_region_ids,
+        removedFitBindingIds: resp.removed_fit_binding_ids,
+        removedJoinAnnotationIds: resp.removed_join_annotation_ids,
       };
     } catch (e) {
       return { op, status: "REJECTED", instanceId: op.instance_id ?? null, subsystemType: null, reason: String(e) };
@@ -327,7 +337,12 @@ export default function App() {
   const applyConnectionOp = async (op: ConnectionOp): Promise<ConnectionOpOutcome> => {
     try {
       const resp = await postConnectionOp(op);
-      return { op, status: resp.status, connectionId: resp.connection_id, message: resp.message };
+      return {
+        op, status: resp.status, connectionId: resp.connection_id, message: resp.message,
+        // Same cascade-visibility fix as applyInstanceOp above: a remove_connection cascade-deletes
+        // any JoinAnnotation that referenced this connection id (2026-08-05).
+        removedJoinAnnotationIds: resp.removed_join_annotation_ids,
+      };
     } catch (e) {
       return { op, status: "REJECTED", connectionId: op.id ?? null, message: String(e) };
     }
@@ -353,6 +368,18 @@ export default function App() {
       return { op, status: resp.status, fitId: resp.fit_id, message: resp.message };
     } catch (e) {
       return { op, status: "REJECTED", fitId: op.id ?? null, message: String(e) };
+    }
+  };
+
+  // 2026-08-06 (gearbox-housing-generation initiative): wire/unwire/resync a housing instance's
+  // `wraps` list (packages/ledger/schema.py::Instance.wraps). Like applyFitOp, does NOT refresh
+  // itself — the proposal loop calls onOpsApplied once for the batch.
+  const applyEnvelopeOp = async (op: EnvelopeOp): Promise<EnvelopeOpOutcome> => {
+    try {
+      const resp = await postEnvelopeOp(op);
+      return { op, status: resp.status, housingInstanceId: resp.housing_instance_id, message: resp.message };
+    } catch (e) {
+      return { op, status: "REJECTED", housingInstanceId: op.housing_instance ?? null, message: String(e) };
     }
   };
 
@@ -445,6 +472,31 @@ export default function App() {
         return {
           op: outcome.op, status: "REJECTED", instanceId: outcome.instanceId, subsystemType: null,
           reason: "no prior explicit position recorded (part was on auto-layout) — cannot undo the move",
+        };
+      }
+      const t = prev.transform;
+      return applyInstanceOp({
+        op: "move_instance", instance_id: outcome.instanceId ?? undefined,
+        x_mm: t.x_mm, y_mm: t.y_mm, z_mm: t.z_mm, rx_deg: t.rx_deg, ry_deg: t.ry_deg, rz_deg: t.rz_deg,
+      });
+    }
+    if (outcome.op.op === "clear_transform") {
+      // clear_transform's own Undo (2026-08-05): replay the EXACT explicit transform it cleared —
+      // `previousInstance` carries the pre-clear state, mirroring move_instance's own Undo above
+      // (apply.py's clear_transform branch sets previous_instance=target, same convention). This
+      // MUST NOT fall through to the generic remove_instance below: clear_transform is the SAFE
+      // escape hatch specifically because it leaves every coupling/region/fit_binding/
+      // join_annotation/param wired to this instance untouched — falling through here would delete
+      // the instance outright and cascade-drop all of that, the exact destruction clear_transform
+      // exists to avoid (see packages/ledger/deltas.py's InstanceOp docstring).
+      const prev = outcome.previousInstance;
+      if (!prev || !prev.transform) {
+        // clear_transform was itself a no-op (the instance had no explicit transform to begin
+        // with) — nothing to restore. Surface an honest Undo failure rather than guessing a pose
+        // or, worse, silently deleting the instance.
+        return {
+          op: outcome.op, status: "REJECTED", instanceId: outcome.instanceId, subsystemType: null,
+          reason: "no prior explicit transform recorded (nothing was cleared) — cannot undo",
         };
       }
       const t = prev.transform;
@@ -634,6 +686,7 @@ export default function App() {
                   onApplyConnectionOp={applyConnectionOp}
                   onApplyCouplingOp={applyCouplingOp}
                   onApplyFitOp={applyFitOp}
+                  onApplyEnvelopeOp={applyEnvelopeOp}
                   onApplyJoinAnnotationOp={applyJoinAnnotationOp}
                   onApplyRegionOp={applyRegionOp}
                   onValidate={(intent) => runValidate(intent, settings.apiKey, settings.visionModel || settings.model)}

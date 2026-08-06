@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from packages.ledger.apply import ApplyStatus, apply_delta, resolve_path
-from packages.ledger.deltas import ParameterDelta
+from packages.ledger.apply import ApplyStatus, apply_connection_op, apply_delta, resolve_path
+from packages.ledger.deltas import ConnectionOp, ParameterDelta
 from packages.ledger.parameter import LockState
+from packages.ledger.schema import Instance, JoinAnnotation
 
 SKIN = "instances.root.params.skin_thickness_mm"
 HOLE = "instances.root.params.hole_diameter_mm"
@@ -181,3 +182,65 @@ def test_omitting_cascade_rules_matches_explicit_none(base_ledger):
     assert out_explicit.cascades == []
     assert new_omitted.instances["root"].params["skin_thickness_mm"].value == 3.0
     assert new_explicit.instances["root"].params["skin_thickness_mm"].value == 3.0
+
+
+# --- apply_connection_op: remove_connection cascades away dependent JoinAnnotations (2026-08-05) --
+#
+# THE CONFIRMED GAP this covers: `JoinAnnotation.connection_id` references a Connection id, and
+# `_next_connection_id` reuses the lowest-free `conn_N` id (same reuse scheme as instance/coupling
+# ids) — but the dedicated `remove_connection` branch never cascade-cleaned join_annotations
+# referencing the removed connection id. Each test proves BOTH halves: the cascade removal itself,
+# AND that a connection reusing the freed id does not silently inherit the old annotation.
+
+
+def _interfaces_of(subsystem_type: str) -> frozenset[str]:
+    """Injected callable stub (packages/ledger/CLAUDE.md keeps this package registry-free) — always
+    declares the two interface names these tests use, regardless of subsystem_type."""
+    return frozenset({"top", "bottom"})
+
+
+def _ledger_with_two_connectable_instances(base_ledger):
+    a = Instance(id="part_a", subsystem_type="widget", params={}, parent_id=None)
+    b = Instance(id="part_b", subsystem_type="widget", params={}, parent_id=None)
+    return base_ledger.model_copy(
+        update={"instances": {**base_ledger.instances, "part_a": a, "part_b": b}})
+
+
+def test_remove_connection_cascades_join_annotation_and_reused_id_does_not_inherit_it(base_ledger):
+    led = _ledger_with_two_connectable_instances(base_ledger)
+    add_conn = ConnectionOp(op="add_connection", id="conn_1", a_instance="part_a", a_interface="top",
+                            b_instance="part_b", b_interface="bottom")
+    led, conn_out = apply_connection_op(led, add_conn, _interfaces_of)
+    assert conn_out.status is ApplyStatus.APPLIED
+
+    annotation = JoinAnnotation(id="join_1", connection_id="conn_1", method="bolted")
+    led = led.model_copy(update={"join_annotations": [annotation]})
+
+    rm_op = ConnectionOp(op="remove_connection", id="conn_1")
+    new, out = apply_connection_op(led, rm_op, _interfaces_of)
+    assert out.status is ApplyStatus.APPLIED
+    assert out.removed_join_annotation_ids == ["join_1"]
+    assert new.join_annotations == []
+    assert led.join_annotations == [annotation]  # prior ledger untouched
+
+    # THE ID-REUSE REGRESSION: a brand new connection reusing the exact freed id "conn_1" must NOT
+    # silently inherit the cascade-removed annotation.
+    add_conn2 = ConnectionOp(op="add_connection", id="conn_1", a_instance="part_a", a_interface="top",
+                             b_instance="part_b", b_interface="bottom")
+    led2, conn_out2 = apply_connection_op(new, add_conn2, _interfaces_of)
+    assert conn_out2.status is ApplyStatus.APPLIED
+    assert led2.join_annotations == []
+
+
+def test_remove_connection_rejected_for_unknown_id_leaves_join_annotations_untouched(base_ledger):
+    led = _ledger_with_two_connectable_instances(base_ledger)
+    add_conn = ConnectionOp(op="add_connection", id="conn_1", a_instance="part_a", a_interface="top",
+                            b_instance="part_b", b_interface="bottom")
+    led, _ = apply_connection_op(led, add_conn, _interfaces_of)
+    annotation = JoinAnnotation(id="join_1", connection_id="conn_1", method="bolted")
+    led = led.model_copy(update={"join_annotations": [annotation]})
+
+    new, out = apply_connection_op(led, ConnectionOp(op="remove_connection", id="ghost"), _interfaces_of)
+    assert out.status is ApplyStatus.REJECTED
+    assert new is led
+    assert new.join_annotations == [annotation]

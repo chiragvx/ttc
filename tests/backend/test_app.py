@@ -635,6 +635,34 @@ def test_chat_proposal_includes_region_ops(monkeypatch):
     assert '"label": "battery_pack_reserve"' in res.text
 
 
+def test_chat_proposal_includes_envelope_ops(monkeypatch):
+    """The /chat SSE `proposal` event must carry `envelope_ops` alongside `deltas`/`feature_ops`/
+    `instance_ops`/`fit_ops`/`region_ops`, serialized the same way (`[eo.model_dump(mode='json') ...]`).
+    Regression for R2's CONFIRMED finding (gearbox-housing-generation Phase 4): `EnvelopeOp` existed as
+    a model but was never added as a `DeltaProposal` field nor forwarded here, so the model had no
+    tool-use path that could ever emit a `wrap_group`/`unwrap_group`/`resync_envelope` call despite
+    `_housing_pacing_section` instructing it to propose exactly that — mirrors
+    `test_chat_proposal_includes_region_ops` above exactly, one field over."""
+    from packages.ledger.deltas import DeltaProposal, EnvelopeOp
+
+    def fake_stream_chat(self, *, messages, ledger_json):
+        yield "proposal", DeltaProposal(
+            envelope_ops=[EnvelopeOp(op="wrap_group", housing_instance="housing_1",
+                                      member_instance_ids=["gear_1", "gear_2"])]
+        )
+        yield "done", None
+
+    monkeypatch.setattr(
+        "packages.agents.openrouter_provider.OpenRouterDeltaProvider.stream_chat", fake_stream_chat,
+    )
+    res = _client().post("/chat", json={"messages": [{"role": "user", "content": "wrap the gear cluster"}], "api_key": "x"})
+    assert res.status_code == 200
+    assert '"type": "proposal"' in res.text
+    assert '"envelope_ops"' in res.text
+    assert '"op": "wrap_group"' in res.text
+    assert '"housing_instance": "housing_1"' in res.text
+
+
 def test_instance_op_rejects_unknown_subsystem_type():
     res = _client().post("/instance_ops", json={"op": "add_instance", "subsystem_type": "spaceship"}).json()
     assert res["ok"] is False
@@ -699,6 +727,243 @@ def test_instance_op_add_then_remove_round_trips():
     assert removed["status"] == "APPLIED"
     led = c.get("/ledger").json()
     assert iid not in led["instances"]
+
+
+def test_instance_op_remove_surfaces_removed_coupling_and_region_ids():
+    """2026-08-05 cascade-visibility fix (root cause #3): apply_instance_op already computed
+    removed_connection_ids/removed_coupling_ids for the event log, but the REST response never
+    returned them, so the model had no way to notice a remove_instance call just destroyed a
+    coupling or a region. All FIVE cascade id lists are now surfaced on the response — non-empty
+    only for the cascades that actually applied, `[]` (not omitted) for the rest."""
+    c = TestClient(create_app())
+    crank = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_bar"}).json()["instance_id"]
+    coupling = c.post("/coupling_ops", json={"op": "add_coupling", "target_instance": crank,
+                                  "relation": "force_from_pressure_area",
+                                  "inputs": [{"name": "pressure_pa", "value": 2e6},
+                                             {"name": "area_mm2", "value": 0.5}]}).json()
+    assert coupling["ok"] is True
+    region = c.post("/region_ops", json={"op": "add_region", "host_instance": crank, "kind": "keep_out",
+                                          "label": "wiring_channel", "x_mm": 0, "y_mm": 0, "z_mm": 0,
+                                          "dx_mm": 10, "dy_mm": 10, "dz_mm": 10}).json()
+    assert region["ok"] is True
+
+    res = c.post("/instance_ops", json={"op": "remove_instance", "instance_id": crank}).json()
+    assert res["ok"] is True
+    assert res["removed_coupling_ids"] == [coupling["coupling_id"]]
+    assert res["removed_region_ids"] == [region["region_id"]]
+    # unrelated cascade lists stay present-but-empty, never omitted
+    assert res["removed_connection_ids"] == []
+    assert res["removed_fit_binding_ids"] == []
+    assert res["removed_join_annotation_ids"] == []
+
+
+def test_instance_op_add_and_move_leave_cascade_ids_empty():
+    c = TestClient(create_app())
+    added = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "standoff"}).json()
+    assert added["removed_coupling_ids"] == []
+    assert added["removed_region_ids"] == []
+    assert added["removed_fit_binding_ids"] == []
+    assert added["removed_join_annotation_ids"] == []
+    iid = added["instance_id"]
+    moved = c.post("/instance_ops", json={
+        "op": "move_instance", "instance_id": iid, "x_mm": 5.0, "y_mm": 5.0, "z_mm": 5.0,
+    }).json()
+    assert moved["removed_coupling_ids"] == []
+    assert moved["removed_region_ids"] == []
+
+
+def test_instance_op_remove_cascade_region_is_durably_persisted_and_does_not_resurrect_on_id_reuse():
+    """R3-test-honesty (2026-08-05, HIGH, live-reproduced): the response-only test above
+    (test_instance_op_remove_surfaces_removed_coupling_and_region_ids) checked `removed_region_ids`
+    on the REST response but never called GET /ledger afterward — so it never actually proved the
+    cascade was PERSISTED to the event log (vs. just correctly computed and reported). This is the
+    transport-layer analogue of tests/ledger/test_instance_ops.py::
+    test_remove_instance_cascades_region_and_reused_id_does_not_inherit_it, run against the live
+    FastAPI app (state.ledger() == the replayed event log) instead of the pure function — the layer
+    that actually serves the running copilot."""
+    c = TestClient(create_app())
+    host = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_bar"}).json()["instance_id"]
+    region = c.post("/region_ops", json={"op": "add_region", "host_instance": host, "kind": "keep_out",
+                                          "label": "wiring_channel", "x_mm": 0, "y_mm": 0, "z_mm": 0,
+                                          "dx_mm": 10, "dy_mm": 10, "dz_mm": 10}).json()
+    rid = region["region_id"]
+    assert any(r["id"] == rid for r in c.get("/ledger").json()["regions"])
+
+    res = c.post("/instance_ops", json={"op": "remove_instance", "instance_id": host}).json()
+    assert res["removed_region_ids"] == [rid]
+
+    led = c.get("/ledger").json()
+    assert led["regions"] == [], (
+        "cascaded Region must be durably removed from the replayed ledger, not just reported in the "
+        "response"
+    )
+
+    # id-reuse regression: re-adding the same subsystem type reuses the freed id (lowest-free) — the
+    # stale region must NOT silently re-attach to this new, unrelated instance.
+    host2 = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_bar"}).json()["instance_id"]
+    assert host2 == host
+    assert c.get("/ledger").json()["regions"] == []
+
+
+def test_instance_op_remove_cascade_fit_binding_is_durably_persisted_and_does_not_resurrect_on_id_reuse():
+    """Same durable-persistence + id-reuse proof as the region test above, for FitBindings (removed
+    when either connector_instance or host_instance is the removed instance) — R3-test-honesty."""
+    c = TestClient(create_app())
+    post_id = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_post",
+                                             "instance_id": "post1"}).json()["instance_id"]
+    c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "spar_joiner_sleeve",
+                                  "instance_id": "sleeve1"})
+    fit = c.post("/fit_ops", json={"op": "fit_connector", "connector_instance": "sleeve1",
+                                   "host_instance": post_id, "clearance_mm": 0.2}).json()
+    fid = fit["fit_id"]
+    assert any(f["id"] == fid for f in c.get("/ledger").json()["fit_bindings"])
+
+    res = c.post("/instance_ops", json={"op": "remove_instance", "instance_id": post_id}).json()
+    assert res["removed_fit_binding_ids"] == [fid]
+
+    led = c.get("/ledger").json()
+    assert led["fit_bindings"] == [], (
+        "cascaded FitBinding must be durably removed from the replayed ledger, not just reported in "
+        "the response"
+    )
+
+    # id-reuse regression
+    post2 = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "round_post",
+                                          "instance_id": "post1"}).json()
+    assert post2["instance_id"] == post_id
+    assert c.get("/ledger").json()["fit_bindings"] == []
+
+
+def test_instance_op_remove_cascade_join_annotation_via_cascaded_connection_is_durably_persisted():
+    """The one-hop-further cascade: removing an instance cascade-removes its Connections, which in
+    turn cascade-removes any JoinAnnotation attached to those Connections. Proves the SAME
+    durably-persisted + id-reuse-safe guarantee two hops deep, at the REST layer — R3-test-honesty."""
+    c = TestClient(create_app())
+    box = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "enclosure",
+                                        "instance_id": "box"}).json()["instance_id"]
+    # no explicit instance_id for the bracket -- it must get an AUTO id ("lbracket_1") for the
+    # id-reuse regression below to be meaningful (explicit ids are never "reused", only auto ids are)
+    brk = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "lbracket"}).json()["instance_id"]
+    conn = c.post("/connection_ops", json={"op": "add_connection", "a_instance": brk,
+                                            "a_interface": "wall_mount", "b_instance": box,
+                                            "b_interface": "right"}).json()
+    cid = conn["connection_id"]
+    jid = c.post("/join_annotation_ops", json={"op": "add_join_annotation", "connection_id": cid,
+                                               "method": "bolted"}).json()["join_id"]
+    assert any(j["id"] == jid for j in c.get("/ledger").json()["join_annotations"])
+
+    res = c.post("/instance_ops", json={"op": "remove_instance", "instance_id": brk}).json()
+    assert res["removed_connection_ids"] == [cid]
+    assert res["removed_join_annotation_ids"] == [jid]
+
+    led = c.get("/ledger").json()
+    assert led["connections"] == []
+    assert led["join_annotations"] == [], (
+        "cascaded JoinAnnotation (via the cascaded Connection) must be durably removed from the "
+        "replayed ledger, not just reported in the response"
+    )
+
+    # id-reuse regression: both the instance id AND the connection id it re-forms get reused
+    brk2 = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "lbracket"}).json()["instance_id"]
+    assert brk2 == brk
+    conn2 = c.post("/connection_ops", json={"op": "add_connection", "a_instance": brk2,
+                                             "a_interface": "wall_mount", "b_instance": box,
+                                             "b_interface": "right"}).json()
+    assert conn2["connection_id"] == cid
+    assert c.get("/ledger").json()["join_annotations"] == []
+
+
+def test_instance_op_remove_surfaces_scrubbed_wraps_instance_ids(monkeypatch):
+    """2026-08-06 fix (R2 CONFIRMED, low): `scrubbed_wraps_instance_ids` is a SIXTH cascade output
+    `apply_instance_op` computes on remove_instance (packages/ledger/apply.py) — ids of housing
+    instances whose `wraps` (packages/ledger/schema.py::Instance.wraps) just got the removed
+    instance id scrubbed out of it. Unlike its five `removed_*_ids` siblings right next to it in the
+    same REST response (see test_instance_op_remove_surfaces_removed_coupling_and_region_ids above),
+    it was silently never echoed by POST /instance_ops's JSON response, so a caller had no way to
+    learn from the response alone that a housing's `wraps` list was quietly rewritten as a side
+    effect — this is the transport-layer analogue of
+    tests/ledger/test_instance_ops.py::test_remove_instance_scrubs_wraps_and_reused_id_does_not_reattach.
+
+    Sets up the `wraps` precondition via the real /envelope_ops wrap_group route, but with REDIS_URL
+    set (mirrors tests/backend/test_analysis_api.py::
+    test_queued_analyze_records_status_durably_across_the_process_boundary's own "import jobs BEFORE
+    setting REDIS_URL, monkeypatch .send to a no-op" shape) so this test never needs real OCCT/
+    build123d work — `apply_envelope_op`'s `wraps` mutation itself is cheap, ordinary ledger state,
+    entirely separate from the (queued-away-here) derivation compute."""
+    import packages.truth_plane.jobs as jobs_module
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("REDIS_URL", "redis://fake/0")  # makes /envelope_ops take the queued branch
+    monkeypatch.setattr(jobs_module.run_envelope_derivation, "send",
+                        lambda *a, **k: None)  # don't actually enqueue
+
+    c = TestClient(create_app())
+    housing = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "standoff",
+                                             "instance_id": "housing_1"}).json()
+    assert housing["ok"] is True
+    member = c.post("/instance_ops", json={"op": "add_instance", "subsystem_type": "standoff",
+                                            "instance_id": "member_1"}).json()
+    assert member["ok"] is True
+
+    wrapped = c.post("/envelope_ops", json={
+        "op": "wrap_group", "housing_instance": "housing_1", "member_instance_ids": ["member_1"],
+    }).json()
+    assert wrapped["ok"] is True and wrapped["instance"]["wraps"] == ["member_1"]
+    assert c.get("/ledger").json()["instances"]["housing_1"]["wraps"] == ["member_1"]
+
+    res = c.post("/instance_ops", json={"op": "remove_instance", "instance_id": "member_1"}).json()
+    assert res["ok"] is True
+    assert res["scrubbed_wraps_instance_ids"] == ["housing_1"]
+    # unrelated cascade lists stay present-but-empty, never omitted (same shape as the five siblings)
+    assert res["removed_connection_ids"] == []
+    assert res["removed_coupling_ids"] == []
+    assert res["removed_region_ids"] == []
+    assert res["removed_fit_binding_ids"] == []
+    assert res["removed_join_annotation_ids"] == []
+    # 2026-08-06 fix: the scrub now DOES survive a fresh ledger reload/replay, closing the gap the
+    # note above used to document — `create_instance_op`'s remove_instance branch reuses
+    # EventKind.ENVELOPE_WRAPPED (the same event `wrap_group` itself appends) to persist each scrubbed
+    # housing's NEW (post-scrub) `wraps` list, mirroring the five `removed_*_ids` siblings' own
+    # append_*_removed pattern. `GET /ledger` always re-folds from the event log (state.ledger() ==
+    # self.log.fold(...)), so this assertion IS a real durability check, not just a same-request echo.
+    assert c.get("/ledger").json()["instances"]["housing_1"]["wraps"] == []
+
+
+def test_instance_op_clear_transform_succeeds_and_does_not_log_a_removal_event():
+    """The op-type branching fix under test: `clear_transform` must NOT fall into remove_instance's
+    cascade branch (which would log bogus CONNECTION_REMOVED/COUPLING_REMOVED/INSTANCE_REMOVED
+    events for an instance that was never actually removed) — this is the bug a naive `else:
+    <assume remove_instance>` branch would have reintroduced."""
+    app = create_app()
+    c = TestClient(app)
+    added = c.post("/instance_ops", json={
+        "op": "add_instance", "subsystem_type": "standoff", "x_mm": 1.0, "y_mm": 2.0, "z_mm": 3.0,
+    }).json()
+    iid = added["instance_id"]
+    assert added["instance"]["transform"] is not None
+
+    res = c.post("/instance_ops", json={"op": "clear_transform", "instance_id": iid}).json()
+    assert res["ok"] is True
+    assert res["status"] == "APPLIED"
+    assert res["instance"]["transform"] is None
+
+    led = c.get("/ledger").json()
+    assert iid in led["instances"]                       # never removed
+    assert led["instances"][iid]["transform"] is None    # reverted to pure mate-based auto-layout
+
+    from packages.ledger.events import EventKind
+    session = app.state.sessions.only()
+    kinds = [ev.kind for ev in session.log.events()]
+    assert EventKind.INSTANCE_REMOVED not in kinds
+    assert EventKind.CONNECTION_REMOVED not in kinds
+    assert EventKind.COUPLING_REMOVED not in kinds
+
+
+def test_instance_op_clear_transform_unknown_instance_id_rejected():
+    res = _client().post("/instance_ops", json={
+        "op": "clear_transform", "instance_id": "ghost",
+    }).json()
+    assert res["ok"] is False
+    assert res["status"] == "REJECTED"
 
 
 def test_instance_op_move_applies_and_persists_new_transform_with_previous_snapshot():

@@ -128,7 +128,15 @@ def register_subsystem(sub: Subsystem) -> Subsystem:
         return sub.invariants(resolve_namespace(sub, ledger, instance_id))
 
     def _build(ledger, instance_id=None):
-        result = sub.build(resolve_namespace(sub, ledger, instance_id)) if sub.build else None
+        # 2026-08-06 (gearbox-housing-generation initiative Phase 5 / Stage 2): `build_with_ledger`
+        # (packages/subsystems/base.py) is tried FIRST when a subsystem sets it -- None (default) for
+        # every existing subsystem, so the `else` branch below is byte-identical to this closure's
+        # pre-Stage-2 behavior for all ~270 of them.
+        if sub.build_with_ledger is not None:
+            iid = instance_id if instance_id is not None else ledger.root_id
+            result = sub.build_with_ledger(ledger, iid, resolve_namespace(sub, ledger, iid))
+        else:
+            result = sub.build(resolve_namespace(sub, ledger, instance_id)) if sub.build else None
         if result is None:
             return None
         inst = ledger.instances.get(instance_id or ledger.root_id)
@@ -524,7 +532,15 @@ from packages.subsystems import rail_mount_assembly as _rail_mount_assembly  # n
 # spar_joiner_sleeve's round-family Stage 0 proof (packages/subsystems/fit.py / base.py::FitSocketSpec).
 from packages.subsystems import box_sleeve as _box_sleeve  # noqa: E402, F401
 
-# Real involute spur gear (2026-08-01) -- actual meshing teeth via py_gearworks, exercises the
+# Real involute gear (2026-08-01, helical support added 2026-08-05) -- actual meshing teeth via
+# py_gearworks, straight (spur) or genuinely helical (helix_angle_deg), exercises the
 # cylinder_axis_mesh_interface / resolve_mesh_mate center-distance math. See spur_gear.py's module
 # docstring for cited formulas and the fea_eligible=False rationale.
 from packages.subsystems import spur_gear as _spur_gear  # noqa: E402, F401
+
+# Derived Housing (2026-08-06, gearbox-housing-generation initiative Phase 5 / Stage 1) -- a housing
+# shell DERIVED from the real convex hull of a wrapped group of instances (envelope_socket + Phase 2's
+# compute_envelope), never an independently-guessed box. See derived_housing.py's own module docstring
+# for the full design rationale (including why this stage builds from the derived hull EXTENTS rather
+# than the literal hull facets).
+from packages.subsystems import derived_housing as _derived_housing  # noqa: E402, F401
