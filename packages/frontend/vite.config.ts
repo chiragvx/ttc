@@ -32,6 +32,14 @@ export default defineConfig({
       // join_annotation_ops/region_ops incidents above (this is the THIRD time): a new backend route
       // (/model_capabilities, vision-in-the-loop) shipped without being added here.
       "/model_capabilities": "http://localhost:8001",
+      // 2026-08-06 — same silent-404 gap, FOURTH time: /envelope_ops and /envelope/status
+      // (gearbox-housing-generation initiative, Phase 3) shipped without being added here — caught
+      // live post-restart: GET /envelope_ops through the proxy returned 200 (the SPA index.html
+      // fallback for an unmatched path), not the expected 405 Method Not Allowed a real proxied
+      // POST-only route gives on GET, meaning the whole Phase 4/5 chat-UI wiring was unreachable in
+      // local dev despite being fully correct server-side and in every test.
+      "/envelope_ops": "http://localhost:8001",
+      "/envelope": "http://localhost:8001",
       "/files": "http://localhost:8001",
       "/telemetry": "http://localhost:8001",
       "/requirements": "http://localhost:8001",
