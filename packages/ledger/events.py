@@ -60,6 +60,15 @@ class EventKind(str, Enum):
                                                 # Instance.wraps, "same posture FitBinding already has")
     ENVELOPE_UNWRAPPED = "ENVELOPE_UNWRAPPED"  # a housing instance's `wraps` list was CLEARED back to
                                                 # [] (EnvelopeOp.unwrap_group)
+    GENERATED_SUBSYSTEM_ATTEMPT = "GENERATED_SUBSYSTEM_ATTEMPT"  # a durable per-project POINTER
+                                                # (attempt_id/sha256/subsystem_name/model/outcome only)
+                                                # to one row in the CROSS-PROJECT
+                                                # packages/truth_plane/generated_subsystem_store.py
+                                                # corpus (Phase 2, AI-generated-custom-geometry
+                                                # initiative, 2026-08-06) -- same "pointer, not blob"
+                                                # shape as DERIVATION, and given the exact same
+                                                # treatment below: excluded from FACT_KINDS, skipped in
+                                                # replay() ("rehydrated by hash, never recomputed").
 
 
 FACT_KINDS = {
@@ -152,8 +161,11 @@ def replay(
     GENESIS event once `initial` is already set."""
     ledger: MasterParametricLedger | None = initial
     for ev in events:
-        if ev.kind is EventKind.DERIVATION:
-            continue  # rehydrated by hash, never recomputed
+        if ev.kind in (EventKind.DERIVATION, EventKind.GENERATED_SUBSYSTEM_ATTEMPT):
+            continue  # rehydrated by hash, never recomputed -- GENERATED_SUBSYSTEM_ATTEMPT's own real
+                      # row lives in the cross-project GenerationAttemptStore, not folded ledger state;
+                      # this event is nothing more than a durable pointer to it (see EventKind's own
+                      # comment above and append_generated_subsystem_attempt below)
         if ev.kind is EventKind.GENESIS:
             ledger = MasterParametricLedger.model_validate(ev.payload["ledger"])
         elif ev.kind is EventKind.PARAMETER_MUTATION:
@@ -566,6 +578,22 @@ class BaseEventLog(ABC):
         self._put_artifact(sha, content)
         return self._append(EventKind.DERIVATION,
                             {"artifact_kind": artifact_kind, "sha256": sha, "fingerprint": fingerprint}, actor, ts)
+
+    def append_generated_subsystem_attempt(
+        self, attempt_id: str, sha256: str, subsystem_name: str, model: str, outcome: str,
+        actor: str, ts: str,
+    ) -> Event:
+        """FACT-ADJACENT pointer event, mirroring `append_derivation`'s own "pointer, not blob" shape
+        exactly: the full `GenerationAttempt` row (code blob, sandbox stdout/stderr, params, ...) lives
+        in the CROSS-PROJECT `packages/truth_plane/generated_subsystem_store.py::GenerationAttemptStore`
+        -- this method does NOT write there itself (that's a separate call the later registration-gate
+        phase makes) -- it only appends THIS project's own small, durable, hash-chained pointer to that
+        row. Excluded from FACT_KINDS and skipped in `replay()` (see that function's DERIVATION-
+        mirroring branch) -- "rehydrated by hash, never recomputed", never folded into ledger state."""
+        return self._append(EventKind.GENERATED_SUBSYSTEM_ATTEMPT, {
+            "attempt_id": attempt_id, "sha256": sha256, "subsystem_name": subsystem_name,
+            "model": model, "outcome": outcome,
+        }, actor, ts)
 
     def get_artifact(self, sha256: str) -> bytes | None:
         return self._get_artifact(sha256)

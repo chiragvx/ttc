@@ -379,7 +379,7 @@ def test_chat_survives_an_unhandled_exception_mid_stream(monkeypatch):
     stream_chat itself didn't anticipate."""
     import packages.agents.openrouter_provider as orp_module
 
-    def broken_stream_chat(self, *, messages, ledger_json):
+    def broken_stream_chat(self, *, messages, ledger_json, project_id=None):
         yield ("token", "partial reply...")
         raise RuntimeError("simulated unexpected bug deep in stream_chat")
 
@@ -395,6 +395,108 @@ def test_chat_survives_an_unhandled_exception_mid_stream(monkeypatch):
     # the error frame must come before done, and both must actually be present (not just anywhere
     # in an arbitrary byte soup) -- a crude but real ordering check via string position.
     assert text.index('"type": "error"') < text.index('"type": "done"')
+
+
+# --- custom_geometry: /chat's SSE forward + ledger pointer write for propose_custom_geometry -----
+# R3 CONFIRMED (Phase 5, 2026-08-06, HIGH): nothing anywhere exercised the `/chat` route's
+# `elif kind == "custom_geometry":` branch -- neither the SSE forward nor the
+# `state.log.append_generated_subsystem_attempt(...)` ledger write, individually or together. These
+# mirror test_research_injection.py's "mock stream_chat directly, assert on res.text" pattern for the
+# SSE half, and test_instance_op_clear_transform_succeeds_and_does_not_log_a_removal_event's own
+# `app.state.sessions.only().log.events()` idiom for the ledger-write half.
+
+
+def test_chat_dispatches_an_accepted_custom_geometry_event_and_appends_ledger_pointer(monkeypatch):
+    from packages.ledger.events import EventKind
+    from packages.subsystems.generated_registration import RegistrationResult
+
+    result = RegistrationResult(
+        accepted=True, outcome="registered", subsystem_name="finned_heat_spreader",
+        attempt_id="attempt-123", rejected_floor=None, rejection_reason=None,
+        sandbox_status="OK", volume_mm3=1234.5, bbox_mm=((0.0, 0.0, 0.0), (10.0, 10.0, 10.0)),
+        model="deepseek/deepseek-chat", sha256="a" * 64,
+    )
+
+    def fake_stream_chat(self, *, messages, ledger_json, project_id=None):
+        yield "custom_geometry", result
+        yield "done", None
+
+    monkeypatch.setattr(
+        "packages.agents.openrouter_provider.OpenRouterDeltaProvider.stream_chat", fake_stream_chat,
+    )
+
+    app = create_app()
+    c = TestClient(app)
+    res = c.post("/chat", json={"messages": [{"role": "user", "content": "make a heat spreader"}],
+                                 "api_key": "x"})
+    assert res.status_code == 200
+    text = res.text
+
+    # -- SSE forward half --
+    assert '"type": "custom_geometry"' in text
+    assert '"accepted": true' in text
+    assert '"outcome": "registered"' in text
+    assert '"subsystem_name": "finned_heat_spreader"' in text
+    assert '"attempt_id": "attempt-123"' in text
+    assert '"rejected_floor": null' in text
+    assert '"rejection_reason": null' in text
+    assert '"volume_mm3": 1234.5' in text
+    assert '"type": "done"' in text
+
+    # -- ledger-write half: a real GENERATED_SUBSYSTEM_ATTEMPT pointer event, durably appended --
+    session = app.state.sessions.only()
+    matches = [ev for ev in session.log.events() if ev.kind == EventKind.GENERATED_SUBSYSTEM_ATTEMPT]
+    assert len(matches) == 1
+    ev = matches[0]
+    assert ev.payload["attempt_id"] == "attempt-123"
+    assert ev.payload["sha256"] == "a" * 64
+    assert ev.payload["subsystem_name"] == "finned_heat_spreader"
+    assert ev.payload["model"] == "deepseek/deepseek-chat"
+    assert ev.payload["outcome"] == "registered"
+    assert ev.actor == "ai:deepseek/deepseek-chat"
+
+
+def test_chat_dispatches_a_rejected_custom_geometry_event_without_a_ledger_write(monkeypatch):
+    from packages.ledger.events import EventKind
+    from packages.subsystems.generated_registration import RegistrationResult
+
+    result = RegistrationResult(
+        accepted=False, outcome="rejected", subsystem_name="",
+        attempt_id="attempt-456", rejected_floor="ast_denylist",
+        rejection_reason="disallowed import: os", sandbox_status=None,
+        volume_mm3=None, bbox_mm=None, model="deepseek/deepseek-chat", sha256="b" * 64,
+    )
+
+    def fake_stream_chat(self, *, messages, ledger_json, project_id=None):
+        yield "custom_geometry", result
+        yield "done", None
+
+    monkeypatch.setattr(
+        "packages.agents.openrouter_provider.OpenRouterDeltaProvider.stream_chat", fake_stream_chat,
+    )
+
+    app = create_app()
+    c = TestClient(app)
+    res = c.post("/chat", json={"messages": [{"role": "user", "content": "make something sketchy"}],
+                                 "api_key": "x"})
+    assert res.status_code == 200
+    text = res.text
+
+    # -- SSE forward half: a rejection is still forwarded, honestly, not swallowed --
+    assert '"type": "custom_geometry"' in text
+    assert '"accepted": false' in text
+    assert '"outcome": "rejected"' in text
+    assert '"attempt_id": "attempt-456"' in text
+    assert '"rejected_floor": "ast_denylist"' in text
+    assert '"rejection_reason": "disallowed import: os"' in text
+
+    # -- ledger-write half: a REJECTED candidate must NOT get a per-project ledger pointer --
+    # (register_generated_subsystem's own store.put(...) already durably records the rejected
+    # attempt in the cross-project corpus; only an ACCEPTED candidate earns a project-local
+    # GENERATED_SUBSYSTEM_ATTEMPT pointer event, per app.py's own kind == "custom_geometry" branch)
+    session = app.state.sessions.only()
+    matches = [ev for ev in session.log.events() if ev.kind == EventKind.GENERATED_SUBSYSTEM_ATTEMPT]
+    assert matches == []
 
 
 @pytest.mark.needs_kernel
@@ -501,7 +603,7 @@ def test_chat_proposal_includes_feature_ops(monkeypatch):
     2026-07-04), serialized the same way (`[fo.model_dump(mode='json') ...]`)."""
     from packages.ledger.deltas import DeltaProposal, FeatureOp
 
-    def fake_stream_chat(self, *, messages, ledger_json):
+    def fake_stream_chat(self, *, messages, ledger_json, project_id=None):
         yield "proposal", DeltaProposal(
             feature_ops=[FeatureOp(op="add_feature", instance_id="root", kind="hole",
                                    shape="circle", dia_mm=5.0, through=True)]
@@ -591,7 +693,7 @@ def test_chat_proposal_includes_instance_ops(monkeypatch):
     serialized the same way (`[io.model_dump(mode='json') ...]`)."""
     from packages.ledger.deltas import DeltaProposal, InstanceOp
 
-    def fake_stream_chat(self, *, messages, ledger_json):
+    def fake_stream_chat(self, *, messages, ledger_json, project_id=None):
         yield "proposal", DeltaProposal(
             instance_ops=[InstanceOp(op="add_instance", subsystem_type="enclosure")]
         )
@@ -616,7 +718,7 @@ def test_chat_proposal_includes_region_ops(monkeypatch):
     frontend, whose ChatEvent["proposal"] type and Chat.tsx both already expect this key)."""
     from packages.ledger.deltas import DeltaProposal, RegionOp
 
-    def fake_stream_chat(self, *, messages, ledger_json):
+    def fake_stream_chat(self, *, messages, ledger_json, project_id=None):
         yield "proposal", DeltaProposal(
             region_ops=[RegionOp(op="add_region", host_instance="root", kind="keep_out",
                                   label="battery_pack_reserve", x_mm=-15, y_mm=-10, z_mm=0,
@@ -645,7 +747,7 @@ def test_chat_proposal_includes_envelope_ops(monkeypatch):
     `test_chat_proposal_includes_region_ops` above exactly, one field over."""
     from packages.ledger.deltas import DeltaProposal, EnvelopeOp
 
-    def fake_stream_chat(self, *, messages, ledger_json):
+    def fake_stream_chat(self, *, messages, ledger_json, project_id=None):
         yield "proposal", DeltaProposal(
             envelope_ops=[EnvelopeOp(op="wrap_group", housing_instance="housing_1",
                                       member_instance_ids=["gear_1", "gear_2"])]

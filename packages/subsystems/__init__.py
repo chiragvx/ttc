@@ -11,7 +11,11 @@ The prompt builder + geometry endpoints pull from here — no other file changes
 
 from __future__ import annotations
 
+import importlib.util
+import logging
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
 # NEW-STYLE (Phase A) — the scalable model. Existing subsystems keep using SubsystemContext below
@@ -37,6 +41,8 @@ from packages.subsystems.base import (
 
 if TYPE_CHECKING:
     from packages.ledger.schema import MasterParametricLedger
+
+logger = logging.getLogger(__name__)
 
 
 def _no_invariants(ledger: "MasterParametricLedger") -> list[str]:
@@ -117,7 +123,26 @@ def register_subsystem(sub: Subsystem) -> Subsystem:
     `_check`/`_build`/`_volume` all accept an optional trailing `instance_id` (default None ->
     `ledger.root_id`) so the SAME registered subsystem can be resolved against ANY instance in the
     tree — the foundation the Item 3 outliner (multiple independently-editable instances) builds on.
-    Every pre-existing call site that passes just `ledger` is unaffected."""
+    Every pre-existing call site that passes just `ledger` is unaffected.
+
+    Collision handling (2026-08-06, AI-generated-custom-geometry initiative Phase 0 fix): while
+    `_discovering_generated` is True (i.e. this call is happening from inside
+    `_discover_generated_subsystems()`'s `exec_module` of a file under `packages/subsystems/generated/`)
+    AND `sub.name` already names a registered subsystem, the registration is REJECTED — logged and
+    skipped, the existing entry is left untouched — instead of silently overwriting it. This is what
+    actually makes true the claim (this module previously only asserted it in a comment, with no code
+    behind it) that a hand-authored catalog subsystem always wins a same-name collision against a
+    generated one. Ordinary catalog registration (the ~271 hardcoded imports below, where
+    `_discovering_generated` is False) is completely unaffected — first-time registration of any name,
+    including one a generated file failed to claim, always succeeds."""
+    if _discovering_generated and sub.name in SUBSYSTEM_REGISTRY:
+        logger.warning(
+            "generated subsystem %r collides with an already-registered subsystem name -- "
+            "keeping the existing definition, ignoring the generated one",
+            sub.name,
+        )
+        return sub
+
     from packages.subsystems.base import geometry_paths as _geometry_paths
     from packages.subsystems.base import resolve_namespace, seed_ledger_geometry
     from packages.subsystems.cut_features import apply_cut_features, swept_volume_mm3
@@ -210,6 +235,78 @@ def remove_instance(ledger: "MasterParametricLedger", instance_id: str) -> "Mast
     new_instances = dict(ledger.instances)
     del new_instances[instance_id]
     return ledger.model_copy(update={"instances": new_instances})
+
+
+# AI-generated-custom-geometry initiative, Phase 0 (2026-08-06) -- discovery for
+# packages/subsystems/generated/ (see that directory's own README.md). Registering a NEW Subsystem at
+# runtime (a plain register_subsystem() call) already works immediately WITHIN the same process --
+# known_subsystem_types is rebuilt fresh from SUBSYSTEM_REGISTRY on every single POST /instance_ops
+# request (packages/transport/app.py), never cached at startup. What's actually missing is
+# PERSISTENCE: the real catalog's durability today is the ~271 hardcoded
+# `from packages.subsystems import X as _X` side-effect-import lines above -- there is no directory
+# scan anywhere else in this codebase. This function is that scan, for exactly one directory: an
+# AI-generated file dropped in packages/subsystems/generated/ registers itself here on every fresh
+# process, the same way a hand-authored catalog file registers itself via the imports above.
+_GENERATED_SUBSYSTEMS_DIR = Path(__file__).resolve().parent / "generated"
+
+# True only while _discover_generated_subsystems() is inside a generated file's own exec_module() —
+# lets register_subsystem() tell "an ordinary catalog file is registering itself" (always allowed)
+# apart from "a generated file is registering itself" (rejected if the name collides with something
+# already registered). See register_subsystem()'s docstring for the full rationale.
+_discovering_generated = False
+
+
+def _discover_generated_subsystems(directory: Optional[Path] = None) -> None:
+    """Import every `.py` file directly under packages/subsystems/generated/ (skipping non-`.py`
+    files such as that directory's README.md) so each one runs its own trailing `register_subsystem()`
+    call, exactly like the ~271 hardcoded imports above do for the hand-authored catalog.
+
+    A generated file is NOT part of this package's own static import graph -- it has no stable dotted
+    module name known in advance -- so this uses `importlib.util.spec_from_file_location` /
+    `module_from_spec` / `exec_module` (never a plain `import` statement) with a synthetic module name
+    derived from the filename, unique enough to avoid colliding with anything already in
+    `sys.modules`.
+
+    Each file's import is wrapped in its OWN `try/except Exception` (logged, mirroring
+    `packages/transport/app.py::_rest_error_guard`'s broad-catch/log/degrade-gracefully posture) --
+    one broken generated file must never crash server startup, and must never prevent any OTHER valid
+    file in the directory from loading.
+
+    Called ONCE, after every hardcoded import above (never inserted among them), so a hand-authored
+    catalog subsystem always wins a same-name collision: while this function is inside a generated
+    file's exec_module(), `_discovering_generated` is True, and `register_subsystem()` rejects
+    (logs + skips, leaves the existing entry untouched) any name that's already registered -- this is
+    real enforcement, not just import ordering, so it also protects a name a hand-authored catalog
+    file registers via `register_subsystem()` directly (not just the SubsystemContext-based ones).
+    Defense in depth only; Phase 3 of this initiative independently prevents a NEW collision from
+    ever being written to disk.
+
+    `directory` is overridable purely for tests; production callers always take the default (the real
+    packages/subsystems/generated/), which may not exist yet -- that, and an existing-but-empty
+    directory, are both handled as an ordinary no-op: no crash, no log line.
+    """
+    global _discovering_generated
+    target = _GENERATED_SUBSYSTEMS_DIR if directory is None else directory
+    if not target.is_dir():
+        return  # nothing generated yet -- not an error
+    for path in sorted(target.glob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        module_name = f"packages.subsystems.generated._{path.stem}"
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"no import spec for generated subsystem file {path.name!r}")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            _discovering_generated = True
+            try:
+                spec.loader.exec_module(module)
+            finally:
+                _discovering_generated = False
+        except Exception:
+            logger.exception("generated subsystem file %r failed to load -- skipping", path.name)
+            sys.modules.pop(module_name, None)
 
 
 # Phase F composition helpers — re-exported for composite subsystems' build functions.
@@ -544,3 +641,9 @@ from packages.subsystems import spur_gear as _spur_gear  # noqa: E402, F401
 # for the full design rationale (including why this stage builds from the derived hull EXTENTS rather
 # than the literal hull facets).
 from packages.subsystems import derived_housing as _derived_housing  # noqa: E402, F401
+
+# AI-generated-custom-geometry initiative, Phase 0 (2026-08-06) -- runs LAST, after every hardcoded
+# import above, so a hand-authored catalog subsystem always wins a name collision (see
+# _discover_generated_subsystems's own docstring above for the full rationale). Do not insert any
+# future hardcoded import below this line -- add it above, alongside the rest of the catalog.
+_discover_generated_subsystems()

@@ -29,7 +29,7 @@ def test_chat_dispatches_a_research_event_yielded_by_stream_chat(monkeypatch):
         source_urls=["https://example.com/laptop-stand"],
     )
 
-    def fake_stream_chat(self, *, messages, ledger_json):
+    def fake_stream_chat(self, *, messages, ledger_json, project_id=None):
         yield "research", finding
         yield "done", None
 
@@ -49,7 +49,7 @@ def test_chat_dispatches_a_research_event_yielded_by_stream_chat(monkeypatch):
 def test_chat_never_yields_research_when_stream_chat_yields_none(monkeypatch):
     # stream_chat itself now owns the decision (via its own tool loop) -- /chat has nothing left to
     # gate; this just confirms the dispatch loop doesn't fabricate an event that was never yielded.
-    def fake_stream_chat(self, *, messages, ledger_json):
+    def fake_stream_chat(self, *, messages, ledger_json, project_id=None):
         yield "done", None
 
     monkeypatch.setattr(

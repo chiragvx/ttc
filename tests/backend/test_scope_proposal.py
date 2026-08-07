@@ -161,7 +161,7 @@ def test_chat_proposal_includes_scope_proposal(monkeypatch):
     (`payload.scope_proposal.model_dump(mode="json")`) — see packages/transport/app.py's `/chat`."""
     from packages.ledger.deltas import InstanceOp
 
-    def fake_stream_chat(self, *, messages, ledger_json):
+    def fake_stream_chat(self, *, messages, ledger_json, project_id=None):
         yield "proposal", DeltaProposal(
             instance_ops=[InstanceOp(op="add_instance", subsystem_type="standoff_frame")],
             scope_proposal=_drone_manifest(),
@@ -185,7 +185,7 @@ def test_chat_proposal_scope_proposal_none_is_explicit_null_not_omitted(monkeypa
     """When the LLM doesn't emit a scope_proposal, app.py's `... if payload.scope_proposal else None`
     must still produce an explicit `"scope_proposal": null` key in the SSE event JSON — not omit the
     key, and not crash. Read app.py's actual code before assuming which behavior it has."""
-    def fake_stream_chat(self, *, messages, ledger_json):
+    def fake_stream_chat(self, *, messages, ledger_json, project_id=None):
         yield "proposal", DeltaProposal(feature_ops=[])
         yield "done", None
 

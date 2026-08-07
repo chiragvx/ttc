@@ -17,8 +17,19 @@ import logging
 import os
 import time
 
+from packages.agents.custom_geometry_provider import (
+    GeneratedSubsystemCandidateArgs,
+    custom_geometry_enabled,
+    custom_geometry_tool_schema,
+)
 from packages.agents.llm_provider import LLMProvider
 from packages.agents.prompt_builder import build_system_prompt_from_json
+from packages.agents.read_subsystem_provider import (
+    SubsystemSourceQuery,
+    read_subsystem_source,
+    read_subsystem_source_enabled,
+    read_subsystem_source_tool_schema,
+)
 from packages.agents.research_provider import (
     ResearchFinding,
     ResearchQuery,
@@ -35,10 +46,25 @@ _FN_NAME = "propose_parameter_delta"
 # deterministic pre-turn heuristic — see stream_chat's docstring and research_provider.py's module
 # docstring for why. Offered as a second tool ALONGSIDE _FN_NAME only when a vendor is configured.
 _RESEARCH_FN_NAME = "research_reference"
-# 1 initial completion + at most 1 continuation once the model has a research result in hand — a
-# hard cap, not configurable, so a model that keeps asking to research can never turn one chat turn
-# into an unbounded chain of completion requests.
-_MAX_RESEARCH_ROUNDS = 2
+# The model's OWN decision to read an EXISTING catalog subsystem's real build123d source before
+# writing/deciding something new (Phase 4, 2026-08-06) — see read_subsystem_provider.py's module
+# docstring. Offered as a further tool ALONGSIDE _FN_NAME (and _RESEARCH_FN_NAME, when configured)
+# whenever read_subsystem_source_enabled() is true (default-on — see that function's own docstring).
+_READ_SUBSYSTEM_SOURCE_FN_NAME = "read_subsystem_source"
+# The model's OWN decision to write genuinely NEW build123d geometry as a permanent catalog subsystem,
+# via Phase 3's registration gate (Phase 5, 2026-08-06) — see custom_geometry_provider.py's module
+# docstring. Offered as a further tool ALONGSIDE the others whenever custom_geometry_enabled() is true
+# (default-OFF — unlike read_subsystem_source, this has real write/registration consequences).
+_CUSTOM_GEOMETRY_FN_NAME = "propose_custom_geometry"
+# 1 initial completion + up to 3 continuation rounds once the model has a tool result in hand — a hard
+# cap, not configurable, so a model that keeps calling continuation-shaped tools can never turn one
+# chat turn into an unbounded chain of completion requests. Raised from 2 (1 initial + 1 continuation,
+# enough for research_reference alone) to 4 on 2026-08-06 when read_subsystem_source landed alongside
+# it: a realistic "read source, then decide" turn only needs 2, but this is sized for the FOUR-step
+# sequence propose_custom_geometry (Phase 5) realistically needs — read reference source, generate an
+# attempt, react to a build failure, retry once — not padded any further than that named sequence
+# actually requires.
+_MAX_TOOL_ROUNDS = 4
 _DEFAULT_MODEL = "deepseek/deepseek-chat"
 _DEFAULT_BASE = "https://openrouter.ai/api/v1"
 # propose_delta (single-shot delta-emitter, called on slider-release / a chat turn's structured
@@ -289,6 +315,36 @@ def model_supports_vision(model: str, *, get=None) -> bool:
     except Exception as e:
         logger.warning("model_supports_vision: could not resolve vision capability for %r (%s)", model, e)
         return False
+
+
+def _last_user_message_text(conversation: list[dict]) -> str:
+    """The most recent `{"role": "user", ...}` entry's own text content in `conversation`, or `""` if
+    none — used as `GeneratedSubsystemCandidate.user_request_excerpt` context for a
+    `propose_custom_geometry` call (Phase 5), so a later human reviewer of the generation-attempt
+    corpus can see what the user actually asked for. `content` is usually a plain string, but a
+    vision-in-the-loop turn (`judge_image`'s own content-list shape) can carry a list of `{"type",
+    "text"/"image_url"}` parts instead — only the text parts are joined; an image part contributes
+    nothing here (there is no text to excerpt from it). Never raises: a malformed/unexpected
+    `content` shape just falls through to `""`, same as "no user message found" — this is context for
+    a human review field, not something worth failing a registration attempt over.
+
+    Deliberately does NOT truncate — `GenerationAttempt.user_request_excerpt`'s own field validator
+    (`packages/truth_plane/generated_subsystem_store.py`) already caps this at
+    `MAX_REQUEST_EXCERPT_CHARS`; re-implementing that cap here would just be a second, possibly
+    inconsistent source of truth for the same limit."""
+    for msg in reversed(conversation):
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return " ".join(
+                part.get("text", "") for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+        return ""
+    return ""
 
 
 class OpenRouterDeltaProvider(LLMProvider):
@@ -548,26 +604,193 @@ class OpenRouterDeltaProvider(LLMProvider):
             return None
         return get_research_provider().research(query.query)
 
-    def stream_chat(self, *, messages: list[dict], ledger_json: str):
+    def _execute_read_subsystem_source(self, arguments: str) -> str:
+        """Parse one `read_subsystem_source` tool call's arguments and resolve the named subsystem's
+        real source via `read_subsystem_provider.read_subsystem_source` — same shape as
+        `_execute_research` just above, one required string field, no multi-candidate JSON recovery
+        needed. Malformed JSON here is a genuinely different failure than an unknown subsystem name
+        (that one already gets its own clear "not found" string from `read_subsystem_source` itself)
+        — it means the tool CALL itself was malformed, so it gets its own clear string rather than
+        silently dropping the call the way `_execute_research` drops to `None` (there is no
+        "inconclusive" state here worth threading through the dispatch below — every continuation
+        tool result here is always a concrete string). Never raises."""
+        try:
+            query = SubsystemSourceQuery.model_validate_json(arguments)
+        except Exception:
+            return "The subsystem name argument for this tool call could not be parsed."
+        return read_subsystem_source(query.subsystem_name)
+
+    def _execute_custom_geometry(
+        self, arguments: str, *, project_id: str | None, user_request_excerpt: str,
+        store=None, generated_dir=None,
+    ) -> "object":
+        """Parse one `propose_custom_geometry` tool call's arguments and run it through Phase 3's
+        registration gate (`register_generated_subsystem`). NEVER raises — malformed JSON (or JSON
+        that doesn't match `GeneratedSubsystemCandidateArgs`, e.g. a model that tried to smuggle a
+        caller-supplied `model`/`project_id` field into its own tool-call JSON — see
+        `custom_geometry_provider.py`'s module docstring) becomes a rejected-with-clear-reason
+        `RegistrationResult`-shaped response instead, same "never raise" contract every other handler
+        in this file already follows (see `_execute_read_subsystem_source` for the identical
+        malformed-JSON pattern this mirrors).
+
+        `project_id` is `stream_chat`'s own optional parameter — `None` (any caller that hasn't
+        started passing a real one yet) is handled explicitly here, never propagated as a literal
+        `"None"` string, matching `GeneratedSubsystemCandidate.project_id`'s own plain `str` type.
+        `store`/`generated_dir` are test-only passthroughs (mirror Phase 3's own
+        `register_generated_subsystem(store=..., generated_dir=...)` test-injection knobs exactly —
+        see `generated_registration.py`'s own test suite) — both default to the real thing
+        (`generation_attempt_store_from_env()` / `packages/subsystems/generated/`) when not supplied,
+        so no production call site ever needs to pass either.
+
+        Deliberately calls `register_generated_subsystem()` with NO `event_log` — this provider stays
+        ledger-agnostic (it doesn't own a project's `EventLog`); the per-project ledger pointer append
+        is `packages/transport/app.py`'s `/chat` route's own responsibility, the one place that
+        actually has `state.log` in scope — see this module's own imports (no `packages.ledger.events`
+        beyond what `DeltaProposal` already needs) and `generated_registration.py`'s own module
+        docstring for why `event_log` is optional on `register_generated_subsystem` in the first
+        place."""
+        # Lazy import (mirrors `_execute_read_subsystem_source`'s own `from packages.subsystems import
+        # get_subsystem_model` inside the function body, not at module top): `generated_registration`
+        # transitively pulls in `packages.subsystems` and `packages.truth_plane`, both far heavier than
+        # anything else this file needs at import time, and this codebase's established convention
+        # (read_subsystem_provider.py) is to keep that weight out of the module-level import graph.
+        from packages.subsystems.generated_registration import (
+            GeneratedParamSpec, GeneratedSubsystemCandidate, RegistrationResult,
+            register_generated_subsystem,
+        )
+        from packages.truth_plane.generated_subsystem_store import generation_attempt_store_from_env
+
+        try:
+            args = GeneratedSubsystemCandidateArgs.model_validate_json(arguments)
+        except Exception as e:
+            return RegistrationResult(
+                accepted=False, outcome="rejected", subsystem_name="", attempt_id="",
+                rejected_floor="malformed_tool_call",
+                rejection_reason=(
+                    f"the propose_custom_geometry tool call arguments could not be parsed: {e}"),
+                model=self.model,
+            )
+        candidate = GeneratedSubsystemCandidate(
+            subsystem_name=args.subsystem_name,
+            description=args.description,
+            build_code=args.build_code,
+            params=[GeneratedParamSpec(**p.model_dump()) for p in args.params],
+            model=self.model,
+            project_id=project_id or "",
+            user_request_excerpt=user_request_excerpt,
+        )
+        resolved_store = store if store is not None else generation_attempt_store_from_env()
+        return register_generated_subsystem(
+            candidate, store=resolved_store, generated_dir=generated_dir)
+
+    def _handle_custom_geometry_tool_call(
+        self, arguments: str, *, project_id: str | None = None, user_request_excerpt: str = "",
+    ) -> "tuple[dict, tuple[str, object] | None]":
+        """`propose_custom_geometry`'s own continuation-dispatch handler — same 1-arg dispatch shape
+        as `_handle_research_tool_call`/`_handle_read_subsystem_source_tool_call` when called with
+        just `arguments` (both keyword-only extras default so this method itself satisfies that
+        signature), but it needs CALL-SCOPED context (`project_id`, the user's own most recent
+        message) those two don't — `stream_chat` registers a small closure over THIS method (built
+        inside `stream_chat` itself, capturing `project_id`/`conversation` — see the "CALL-SCOPED
+        CONTEXT" note on the dispatch block below) as the actual `continuation_handlers` entry, never
+        this method directly.
+
+        Returns a small JSON-serializable dict (not the raw dataclass — `RegistrationResult` isn't
+        JSON-serializable via plain `json.dumps` on its own) as the tool-result content fed back to the
+        model, PLUS the full `RegistrationResult` in the event tuple for `stream_chat`'s own caller
+        (`app.py`'s `/chat` route) to use for the real per-project ledger pointer append."""
+        result = self._execute_custom_geometry(
+            arguments, project_id=project_id, user_request_excerpt=user_request_excerpt)
+        content = {
+            "accepted": result.accepted, "outcome": result.outcome,
+            "subsystem_name": result.subsystem_name,
+            "rejected_floor": result.rejected_floor, "rejection_reason": result.rejection_reason,
+        }
+        return content, ("custom_geometry", result)
+
+    # -- continuation-shaped tool dispatch (generalized 2026-08-06, Phase 4) --------------------
+    # Each handler here takes one tool call's raw `arguments` string and returns
+    # `(tool_result_content, event)`: `tool_result_content` is JSON-serialized verbatim into the
+    # `{"role": "tool", ...}` message fed back to the model; `event` is an OPTIONAL `(kind, payload)`
+    # pair yielded to stream_chat's own caller for live display (`research_reference` surfaces a
+    # `('research', ResearchFinding)` event this way; `read_subsystem_source` has no display-worthy
+    # event of its own — its source text only ever needs to reach the MODEL, not the UI — so it
+    # always returns `None` here). This is the seam a LATER phase's `propose_custom_geometry`
+    # continuation handler plugs into without touching the round loop itself — see
+    # `stream_chat`'s own docstring for the generalized round-loop contract this feeds.
+    #
+    # SHARED CONTRACT, part of this dispatch shape itself (not just each handler's own docstring):
+    # a handler must NEVER raise. `_execute_research` and `_execute_read_subsystem_source` each
+    # already document this individually, but it applies to every entry in `continuation_handlers`,
+    # including any a later phase adds (e.g. `propose_custom_geometry`'s sandboxed build, a real
+    # failure mode with real ways to raise) — the dispatch loop in `stream_chat` below also catches
+    # a handler that breaks this rule as defense-in-depth, but that is a coarser, generic message;
+    # a well-behaved handler that reports its OWN failure as a normal tool-result string keeps the
+    # specific, actionable error this file otherwise guarantees for every failure class.
+    #
+    # CALL-SCOPED CONTEXT BEYOND `arguments` (2026-08-06 repair — R3 CONFIRMED, low): this dispatch
+    # shape is deliberately fixed at `(arguments: str) -> (dict, event|None)` and is NOT meant to grow
+    # more positional parameters as later phases add handlers — that would mean touching the shared
+    # `continuation_handlers[tc["name"]](tc["arguments"])` call site (and the round loop around it)
+    # every time a new handler wants something extra, exactly the "second loop refactor" this
+    # generalization exists to avoid. `_handle_research_tool_call` and
+    # `_handle_read_subsystem_source_tool_call` are already BOUND methods — registered below as
+    # `self._handle_research_tool_call`, not free functions — so `self` (and therefore `self.model`)
+    # is already reachable from every handler with zero signature change. A handler that needs MORE
+    # than that (conversation history, `project_id`, the user's own message — e.g. a later
+    # `propose_custom_geometry` handler building a candidate, per spicy-exploring-cupcake.md Phase 5)
+    # gets it the same way every other per-tool difference in this method already exists: as a
+    # closure/lambda built HERE, inside `stream_chat`, at the point it's added to
+    # `continuation_handlers` — mirroring the `if research_provider_configured(): ...` /
+    # `if read_subsystem_source_enabled(): ...` blocks below, which already vary per-tool without
+    # touching the round loop itself. `conversation` and `ledger_json` are already local to
+    # `stream_chat` and closeable-over today; `project_id` was NOT — `stream_chat` never received it
+    # at all — so it's now an optional `stream_chat` parameter (see its own docstring) specifically so
+    # a future closure has something to capture. Nothing in THIS phase reads it; it's plumbing, not
+    # behavior, and the round loop's control flow is untouched by adding it.
+    def _handle_research_tool_call(self, arguments: str) -> "tuple[dict, tuple[str, object] | None]":
+        finding = self._execute_research(arguments)
+        if finding is not None:
+            return finding.model_dump(mode="json"), ("research", finding)
+        return {"note": "no reference results found for this query"}, None
+
+    def _handle_read_subsystem_source_tool_call(self, arguments: str) -> "tuple[dict, tuple[str, object] | None]":
+        return {"source": self._execute_read_subsystem_source(arguments)}, None
+
+    def stream_chat(self, *, messages: list[dict], ledger_json: str, project_id: str | None = None):
         """Yield ('token', text), ('research', ResearchFinding) — at most once per research tool
         call, only when a vendor is configured — then ('proposal', DeltaProposal), then
         ('done', None) — or ('error', msg). The model produces prose AND an optional
         propose_parameter_delta call.
 
-        Runs a BOUNDED (`_MAX_RESEARCH_ROUNDS`) multi-round tool loop (2026-08-01) — the first
-        genuinely agentic loop in this codebase (a tool result fed back into a second completion
-        request), replacing a deterministic pre-turn heuristic that used to decide research
-        unconditionally, with no model judgment at all. If the model calls `research_reference`
-        ALONE (no propose_parameter_delta in the same round), the result is fed back as a tool
-        message and the model gets ONE more completion to actually use it. If it calls BOTH in the
-        same round, that round is treated as final — propose_parameter_delta is self-contained (the
-        model already decided without waiting), and it has no natural "tool result" to feed back
-        anyway: it's applied CLIENT-side, asynchronously, long after this response finishes, so it
-        must never be the reason this loop tries to continue. The conversation built for a
-        continuation round is entirely EPHEMERAL to this one call — `Chat.tsx` already collapses
-        every historical turn back into plain `{role, content}` text before resending, so these raw
-        assistant/tool-call/tool-result messages never need to stay protocol-valid across separate
-        `/chat` requests, only within this one.
+        `project_id` (2026-08-06 repair — R3 CONFIRMED, low; consumed starting Phase 5, same day) is
+        optional, keyword-only, additive call-scoped context — `app.py`'s `/chat` route now passes its
+        real `state.file_id` here; every OTHER existing caller (`eval_graph.py`, every `stream_chat`
+        test that doesn't pass it) is unaffected by the default of `None`, handled explicitly by
+        `_execute_custom_geometry` (`project_id or ""`) rather than propagated as a literal `"None"`
+        string. Only `propose_custom_geometry`'s own handler reads it today (see the "CALL-SCOPED
+        CONTEXT" note on the dispatch block above `_handle_research_tool_call`, and the
+        `custom_geometry_enabled()` block below) — every other continuation handler still ignores it.
+
+        Runs a BOUNDED (`_MAX_TOOL_ROUNDS`) multi-round tool loop (2026-08-01, generalized
+        2026-08-06) — the first genuinely agentic loop in this codebase (a tool result fed back into
+        a further completion request), replacing a deterministic pre-turn heuristic that used to
+        decide research unconditionally, with no model judgment at all. Every CONTINUATION-shaped
+        tool (currently `research_reference`, `read_subsystem_source`, and `propose_custom_geometry`
+        — see the `continuation_handlers` dict built below, a `{tool_name: handler}` dispatch — never
+        a new hardcoded branch here) works the same way: if the model calls ONE OR MORE of them ALONE
+        (no `propose_parameter_delta` in the same round) and rounds remain, every result is fed back as
+        its own tool message and the model gets one more completion to actually use them. If it
+        calls a continuation tool AND `propose_parameter_delta` in the SAME round, that round is
+        still treated as final — `propose_parameter_delta` (`_FN_NAME`) is the ONE hardcoded terminal
+        tool name, completely separate from the continuation dispatch: it's self-contained (the model
+        already decided without waiting) and has no natural "tool result" to feed back anyway — it's
+        applied CLIENT-side, asynchronously, long after this response finishes, so it must never be
+        the reason this loop tries to continue. The conversation built for a continuation round is
+        entirely EPHEMERAL to this one call — `Chat.tsx` already collapses every historical turn back
+        into plain `{role, content}` text before resending, so these raw assistant/tool-call/
+        tool-result messages never need to stay protocol-valid across separate `/chat` requests, only
+        within this one.
 
         Never silently empty end-to-end (see FIX 1 in the investigation this responds to): a
         malformed tool-call JSON, a truncated completion, or a turn that produced neither prose nor
@@ -577,9 +800,9 @@ class OpenRouterDeltaProvider(LLMProvider):
             yield ("error", "OPENROUTER_API_KEY is not set")
             return
         # Strict/plain variants of the propose_parameter_delta tool ONLY (same fallback rationale as
-        # propose_delta — see its own comment) — the research_reference tool, when offered, is added
-        # UNCHANGED and identical to both lists, out of scope for this fix (a much smaller schema,
-        # not implicated in the reported failure).
+        # propose_delta — see its own comment) — every CONTINUATION-shaped tool below, when offered,
+        # is added UNCHANGED and identical to both lists, out of scope for this fix (much smaller
+        # schemas, not implicated in the reported failure).
         description = "Emit parameter deltas or request clarification."
         plain_delta_schema = parameter_delta_tool_schema()
         plain_tools = [{"type": "function", "function": {
@@ -587,6 +810,12 @@ class OpenRouterDeltaProvider(LLMProvider):
         strict_tools = [{"type": "function", "function": {
             "name": _FN_NAME, "description": description,
             "parameters": _strict_schema(plain_delta_schema), "strict": True}}]
+        # {tool_name: handler} — every CONTINUATION-shaped tool actually offered this call (gated the
+        # SAME way its own entry below is added to plain_tools/strict_tools). propose_parameter_delta
+        # (_FN_NAME) deliberately has NO entry here — it stays the one hardcoded terminal tool name,
+        # checked separately below. A later phase's propose_custom_geometry continuation handler adds
+        # a third entry to this dict, never a new branch in the round loop itself.
+        continuation_handlers: dict = {}
         if research_provider_configured():
             research_tool = {"type": "function", "function": {
                 "name": _RESEARCH_FN_NAME,
@@ -600,13 +829,64 @@ class OpenRouterDeltaProvider(LLMProvider):
                 "parameters": research_tool_schema()}}
             plain_tools.append(research_tool)
             strict_tools.append(research_tool)
+            continuation_handlers[_RESEARCH_FN_NAME] = self._handle_research_tool_call
+        if read_subsystem_source_enabled():
+            read_source_tool = {"type": "function", "function": {
+                "name": _READ_SUBSYSTEM_SOURCE_FN_NAME,
+                "description": (
+                    "Read an EXISTING, already-registered catalog subsystem's own build123d source "
+                    "code as a concrete reference before writing or deciding something new — e.g. "
+                    "see how lofted_spindle builds a loft before reasoning about a similarly-lofted "
+                    "shape. Call this ALONE (no propose_parameter_delta in the same turn) when you "
+                    "want to see the real source before deciding what to build — it comes back as a "
+                    "tool result and you get one more turn to use it."),
+                "parameters": read_subsystem_source_tool_schema()}}
+            plain_tools.append(read_source_tool)
+            strict_tools.append(read_source_tool)
+            continuation_handlers[_READ_SUBSYSTEM_SOURCE_FN_NAME] = self._handle_read_subsystem_source_tool_call
+        if custom_geometry_enabled():
+            custom_geometry_tool = {"type": "function", "function": {
+                "name": _CUSTOM_GEOMETRY_FN_NAME,
+                "description": (
+                    "LAST RESORT: write and register genuinely NEW build123d geometry as a permanent "
+                    "catalog subsystem, for a shape the existing catalog (and composing existing "
+                    "parts via packages/subsystems/compose.py) genuinely cannot build. Check the "
+                    "catalog you were given, and consider composition, BEFORE reaching for this. Call "
+                    "this ALONE (no propose_parameter_delta in the same turn) so you see the "
+                    "registration outcome before deciding what to do next — it comes back as a tool "
+                    "result and you get one more turn to react to it. A rejected candidate is not a "
+                    "crash: read rejection_reason and either fix build_code and try again, or fall "
+                    "back to an existing catalog part instead. Only on ACCEPTANCE does the new type "
+                    "become usable — placing an instance of it is a SEPARATE, later "
+                    "propose_parameter_delta add_instance call, not part of this one."),
+                "parameters": custom_geometry_tool_schema()}}
+            plain_tools.append(custom_geometry_tool)
+            strict_tools.append(custom_geometry_tool)
+            # This tool needs CALL-SCOPED context (`project_id`, the user's own most recent message)
+            # that `_handle_custom_geometry_tool_call` itself can't close over — it's a plain bound
+            # method with keyword-only defaults, not a per-call closure (see its own docstring). Built
+            # HERE, at the point it's added to `continuation_handlers`, exactly per the "CALL-SCOPED
+            # CONTEXT" note above `_handle_research_tool_call` — the shared
+            # `continuation_handlers[tc["name"]](tc["arguments"])` call site a few dozen lines down
+            # still only ever passes one positional `arguments` string; this closure absorbs the rest.
+            # `messages` (not the round-loop's evolving `conversation`) is used deliberately: the
+            # user's ORIGINAL most recent message is the request this generation attempt is FOR,
+            # computed once, not re-derived from whatever assistant/tool-call scaffolding a
+            # continuation round may have appended to `conversation` by the time this fires.
+            _custom_geometry_user_excerpt = _last_user_message_text(messages)
+
+            def _custom_geometry_handler(arguments: str) -> "tuple[dict, tuple[str, object] | None]":
+                return self._handle_custom_geometry_tool_call(
+                    arguments, project_id=project_id, user_request_excerpt=_custom_geometry_user_excerpt)
+
+            continuation_handlers[_CUSTOM_GEOMETRY_FN_NAME] = _custom_geometry_handler
         stable_prompt = build_system_prompt_from_json(ledger_json)
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         conversation = list(messages)
         tool_args: dict[int, str] = {}
         saw_token = False
         finish_reason: str | None = None
-        for round_num in range(_MAX_RESEARCH_ROUNDS):
+        for round_num in range(_MAX_TOOL_ROUNDS):
             round_messages = [{"role": "system",
                                 "content": f"{stable_prompt}\n\n## Current ledger\n{ledger_json}"}] \
                               + conversation
@@ -631,27 +911,49 @@ class OpenRouterDeltaProvider(LLMProvider):
             round_tool_calls: dict[int, dict] = out["tool_calls"]
             if out["finish_reason"]:
                 finish_reason = out["finish_reason"]
-            research_calls = [tc for tc in round_tool_calls.values()
-                               if (tc["name"] or _FN_NAME) == _RESEARCH_FN_NAME]
+            # Generic dispatch (2026-08-06) over `continuation_handlers` — ANY tool call whose name
+            # is a key in that dict is a continuation-shaped call, regardless of how many distinct
+            # such tools are offered this turn. `tc["name"]` is guaranteed truthy for every entry that
+            # matches here: a falsy name falls back to `_FN_NAME` (never a continuation_handlers key,
+            # since propose_parameter_delta is deliberately excluded from that dict), so the `or
+            # _FN_NAME` fallback below can only ever resolve the PROPOSE classification, never hide a
+            # missing continuation-tool name.
+            continuation_calls = [tc for tc in round_tool_calls.values()
+                                   if (tc["name"] or _FN_NAME) in continuation_handlers]
             propose_calls = {idx: tc["arguments"] for idx, tc in round_tool_calls.items()
                               if (tc["name"] or _FN_NAME) == _FN_NAME}
             tool_result_messages = []
-            for tc in research_calls:
-                finding = self._execute_research(tc["arguments"])
-                if finding is not None:
-                    yield ("research", finding)
+            for tc in continuation_calls:
+                # Defense-in-depth (see the "SHARED CONTRACT" note on the dispatch block above): every
+                # handler currently here already promises never to raise, but this loop must not
+                # silently trust that forever — a future continuation handler (e.g.
+                # propose_custom_geometry's sandboxed build) that lets a genuine exception through
+                # would otherwise break out of this generator uncaught, bypassing the explicit
+                # ('error', ...) + ('done', None) contract stream_chat's own docstring guarantees and
+                # falling through to app.py's much coarser route-level backstop instead.
+                try:
+                    content, event = continuation_handlers[tc["name"]](tc["arguments"])
+                except Exception as e:
+                    logger.warning("stream_chat: continuation handler %r raised (%s) — this violates "
+                                    "the handler's own 'never raise' contract; treating it as a normal "
+                                    "stream error instead of letting it propagate uncaught",
+                                    tc["name"], e)
+                    yield ("error", f"the {tc['name']} tool call failed unexpectedly: {e}")
+                    yield ("done", None)
+                    return
+                if event is not None:
+                    yield event
                 tool_result_messages.append({
                     "role": "tool", "tool_call_id": tc["id"],
-                    "content": json.dumps(finding.model_dump(mode="json") if finding is not None
-                                           else {"note": "no reference results found for this query"}),
+                    "content": json.dumps(content),
                 })
             tool_args = propose_calls  # this round's propose calls are authoritative either way
-            more_rounds_allowed = round_num < _MAX_RESEARCH_ROUNDS - 1
-            if research_calls and not propose_calls and more_rounds_allowed:
+            more_rounds_allowed = round_num < _MAX_TOOL_ROUNDS - 1
+            if continuation_calls and not propose_calls and more_rounds_allowed:
                 assistant_tool_calls = [
                     {"id": tc["id"], "type": "function",
-                     "function": {"name": tc["name"] or _RESEARCH_FN_NAME, "arguments": tc["arguments"]}}
-                    for tc in research_calls
+                     "function": {"name": tc["name"], "arguments": tc["arguments"]}}
+                    for tc in continuation_calls
                 ]
                 conversation = conversation + [
                     {"role": "assistant", "content": None, "tool_calls": assistant_tool_calls},

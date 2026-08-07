@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 
+from packages.agents.custom_geometry_provider import custom_geometry_enabled
 from packages.agents.research_provider import research_provider_configured
 from packages.couplings import RELATION_REGISTRY
 from packages.disciplines import active_discipline_fragments
@@ -734,6 +735,47 @@ actually works. A `scope_proposal` (below) with an honest `open_questions`/`out_
 the right place to say this.\
 """
 
+_CUSTOM_GEOMETRY_TOOL_SECTION = """\
+## Writing genuinely new geometry — the `propose_custom_geometry` tool (LAST RESORT — check the \
+catalog and composition FIRST)
+
+You have a `propose_custom_geometry` tool that writes and registers brand-new build123d geometry as a \
+permanent catalog subsystem. Before ever reaching for it, check TWO things, in order:
+1. The "Part types" menu above — does an EXISTING catalog type already build this shape, maybe with \
+unfamiliar params? A shape-match you haven't spotted yet is not a reason to write new code.
+2. Composition (`packages/subsystems/compose.py`'s `call`/`place`/`place_polar`/`compose` helpers) — \
+can a small assembly of EXISTING part types, positioned together, build this? See the \
+"instance_ops"/decomposition guidance above for the same judgment call at the assembly level.
+Only reach for `propose_custom_geometry` when the answer to both is genuinely no — a shape nothing \
+existing can build or compose into. This is the same posture as `research_reference` above: a real \
+tool for a real gap, not a routine extra step.
+
+**Call it ALONE** — with no `propose_parameter_delta` in the same turn — so you see the registration \
+outcome (accepted, or rejected with a reason) before deciding what to do next; it comes back as a tool \
+result and you get one more turn to react to it.
+
+A rejection is not a crash. Read `rejection_reason` and either fix `build_code` and try again, or fall \
+back to an existing catalog part and say so — never silently give up with no reply, and never retry the \
+same rejected `build_code` unchanged in a loop.
+
+**MANDATORY, PLAIN DISCLOSURE — this is the single most important sentence in this whole section, do \
+not bury it.** If, in the SAME TURN a `propose_custom_geometry` call is ACCEPTED, you also place an \
+instance of the newly-registered type (an `add_instance` naming that type), your reply to the user MUST \
+say PLAINLY that this is AI-generated, unreviewed geometry — name the part specifically, e.g. "I wrote \
+and registered a new custom part, `finned_heat_spreader`, since nothing in the catalog could build this \
+shape — its geometry hasn't been engineering-reviewed and has no safety/FS verification yet." NEVER let \
+a reply describing a freshly-generated part read the same as it would for an ordinary, already-reviewed \
+catalog part — a generated part silently reading as an ordinary catalog part is exactly the failure this \
+rule exists to prevent, the same register as the "SAY SO PLAINLY" mismatch-disclosure rule above for \
+`research_reference`.
+
+Every generated subsystem registers with `fea_eligible=False` — honestly, always, with no exception \
+(the same posture `spur_gear`/`lofted_spindle` already carry for a real but unvalidated shape family). \
+Say this plainly too whenever it's relevant (a safety/load question, an `/analyze` request): a generated \
+part's FS is "unknown" and blocks export like any other missing safety input — never imply a generated \
+part has been safety-verified just because it now exists in the catalog and renders like any other part.\
+"""
+
 _SCOPE_PROPOSAL_SECTION = """\
 ## Summarizing a big/ambiguous ask — `scope_proposal` (ADDITIVE, NOT a gate)
 
@@ -1322,6 +1364,11 @@ def build_system_prompt(subsystem_ctx: SubsystemContext | None, ledger: MasterPa
         # describing an unavailable tool would just be confusing, unlike the old design's mid-
         # conversation message which was harmless to mention even when it never actually appeared.
         sections.append(_RESEARCH_TOOL_SECTION)
+    if custom_geometry_enabled():
+        # Same reasoning as the research gate immediately above: no point describing a tool the model
+        # isn't actually being offered this run (stream_chat only adds `propose_custom_geometry` to
+        # `tools` under the same `custom_geometry_enabled()` gate, packages/agents/openrouter_provider.py).
+        sections.append(_CUSTOM_GEOMETRY_TOOL_SECTION)
     sections.append(_SCOPE_PROPOSAL_SECTION)
     sections.append(_FEATURE_OPS_SECTION)
     if ledger.instances:

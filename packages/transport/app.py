@@ -2603,12 +2603,45 @@ def create_app() -> FastAPI:
             # `research_provider_configured()`) and the model decides whether to call it. This
             # handler just forwards whatever `stream_chat` yields — see its own docstring for the
             # bounded multi-round tool loop that replaced the old deterministic pre-turn heuristic.
+            # project_id=state.project_id (Phase 5, 2026-08-06): `state` is the `_SessionProxy` — a
+            # SESSION can hold multiple files (FileState), so `state` has no `.file_id` of its own;
+            # `SessionState.project_id` is the property that already exists for exactly this purpose
+            # ("the ACTIVE file's id", see its own docstring a few dozen lines up) — confirmed by
+            # reading the real SessionState class, not assumed. See stream_chat's own docstring for who
+            # reads it (only the propose_custom_geometry continuation handler, when that tool is
+            # enabled; every other caller/handler ignores it).
             try:
-                for kind, payload in provider.stream_chat(messages=messages, ledger_json=ledger_json):
+                for kind, payload in provider.stream_chat(
+                        messages=messages, ledger_json=ledger_json, project_id=state.project_id):
                     if kind == "token":
                         yield _sse({"type": "token", "text": payload})
                     elif kind == "research":
                         yield _sse({"type": "research", **payload.model_dump(mode="json")})
+                    elif kind == "custom_geometry":
+                        # Phase 5 (2026-08-06): the ONE place that performs the real per-project ledger
+                        # pointer append for an accepted propose_custom_geometry call — the provider
+                        # itself (`openrouter_provider.py`) stays ledger-agnostic and never calls
+                        # `state.log` (see `_execute_custom_geometry`'s own docstring: it calls
+                        # `register_generated_subsystem()` with NO `event_log`). Unlike "research"
+                        # (pure display, no ledger write), this is also a real write — but only for an
+                        # ACCEPTED candidate: a rejected attempt is already durably recorded in the
+                        # cross-project generation-attempt corpus by `register_generated_subsystem`
+                        # itself (via `store.put(...)`, unconditionally, regardless of outcome) — this
+                        # project's own small hash-chained pointer only needs to exist for a candidate
+                        # that actually became a real, permanent catalog subsystem.
+                        if payload.accepted:
+                            state.log.append_generated_subsystem_attempt(
+                                attempt_id=payload.attempt_id, sha256=payload.sha256,
+                                subsystem_name=payload.subsystem_name, model=payload.model,
+                                outcome=payload.outcome, actor=f"ai:{payload.model}", ts=_TS,
+                            )
+                        yield _sse({"type": "custom_geometry",
+                                    "accepted": payload.accepted, "outcome": payload.outcome,
+                                    "subsystem_name": payload.subsystem_name,
+                                    "attempt_id": payload.attempt_id,
+                                    "rejected_floor": payload.rejected_floor,
+                                    "rejection_reason": payload.rejection_reason,
+                                    "volume_mm3": payload.volume_mm3, "bbox_mm": payload.bbox_mm})
                     elif kind == "proposal":
                         yield _sse({"type": "proposal",
                                     "deltas": [d.model_dump(mode="json") for d in payload.deltas],

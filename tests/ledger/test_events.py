@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from packages.ledger.deltas import ParameterDelta
-from packages.ledger.events import Event, EventLog
+from packages.ledger.events import FACT_KINDS, Event, EventKind, EventLog
 from packages.ledger.parameter import LockState, ParameterDef
 from packages.ledger.schema import Instance, ReviewState, Transform
 
@@ -101,6 +101,65 @@ def test_derivations_do_not_affect_replay_state(base_ledger):
     assert before == after
     assert after["derived"]["factor_of_safety"] is None  # replay never trusts a derivation as state
     assert log.get_artifact(ev.payload["sha256"]) == b'{"factor_of_safety": 4.05}'
+
+
+def test_generated_subsystem_attempt_does_not_affect_replay_state(base_ledger):
+    """Mirrors test_derivations_do_not_affect_replay_state exactly, for the new pointer EventKind:
+    GENERATED_SUBSYSTEM_ATTEMPT gets the SAME 'rehydrated by hash, never recomputed' treatment as
+    DERIVATION -- its own real row lives in the cross-project GenerationAttemptStore, not folded
+    ledger state."""
+    log = _log_with_history(base_ledger)
+    before = log.fold().model_dump()
+    ev = log.append_generated_subsystem_attempt(
+        attempt_id="att_1", sha256="deadbeef" * 8, subsystem_name="custom_bracket_v1",
+        model="anthropic/claude-sonnet-4.5", outcome="registered", actor="ai:anthropic/claude-sonnet-4.5",
+        ts=TS,
+    )
+    after = log.fold().model_dump()
+    assert before == after
+    assert ev.kind is EventKind.GENERATED_SUBSYSTEM_ATTEMPT
+    assert ev.payload == {
+        "attempt_id": "att_1", "sha256": "deadbeef" * 8, "subsystem_name": "custom_bracket_v1",
+        "model": "anthropic/claude-sonnet-4.5", "outcome": "registered",
+    }
+
+
+def test_generated_subsystem_attempt_is_excluded_from_fact_kinds():
+    assert EventKind.GENERATED_SUBSYSTEM_ATTEMPT not in FACT_KINDS
+
+
+def test_generated_subsystem_attempt_preserves_chain_and_history(base_ledger):
+    """A fresh EventLog with a GENERATED_SUBSYSTEM_ATTEMPT event appended still verifies its hash
+    chain, and prior/subsequent FACT history around it survives fold() untouched -- same
+    'incremental history' proof the other new-EventKind tests in this file give their own kind."""
+    log = EventLog()
+    log.append_genesis(base_ledger, actor="system", ts=TS)
+    log.append_mutation(ParameterDelta(target_node=SKIN, requested_value=3.5), actor="ai", ts=TS)
+    log.append_generated_subsystem_attempt(
+        attempt_id="att_2", sha256="cafebabe" * 8, subsystem_name="custom_gear_v2",
+        model="openrouter/some-model", outcome="rejected", actor="ai:openrouter/some-model", ts=TS,
+    )
+    log.append_mutation(ParameterDelta(target_node=SKIN, requested_value=4.5), actor="ai", ts=TS)
+
+    assert log.verify_chain() is True
+    led = log.fold()
+    assert led.instances["root"].params["skin_thickness_mm"].value == 4.5
+
+
+def test_generated_subsystem_attempt_payload_round_trips_through_strict_event_model(base_ledger):
+    """Event has extra='forbid'; confirm the GENERATED_SUBSYSTEM_ATTEMPT payload shape survives a
+    model_dump/model_validate round trip untouched, mirroring the instance-event round-trip tests."""
+    log = EventLog()
+    log.append_genesis(base_ledger, actor="system", ts=TS)
+    ev = log.append_generated_subsystem_attempt(
+        attempt_id="att_3", sha256="0123abcd" * 8, subsystem_name="custom_standoff_v1",
+        model="openrouter/some-model", outcome="registered", actor="ai:openrouter/some-model", ts=TS,
+    )
+
+    round_tripped = Event.model_validate(ev.model_dump())
+    assert round_tripped == ev
+    round_tripped_json = Event.model_validate_json(ev.model_dump_json())
+    assert round_tripped_json == ev
 
 
 def test_instance_added_is_incremental_history(base_ledger):

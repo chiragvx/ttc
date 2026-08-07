@@ -33,7 +33,8 @@ class SandboxResult:
 
 def run_sandboxed(code: str, *, wall_clock_s: float = 2.0, mem_limit_mb: int | None = 512) -> SandboxResult:
     """Run `code` in a fresh, isolated Python process; kill it (process group) if it exceeds the
-    wall-clock deadline. Returns a typed result — never raises on a runaway child."""
+    wall-clock deadline. Returns a typed result — never raises, whether the child runs away (killed on
+    the wall-clock deadline) or the OS refuses to even start it (see the `Popen` try/except below)."""
     preexec = None
     if os.name == "posix":
         def preexec():  # noqa: E306 - defined only on posix
@@ -45,11 +46,28 @@ def run_sandboxed(code: str, *, wall_clock_s: float = 2.0, mem_limit_mb: int | N
 
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     start = time.monotonic()
-    proc = subprocess.Popen(
-        [sys.executable, "-I", "-c", code],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        preexec_fn=preexec, creationflags=creationflags,
-    )
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-c", code],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            preexec_fn=preexec, creationflags=creationflags,
+        )
+    except OSError as exc:
+        # `code` (and, one level up, the base64-inflated candidate build_code + params it embeds) is
+        # passed as ONE command-line argument (`-c <code>`). Once that argument exceeds the OS's
+        # command-line length limit, Popen itself raises before any process exists to communicate with
+        # or kill -- confirmed live on Windows: `FileNotFoundError: [WinError 206] The filename or
+        # extension is too long` (a OSError subclass) for a ~31KB `code` string. The POSIX analogue is
+        # `OSError: [Errno 7] Argument list too long` (E2BIG) once ARG_MAX is exceeded -- same
+        # exception family, same failure point. Left uncaught, this propagated straight out of
+        # `run_sandboxed` (and from there, out of `sandbox_build_and_validate`), breaking both
+        # functions' own documented "never raises" guarantees. Typed exactly like every other failure
+        # this function reports: a `SandboxResult`, never a raised exception.
+        return SandboxResult(
+            status="ERROR", returncode=None, stdout="",
+            stderr=f"{type(exc).__name__}: {exc}",
+            killed=False, elapsed_s=time.monotonic() - start,
+        )
     killed = False
     try:
         out, err = proc.communicate(timeout=wall_clock_s)
